@@ -1,0 +1,26 @@
+###############################################################
+# Syntax coloring map for RS485_Anemometer
+###############################################################
+
+###############################################################
+# Data types (KEYWORD1)
+###############################################################
+RS485_Anemometer	KEYWORD1
+
+###############################################################
+# Methods and Functions (KEYWORD2)
+###############################################################
+begin	KEYWORD2
+update	KEYWORD2
+setAngleOffsetDeg	KEYWORD2
+setSpeedOffsetMps	KEYWORD2
+getWindSpeedMps	KEYWORD2
+getWindLevel	KEYWORD2
+getWindAngleDeg	KEYWORD2
+getWindDirText	KEYWORD2
+getReading	KEYWORD2
+hasReading	KEYWORD2
+
+###############################################################
+# Constants (LITERAL1)
+###############################################################
