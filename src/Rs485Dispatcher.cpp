@@ -1612,13 +1612,14 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     int32_t maxCount = 72 - start;
     if (count > maxCount) count = maxCount;
 
+    // Schritt 7.3: += mit Integer statt String(v) pro Bin (weniger Heap/CPU, schnelleres ACK).
     String payload;
     payload.reserve(16 + (uint32_t)count * 7);
-    payload += String(dir);
+    payload += (int)dir;
     payload += ";";
-    payload += String(start);
+    payload += (int)start;
     payload += ";";
-    payload += String(count);
+    payload += (int)count;
 
     for (int32_t i = 0; i < count; i++) {
       payload += ";";
@@ -1626,16 +1627,16 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
 
       if (which == 0) {
         const uint16_t v = _loadMon->getCalBin((uint8_t)dir, idx);
-        payload += String(v);
+        payload += (unsigned int)v;
       } else if (which == 1) {
         const uint16_t v = _loadMon->getLiveBin((uint8_t)dir, idx);
-        payload += String(v);
+        payload += (unsigned int)v;
       } else if (which == 2) {
         const uint16_t v = _loadMon->getAccBin((uint8_t)dir, idx);
-        payload += String(v);
+        payload += (unsigned int)v;
       } else {
         const int16_t v = _loadMon->getDeltaPct((uint8_t)dir, idx);
-        payload += String(v);
+        payload += (int)v;
       }
     }
 
