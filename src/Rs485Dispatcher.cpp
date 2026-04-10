@@ -1,6 +1,7 @@
 #include "Rs485Dispatcher.h"
 
 #include <math.h>
+#include <cstring>
 #include <Preferences.h>
 
 // Vorwaertsdeklarationen (werden in dieser Datei spaeter definiert)
@@ -280,6 +281,44 @@ static int32_t parseI32Param(const String& p) {
   s.trim();
   if (s.length() == 0) return 0;
   return (int32_t)strtol(s.c_str(), nullptr, 10);
+}
+
+// int32 aus [start,end) ohne String-Allokation (trim nur an den Raendern).
+static int32_t parseI32Span(const char* start, const char* end) {
+  while (start < end && (*start == ' ' || *start == '\t')) start++;
+  while (end > start && (end[-1] == ' ' || end[-1] == '\t')) end--;
+  if (start >= end) return 0;
+  size_t n = (size_t)(end - start);
+  if (n > 15) n = 15;
+  char buf[16];
+  memcpy(buf, start, n);
+  buf[n] = '\0';
+  return (int32_t)strtol(buf, nullptr, 10);
+}
+
+// Drei durch ';' getrennte int32 (GET*BINS: DIR;START;COUNT) — kein substring/trim-Kopieren.
+static bool parseSemiColon3I32Params(const String& in, int32_t& a, int32_t& b, int32_t& c) {
+  const char* s = in.c_str();
+  const size_t len = in.length();
+  size_t lo = 0;
+  size_t hi = len;
+  while (lo < hi && (s[lo] == ' ' || s[lo] == '\t')) lo++;
+  while (hi > lo && (s[hi - 1] == ' ' || s[hi - 1] == '\t')) hi--;
+  if (lo >= hi) return false;
+
+  const char* p = s + lo;
+  const size_t n = hi - lo;
+  const char* semi1 = (const char*)memchr(p, ';', n);
+  if (!semi1) return false;
+  const size_t rest = (size_t)(p + n - (semi1 + 1));
+  const char* semi2 = (const char*)memchr(semi1 + 1, ';', rest);
+  if (!semi2) return false;
+
+  const char* end = p + n;
+  a = parseI32Span(p, semi1);
+  b = parseI32Span(semi1 + 1, semi2);
+  c = parseI32Span(semi2 + 1, end);
+  return true;
 }
 
 static uint8_t parseU8Param(const String& p) {
@@ -1562,26 +1601,6 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   //   - CAL/LIVE: Strom in mV
   //   - DELTA: Prozent (int), kann negativ sein
   // ------------------------------------------------------------------------
-  auto parseSemi3I32 = [&](const String& in, int32_t& a, int32_t& b, int32_t& c) -> bool {
-    String s = in;
-    s.trim();
-    if (s.length() == 0) return false;
-
-    int p1 = s.indexOf(';');
-    if (p1 < 0) return false;
-    int p2 = s.indexOf(';', p1 + 1);
-    if (p2 < 0) return false;
-
-    String sa = s.substring(0, p1);
-    String sb = s.substring(p1 + 1, p2);
-    String sc = s.substring(p2 + 1);
-
-    a = parseI32Param(sa);
-    b = parseI32Param(sb);
-    c = parseI32Param(sc);
-    return true;
-  };
-
   auto handleBins = [&](const char* cmdName, uint8_t which) {
     // which: 0=cal, 1=live, 2=acc, 3=delta
     if (!_loadMon) {
@@ -1592,7 +1611,7 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     int32_t dir = 0;
     int32_t start = 0;
     int32_t count = 0;
-    if (!parseSemi3I32(f.params, dir, start, count)) {
+    if (!parseSemiColon3I32Params(f.params, dir, start, count)) {
       if (shouldReply) sendNak(f.master, cmdName, "PARAM");
       return;
     }
