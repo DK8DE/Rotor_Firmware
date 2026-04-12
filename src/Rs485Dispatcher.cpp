@@ -66,14 +66,21 @@ void Rs485Dispatcher::begin(Rs485Proto* proto,
 }
 
 void Rs485Dispatcher::update(uint32_t nowMs) {
-  // Holt alle bereits komplett empfangenen Frames aus der RX-Queue
-  // und verarbeitet sie.
-  // Der eigentliche UART-Empfang laeuft jetzt in einem eigenen FreeRTOS-Task
-  // innerhalb von Rs485Proto und ist damit nicht mehr direkt vom loop()-Takt abhaengig.
+  // Holt komplett empfangene Frames aus der RX-Queue (Empfang laeuft im Rs485Proto-RX-Task).
+  //
+  // Ohne Obergrenze: Busflut kann motion.update() verhungern lassen (Regler kommt zu spaet).
+  // Im Leerlauf (keine Positionsfahrt, kein Homing) ist die Regelung billig — dann mehr
+  // Frames pro Pass, damit GET* nicht "haengen bleiben" (Queue wuerde sonst mehrere
+  // Loop-Takte brauchen).
+  const bool motionBusy =
+      (_motion && _motion->isPosActive()) ||
+      (_homing && _homing->isActive()) ||
+      (_loadMon && _loadMon->isCalibrationRunning());
+  const int maxFramesPerPass = motionBusy ? 14 : 64;
   if (!_rs485) return;
 
   Rs485Frame f;
-  while (_rs485->poll(f)) {
+  for (int i = 0; i < maxFramesPerPass && _rs485->poll(f); ++i) {
     onFrame(f, nowMs);
   }
 }

@@ -188,7 +188,8 @@ public:
              TempSensors* temps,
              const Rs485DispatcherConfig& cfg);
 
-  // Pollt RS485 und dispatcht alle anstehenden Frames.
+  // Pollt RS485 und dispatcht anstehende Frames (pro Aufruf begrenzt, damit loop()/Motion
+  // nicht durch Busflut verhungern).
   void update(uint32_t nowMs);
 
   // Optional: Homing-Kick-Retry State-Maschine.

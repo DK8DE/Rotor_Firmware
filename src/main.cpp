@@ -1795,4 +1795,9 @@ if (wantBrake) {
       }
     }
   }
+
+  // RS485 erneut: Telegramme, die waehrend motion/safety/homing eingetroffen sind,
+  // noch in derselben Loop-Runde beantworten. Sonst bestimmt die Loop-Dauer die
+  // ACK-Latenz -> Master-Timeout trotz korrekt empfangenen SETPOSDG.
+  rs485Dispatcher.update(millis());
 }

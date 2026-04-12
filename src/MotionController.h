@@ -212,13 +212,17 @@ private:
   // Zuletzt angewendeter Backlash-Offset (0,01deg). Nur zur Diagnose/Debug.
   int32_t _lastBacklashAppliedDeg01 = 0;
 
+  // |Soll-Ist| beim Setzen des Encoder-Ziels (0,01deg), fuer kurze Hybrid-Fahrten
+  // knapp ueber dem Feinfenster (siehe fineShortHybridMove in update()).
+  int32_t _posInitialAbsErrDeg01 = 0;
+
   // Brems- / Umkehr-Sequenz (Joerg):
   // STOP und Ziel in Gegenrichtung sollen NICHT abrupt stoppen, sondern die gleiche
   // Abbremsrampe nutzen wie am Ende einer normalen Bewegung.
   // Dafuer wird ein virtuelles Bremsziel in aktueller Bewegungsrichtung erzeugt.
   bool _brakeRequest = false;      // wurde ein Brake angefordert (STOP oder Dirchange)?
   bool _brakeActive  = false;      // fahren wir gerade auf das virtuelle Bremsziel?
-  uint8_t _brakeReason = 0;        // 1=STOP, 2=DIRCHANGE
+  uint8_t _brakeReason = 0;        // 1=STOP, 2=DIRCHANGE, 3=RETARGET_CLOSE, 4=DIRCHANGE_CLOSE
   int8_t _brakeDir = 0;            // Richtung der Bremsfahrt (+1/-1)
   uint32_t _brakeIssuedMs = 0;     // Zeitpunkt der Anforderung
   int32_t _brakeTargetDeg01 = 0;   // virtuelles Bremsziel
@@ -305,15 +309,6 @@ uint32_t _brakeHoldStartMs = 0;
   // Feinphase: _motorBrakeRequested bleibt false (keine aktive Zwischenbremse mehr);
   // wird in der INO ausgewertet, falls spaeter wieder genutzt.
   bool _motorBrakeRequested = false;
-
-  // Legacy-Merker (frueher Lead-/Fenbremse und LOW-Zwischenhalt); werden bei Reset/SetPos geloescht.
-  bool _fineBrakeHoldActive = false;
-  uint32_t _fineBrakeHoldStartMs = 0;
-
-  bool _fineLowStopHoldActive = false;
-  uint32_t _fineLowStopHoldStartMs = 0;
-
-  bool _fineLeadBrakeUsed = false;
 
   // ------------------------------------------------------------
   // Grobprofil-Phase: Merker, ob wir gerade im Ramp-Down (Abbremsphase) sind

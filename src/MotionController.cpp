@@ -2,6 +2,11 @@
 
 #include <math.h>
 
+namespace {
+// Muss zu fineShortHybridMove in update() passen: Feinfenster + Rand (0,01deg-Einheiten).
+constexpr int32_t kFineShortHybridExtraDeg01 = 160;
+} // namespace
+
 // ============================================================================
 // Konstruktor
 // ============================================================================
@@ -22,8 +27,15 @@ int32_t MotionController::readBacklashDeg01_() const {
 }
 
 int8_t MotionController::engagedDir_() const {
-  // _lastMoveDirNonZero wird beim Stop gemerkt und entspricht in der Praxis der "eingeklemmten" Flanke.
-  // Wenn wir noch nie gefahren sind, nehmen wir +1 als Default.
+  // Waehrend aktiver Fahrt muss die aktuell wirksame Flanke verwendet werden,
+  // sonst wird OUT<->ENC bei kleinen Richtungswechseln einseitig um backlash
+  // verschoben (typisch: kleine CCW-Schritte laufen deutlich zu weit).
+  if (fabsf(_lastAppliedDuty) > 1.0f) {
+    return (_lastAppliedDuty > 0.0f) ? +1 : -1;
+  }
+  if (_moveDir != 0) return _moveDir;
+
+  // Fallback: zuletzt bekannte, nicht-null Fahrtrichtung.
   if (_lastMoveDirNonZero != 0) return _lastMoveDirNonZero;
   return +1;
 }
@@ -126,6 +138,7 @@ void MotionController::resetControllerState(uint32_t nowMs) {
 
   // Debug: zuletzt angewendete Backlash-Kompensation zuruecksetzen.
   _lastBacklashAppliedDeg01 = 0;
+  _posInitialAbsErrDeg01 = 0;
 
   _brakeRequest = false;
   _brakeActive = false;
@@ -145,13 +158,8 @@ _brakeHoldStartMs = 0;
   _stopPointDeg01 = 0;
   _stopIssuedMs = 0;
 
-  // Feinphase-Bremse/ Hold abbrechen: neues Ziel kommt -> sofort wieder normale Fahrtlogik
+  // Feinphase-Bremse abbrechen: neues Ziel kommt -> normale Fahrtlogik
   _motorBrakeRequested = false;
-  _fineBrakeHoldActive = false;
-  _fineBrakeHoldStartMs = 0;
-  _fineLowStopHoldActive = false;
-  _fineLowStopHoldStartMs = 0;
-  _fineLeadBrakeUsed = false;
   _decelPhaseActive = false;
 
   _kickActive = false;
@@ -179,20 +187,14 @@ _brakeHoldStartMs = 0;
 
   _lastAppliedDuty = 0.0f;
 
-  
-  // PWM-Max sofort auf aktuellen Konfig-Wert setzen (keine Anlauf-Rampe durch SETPWM-Glaettung)
-  _pwmMaxAbsEffective = (_cfg.pwmMaxAbs) ? clampFloat(*_cfg.pwmMaxAbs, 0.0f, 100.0f) : 100.0f;
 _haveMoveBaseline = false;
+  
+  _haveMoveBaseline = false;
   _lastMoveCounts = 0;
   _noMoveSinceMs = nowMs;
 
-  // Feinphase (Creep+Bremse) zuruecksetzen
+  // Feinphase-Zustaende zuruecksetzen
   _motorBrakeRequested = false;
-  _fineBrakeHoldActive = false;
-  _fineBrakeHoldStartMs = 0;
-  _fineLowStopHoldActive = false;
-  _fineLowStopHoldStartMs = 0;
-  _fineLeadBrakeUsed = false;
 
   // Feinphase: Exakt-Nachjustage zuruecksetzen
   _fineExactMode = false;
@@ -472,9 +474,6 @@ void MotionController::commandStopToCurrentPosition(uint32_t nowMs) {
   _kickActive = false;
   // Feinphase-Bremse ggf. abbrechen (STOP hat Vorrang)
   _motorBrakeRequested = false;
-  _fineBrakeHoldActive = false;
-  _fineBrakeHoldStartMs = 0;
-  _fineLeadBrakeUsed = false;
   _fineExactMode = false;
   _fineExactRetryCount = 0;
 
@@ -571,6 +570,17 @@ bool MotionController::commandSetPosDeg01(int32_t tgtDeg01, uint32_t nowMs) {
       _pendingTargetDeg01 = tgtDeg01;
       _pendingSoftStart = false;
 
+      // WICHTIG: Ohne Bremsanforderung bleibt pending nur in der Ankunftslogik des ALTEN
+      // Ziels haengen — bei Fein-Korrektur ohne sauberes inPosTol kommt man nie dort an,
+      // dann werden keine weiteren SETPOSDG mehr umgesetzt. Gleiche Sequenz wie DIRCHANGE.
+      _brakeRequest = true;
+      _brakeActive = false;
+      _brakeHoldActive = false;
+      _brakeHoldStartMs = 0;
+      _brakeReason = 2;
+      _brakeIssuedMs = nowMs;
+      _kickActive = false;
+
       // Timeout neu starten, damit wir beim Ausrollen nicht in ein altes Timeout laufen
       _posStartMs = nowMs;
       return true;
@@ -609,13 +619,14 @@ bool MotionController::commandSetPosDeg01(int32_t tgtDeg01, uint32_t nowMs) {
     // In der Feinphase darf ein neues Ziel in GLEICHER Richtung NICHT wie ein "Start aus Stillstand"
     // behandelt werden, sonst gibt es PWM-Spruenge (Kick/zu schnelle Slew-Rate).
     // Nur bei echter Umkehr (Richtungswechsel) oder wenn wir praktisch stehen, wird "startingFromIdle" gesetzt.
+    //
+    // curDirHint: _moveDir bleibt oft auf der GROB-Richtung, waehrend die Fein-Korrektur schon
+    // mit PWM in die Gegenrichtung laeuft -> immer zuerst Ist-PWM, sonst Fehler zum Ziel.
     int8_t curDirHint = _moveDir;
-    if (curDirHint == 0) {
-      if (fabsf(_lastAppliedDuty) > 1.0f) {
-        curDirHint = (_lastAppliedDuty > 0.0f) ? +1 : -1;
-      } else {
-        curDirHint = (errToOldDeg01 > 0) ? +1 : (errToOldDeg01 < 0 ? -1 : 0);
-      }
+    if (fabsf(_lastAppliedDuty) > 1.0f) {
+      curDirHint = (_lastAppliedDuty > 0.0f) ? +1 : -1;
+    } else if (curDirHint == 0) {
+      curDirHint = (errToOldDeg01 > 0) ? +1 : (errToOldDeg01 < 0 ? -1 : 0);
     }
 
     const int32_t curOutDeg01_hint = encoderDeg01ToOutputDeg01_(curDeg01);
@@ -630,33 +641,36 @@ bool MotionController::commandSetPosDeg01(int32_t tgtDeg01, uint32_t nowMs) {
     }
   }
 
-  // Wenn wir schon fahren und das Ziel gleich bleibt: nur Timeout neu starten
-  if (_posActive && tgtDeg01 == _targetDeg01 && !_brakeActive && !_brakeRequest) {
-    _posStartMs = nowMs;
-    return true;
-  }
-
   // STOP/Brake abbrechen, wenn ein neues Ziel kommt
   // (Joerg: neues Ziel kann Fahrt verlaengern oder aendern)
   _stopPointActive = false;
   _stopPointDeg01 = 0;
   _stopIssuedMs = 0;
 
-  // Feinphase-Bremse/ Hold abbrechen: neues Ziel kommt -> sofort wieder normale Fahrtlogik
+  // Feinphase-Bremse abbrechen: neues Ziel kommt -> normale Fahrtlogik
   _motorBrakeRequested = false;
-  _fineBrakeHoldActive = false;
-  _fineBrakeHoldStartMs = 0;
-  _fineLowStopHoldActive = false;
-  _fineLowStopHoldStartMs = 0;
-  _fineLeadBrakeUsed = false;
 
   // Zielrichtung bestimmen
   // RS485-Ziel ist Abtrieb (OUT). Der Encoder kann ggf. auf der Motorachse liegen.
   const int32_t curOutDeg01 = encoderDeg01ToOutputDeg01_(curDeg01);
   const int32_t errOutDeg01 = computeErrorDeg01(tgtDeg01, curOutDeg01);
   const int8_t desiredDirNew = (errOutDeg01 > 0) ? +1 : (errOutDeg01 < 0 ? -1 : 0);// Aktuelle Bewegungsrichtung bestimmen
+
+  // Gleiches SOLL (RS485 liefert OUT-Grad): _targetDeg01 liegt in Encoder-Koordinate —
+  // direkter Vergleich tgtDeg01 == _targetDeg01 waere falsch (Backlash / Umrechnung).
+  const int32_t currentTargetOutDeg01 = encoderDeg01ToOutputDeg01_(_targetDeg01);
+  if (_posActive && tgtDeg01 == currentTargetOutDeg01 && !_brakeActive && !_brakeRequest) {
+    _posStartMs = nowMs;
+    return true;
+  }
+
+  // Effektive Laufrichtung: nach Grobfahrt bleibt _moveDir oft auf CCW, obwohl die
+  // Fein-Korrektur schon CW-PWM faehrt -> DIRCHANGE/RETARGET/decel-Pfade wuerden falsch
+  // greifen und pending ohne Bremsanforderung haengen bleiben (keine neuen Ziele).
   int8_t curDir = _moveDir;
-  if (curDir == 0) {
+  if (fabsf(_lastAppliedDuty) > 1.0f) {
+    curDir = (_lastAppliedDuty > 0.0f) ? +1 : -1;
+  } else if (curDir == 0) {
     if (fabsf(_speedCmdRampDegPerSec) > 1.0f) {
       curDir = (_speedCmdRampDegPerSec > 0.0f) ? +1 : -1;
     } else if (fabsf(_speedMeasDegPerSec) > 1.0f) {
@@ -730,6 +744,24 @@ if (finalTgt > amax) finalTgt = amax;
 
 // Ziel setzen (interner Regler arbeitet in Encoder-Koordinate)
 _targetDeg01 = finalTgt;
+    {
+      const int32_t e0 = computeErrorDeg01(finalTgt, curDeg01);
+      _posInitialAbsErrDeg01 = (e0 < 0) ? -e0 : e0;
+    }
+
+    // Kurze Fahrten (reine Feinzone oder Hybrid bis fineWin+Extra): kein Aggro-KICK
+    // bis pwmMax. Sonst baut der KICK grosse Winkelgeschwindigkeit auf; nach Ende
+    // des KICKs greift nur noch finePwmAbs -> mechanisch klar uebers Ziel (typ.
+    // 318->316, Log zeigt z.B. ~301 bevor zurueckgeregelt wird).
+    {
+      int32_t fineWinKick = (_cfg.fineWindowDeg01) ? (*_cfg.fineWindowDeg01) : 0;
+      if (fineWinKick < 0) fineWinKick = -fineWinKick;
+      if (fineWinKick > 0 &&
+          _posInitialAbsErrDeg01 <= fineWinKick + kFineShortHybridExtraDeg01) {
+        _kickActive = false;
+        _kickSoftMode = false;
+      }
+    }
 
     // Brake/Pending loeschen
     _brakeRequest = false;
@@ -756,8 +788,18 @@ _brakeHoldStartMs = 0;
 
 _brakeHoldActive = false;
 _brakeHoldStartMs = 0;
-    _brakeReason = 2; // DIRCHANGE
+    // Kleine Gegenrichtungs-Spruenge duerfen nicht mit voller Rampenlaenge ausrollen,
+    // sonst laufen wir unnoetig weit "in alte Richtung" und kommen erst dann zurueck.
+    float rampDistDegLocal = (_cfg.rampDistDeg) ? (*_cfg.rampDistDeg) : 0.0f;
+    if (!isfinite(rampDistDegLocal) || rampDistDegLocal < 0.5f) rampDistDegLocal = 0.5f;
+    const int32_t rampDistDeg01Local = (int32_t)lroundf(rampDistDegLocal * 100.0f);
+    int32_t absNewOutDeg01 = errOutDeg01;
+    if (absNewOutDeg01 < 0) absNewOutDeg01 = -absNewOutDeg01;
+    const bool shortOppositeRetarget = (absNewOutDeg01 <= rampDistDeg01Local + 2);
+
+    _brakeReason = shortOppositeRetarget ? 4 : 2; // 4=DIRCHANGE_CLOSE, 2=DIRCHANGE
     _brakeIssuedMs = nowMs;
+    _pendingSoftStart = shortOppositeRetarget;
 
     // Waehrend Bremsphase kein KICK
     _kickActive = false;
@@ -865,6 +907,10 @@ _brakeHoldStartMs = 0;
   if (finalTgt > amax) finalTgt = amax;
 
   _targetDeg01 = finalTgt;
+  {
+    const int32_t e0 = computeErrorDeg01(finalTgt, curDeg01);
+    _posInitialAbsErrDeg01 = (e0 < 0) ? -e0 : e0;
+  }
 
   // Bewegungsrichtung ggf. aktualisieren
   _moveDir = desiredDirNew;
@@ -1056,21 +1102,37 @@ float MotionController::update(uint32_t nowMs, uint32_t dtMs) {
     // Damit ist STOP/Richtungswechsel deterministisch und braucht keine Speed-Schaetzung.
     float brakeDistDeg = rampDistDeg;
 
-    // Joerg: Wenn waehrend einer laufenden Fahrt ein neues Ziel "sehr nah" kommt (RETARGET_CLOSE),
-    // dann kann die volle Rampenlaenge dazu fuehren, dass wir unnötig weit ueberfahren und danach
-    // zurueckfahren muessen.
+    // Wenn waehrend einer laufenden Fahrt ein neues Ziel "sehr nah" kommt
+    // (RETARGET_CLOSE oder DIRCHANGE_CLOSE), kann die volle Rampenlaenge
+    // zu unnötig grossem Ueberfahren fuehren.
     //
     // Daher: Bremsweg proportional zur aktuell anliegenden PWM (als Proxy fuer aktuelle Geschwindigkeit).
     // - Bei hoher PWM -> voller Bremsweg (wie bisher)
     // - Bei kleiner PWM -> kuerzerer Bremsweg
     //
-    // STOP und DIRCHANGE bleiben bewusst bei voller Rampenlaenge.
-    if (_brakeReason == 3) { // RETARGET_CLOSE
+    // STOP bleibt bewusst bei voller Rampenlaenge.
+    if (_brakeReason == 3 || _brakeReason == 4) { // RETARGET_CLOSE / DIRCHANGE_CLOSE
       const float dutyAbs = fabsf(_lastAppliedDuty);
       float frac = 1.0f;
       if (pwmMaxEff > 1.0f) {
         frac = dutyAbs / pwmMaxEff;
       }
+
+      // Zusaetzlich auf den tatsaechlichen Restweg zum pending-Ziel begrenzen.
+      // So bleibt die Ausrollstrecke bei sehr kleinen Gegenrichtungsbefehlen kurz.
+      if (_pendingHasTarget) {
+        const int32_t curOutNow = encoderDeg01ToOutputDeg01_(curDeg01);
+        int32_t remOutDeg01 = computeErrorDeg01(_pendingTargetDeg01, curOutNow);
+        if (remOutDeg01 < 0) remOutDeg01 = -remOutDeg01;
+
+        const float rampDistDeg01f = rampDistDeg * 100.0f;
+        if (rampDistDeg01f > 1.0f) {
+          float fracByTarget = (float)remOutDeg01 / rampDistDeg01f;
+          fracByTarget = clampFloat(fracByTarget, 0.08f, 1.0f);
+          if (fracByTarget < frac) frac = fracByTarget;
+        }
+      }
+
       // Untergrenze, damit es nicht in eine quasi-harte Bremse kippt.
       frac = clampFloat(frac, 0.10f, 1.0f);
       brakeDistDeg *= frac;
@@ -1120,6 +1182,18 @@ _brakeHoldStartMs = 0;
   const float absErrDeg = (float)absErrDeg01 / 100.0f;
 
 const float errDeg = (float)errDeg01 / 100.0f;
+
+  int32_t fineWinDeg01 = (_cfg.fineWindowDeg01) ? (*_cfg.fineWindowDeg01) : 0;
+  if (fineWinDeg01 < 0) fineWinDeg01 = -fineWinDeg01;
+  // Knapp UEBER dem Feinfenster (typ. ~2deg Fenster + ~1deg Grob): die Grobrampe
+  // ist zu kurz zum sauberen Abbremsen -> Sprung in Fein-Creep mit zu viel Energie
+  // (massives Ueberschwingen, besonders CCW). Dann gesamte Fahrt wie reine Feinfahrt.
+  // Default fineWindow 200 (2deg) + Extra => bis ~3,6deg: reine Feinfahrt (kein kurzer
+  // Grob-Stoss); deckt typische „nur 3deg“-Spruenge mit NVS-Toleranz ab.
+  const bool fineShortHybridMove =
+      !brakingNow && fineWinDeg01 > 0 &&
+      _posInitialAbsErrDeg01 > fineWinDeg01 &&
+      _posInitialAbsErrDeg01 <= fineWinDeg01 + kFineShortHybridExtraDeg01;
 
   // Bewegungsrichtung initialisieren (fuer spaetere Richtungswechsel-Kompensation)
   const int8_t desiredDirToTarget = (errDeg01 > 0) ? +1 : (errDeg01 < 0 ? -1 : 0);
@@ -1209,10 +1283,13 @@ const float errDeg = (float)errDeg01 / 100.0f;
 
     const uint32_t stuckMs = (nowMs >= _noMoveSinceMs) ? (nowMs - _noMoveSinceMs) : 0;
 
-    // Feinfenster ausnehmen: in der Feinphase gibt es eine eigene Boost-Logik.
-    int32_t fineWinCfg = (_cfg.fineWindowDeg01) ? (*_cfg.fineWindowDeg01) : 0;
-    if (fineWinCfg < 0) fineWinCfg = -fineWinCfg;
-    const bool notInFine = (fineWinCfg <= 0) ? true : (absErrDeg01 > fineWinCfg);
+    // Feinfenster / kurzer Hybrid ausnehmen: dort gibt es eine eigene Boost-Logik.
+    const bool inFineOrHybrid =
+        (fineWinDeg01 <= 0)
+            ? false
+            : (absErrDeg01 <= fineWinDeg01 ||
+               (fineShortHybridMove && absErrDeg01 > 0));
+    const bool notInFine = (fineWinDeg01 <= 0) ? true : !inFineOrHybrid;
 
     float kickMinAbsCfg = (_cfg.pwmKickMinAbs) ? (*_cfg.pwmKickMinAbs) : 0.0f;
     if (kickMinAbsCfg < 0.0f) kickMinAbsCfg = -kickMinAbsCfg;
@@ -1376,8 +1453,7 @@ const int32_t dStartDeg01 = computeDeltaDeg01(curDeg01, _rampStartDeg01);
 float distFromStartDeg = (float)((dStartDeg01 < 0) ? -dStartDeg01 : dStartDeg01) / 100.0f;
 if (distFromStartDeg < 0.0f) distFromStartDeg = 0.0f;
 
-// Feinfenster
-const int32_t fineWinDeg01 = (_cfg.fineWindowDeg01) ? (*_cfg.fineWindowDeg01) : 0;
+// Feinfenster (fineWinDeg01 weiter oben in update() gesetzt)
 float fineWinDeg = 0.0f;
 if (fineWinDeg01 > 0) fineWinDeg = (float)fineWinDeg01 / 100.0f;
 
@@ -1385,6 +1461,8 @@ if (fineWinDeg01 > 0) fineWinDeg = (float)fineWinDeg01 / 100.0f;
 bool fineActive = false;
 if (!brakingNow) {
   if (fineWinDeg01 > 0 && absErrDeg01 <= fineWinDeg01) {
+    fineActive = true;
+  } else if (fineShortHybridMove && absErrDeg01 > 0) {
     fineActive = true;
   }
 }
@@ -1521,6 +1599,10 @@ if (brakingNow) {
         _targetDeg01 = nextTgt;
         _moveDir = nextDir;
         _rampStartDeg01 = curDeg01;
+        {
+          const int32_t e0 = computeErrorDeg01(_targetDeg01, curDeg01);
+          _posInitialAbsErrDeg01 = (e0 < 0) ? -e0 : e0;
+        }
 
         // Start wie aus Stillstand.
         // Wenn das Ziel WAERHREND der Bremsrampe kam: Soft-KICK, damit kein Ruck entsteht.
@@ -1529,6 +1611,10 @@ if (brakingNow) {
         startKickIfNeeded(nowMs, curDeg01);
       } else if (_stopPointActive) {
         _targetDeg01 = _stopPointDeg01;
+        {
+          const int32_t e0 = computeErrorDeg01(_targetDeg01, curDeg01);
+          _posInitialAbsErrDeg01 = (e0 < 0) ? -e0 : e0;
+        }
 
         const int32_t errNext = computeErrorDeg01(_targetDeg01, curDeg01);
         _moveDir = (errNext > 0) ? +1 : (errNext < 0 ? -1 : 0);
@@ -1655,10 +1741,9 @@ _speedCmdDegPerSec = 0.0f;
 _speedCmdRampDegPerSec = 0.0f;
 
   // ------------------------------------------------------------
-  // Feinphase (vereinfacht): Min-PWM aus Rampe/kurzer Strecke bis zum Ziel
+  // Feinphase (Creep): volles finePwmAbs (>= kickMin / Min-PWM) bis Ankunftsband,
+  // dann PWM 0 ohne Slew-Rampe — nie unter Min-PWM kriechen (Reibung).
   // ------------------------------------------------------------
-  // errDeg01 > 0  -> noch vor Soll: +MinPWM; im Fenster [-tol,0]: PWM 0 (Auslauf, Ankunft oben);
-  // errDeg01 < -tol -> zu weit ueberfahren: -MinPWM. Kein Boost/sqrt/Bremse-Zwischenstopps.
   if (!brakingNow && fineActive) {
     const float pwmMaxFine = pwmMaxEff;
 
@@ -1674,17 +1759,20 @@ _speedCmdRampDegPerSec = 0.0f;
 
     _motorBrakeRequested = false;
 
-    float uCmdFine;
+    // errDeg01 = target - current (wie ueberall in diesem Block)
+    float uCmdFine = 0.0f;
     if (errDeg01 > 0) {
       uCmdFine = finePwmAbs;
     } else if (errDeg01 < -arriveTolDeg01) {
       uCmdFine = -finePwmAbs;
-    } else {
-      uCmdFine = 0.0f;
     }
 
-    const float fineSlewPerSec = 220.0f;
-    const float dutyOutFine = applyPwmSlewCustom(uCmdFine, _lastAppliedDuty, dtMs, fineSlewPerSec);
+    float dutyOutFine;
+    if (uCmdFine == 0.0f) {
+      dutyOutFine = 0.0f;
+    } else {
+      dutyOutFine = uCmdFine;
+    }
     _lastAppliedDuty = dutyOutFine;
 
     _iTermPwm = 0.0f;
