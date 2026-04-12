@@ -76,8 +76,14 @@ void Rs485Dispatcher::update(uint32_t nowMs) {
       (_motion && _motion->isPosActive()) ||
       (_homing && _homing->isActive()) ||
       (_loadMon && _loadMon->isCalibrationRunning());
-  const int maxFramesPerPass = motionBusy ? 14 : 64;
+  // Bei sehr schnellen Retarget-Sequenzen (kleine SETPOSDG + sofortige Folgebefehle)
+  // kann 14 Frames/Pass zu sichtbar spaeten ACKs fuehren, obwohl das Kommando bereits
+  // in der Queue liegt. Etwas hoeherer Busy-Wert reduziert diese Latenz deutlich.
+  const int maxFramesPerPass = motionBusy ? 24 : 64;
   if (!_rs485) return;
+
+  // Faellige ERR-Retries zuerst senden, damit sie nicht hinter RX-Bursts haengen.
+  processErrBroadcastRetry(nowMs);
 
   Rs485Frame f;
   for (int i = 0; i < maxFramesPerPass && _rs485->poll(f); ++i) {
@@ -154,11 +160,28 @@ void Rs485Dispatcher::onFrame(const Rs485Frame& f, uint32_t nowMs) {
 
 void Rs485Dispatcher::sendErrBroadcast(uint8_t errCode) {
   if (!_rs485) return;
+  if (errCode == 0) return;
 
-  // In deinem bisherigen Protokoll geht ERR an Slave=0 (Master-Adresse).
-  // Dadurch bekommt der Master zuverlaessig den Fehler, ohne Broadcast-Kollisionen.
+  // ERR fuer alle Teilnehmer: Broadcast an 255.
+  // Sicherheitsanforderung: 3x senden (sofort, +100ms, +200ms).
   const uint8_t ownId = safeU8(_cfg.ownSlaveId, 0);
-  _rs485->sendFrame(ownId, 0, "ERR", String(errCode));
+  _rs485->sendFrame(ownId, 255, "ERR", String(errCode));
+
+  _errRetryCode = errCode;
+  _errRetriesRemaining = 2;
+  _errRetryNextMs = millis() + 100;
+}
+
+void Rs485Dispatcher::processErrBroadcastRetry(uint32_t nowMs) {
+  if (!_rs485) return;
+  if (_errRetriesRemaining == 0) return;
+  if ((int32_t)(nowMs - _errRetryNextMs) < 0) return;
+
+  const uint8_t ownId = safeU8(_cfg.ownSlaveId, 0);
+  _rs485->sendFrame(ownId, 255, "ERR", String(_errRetryCode));
+
+  _errRetriesRemaining--;
+  _errRetryNextMs = nowMs + 100;
 }
 
 // ============================================================================

@@ -222,6 +222,7 @@ private:
 
   // Homing-Kick
   void requestHomingKick(uint32_t nowMs, const char* reason);
+  void processErrBroadcastRetry(uint32_t nowMs);
 
   // Parser
   int32_t parseDeg01FromParam(const String& p) const;
@@ -241,4 +242,9 @@ private:
 
   // Deadman: letzter gueltiger Befehl vom Master (jedes Kommando zaehlt als Keepalive)
   uint32_t _lastGetPosCmdMs = 0;
+
+  // ERR-Retry: nach Fault-Eintritt 3x senden (sofort + 2 Retries)
+  uint8_t _errRetryCode = 0;
+  uint8_t _errRetriesRemaining = 0;
+  uint32_t _errRetryNextMs = 0;
 };

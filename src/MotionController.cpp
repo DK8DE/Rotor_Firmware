@@ -664,19 +664,23 @@ bool MotionController::commandSetPosDeg01(int32_t tgtDeg01, uint32_t nowMs) {
     return true;
   }
 
-  // Effektive Laufrichtung: nach Grobfahrt bleibt _moveDir oft auf CCW, obwohl die
-  // Fein-Korrektur schon CW-PWM faehrt -> DIRCHANGE/RETARGET/decel-Pfade wuerden falsch
-  // greifen und pending ohne Bremsanforderung haengen bleiben (keine neuen Ziele).
-  int8_t curDir = _moveDir;
+  // Effektive Laufrichtung:
+  // - Primär aus realem Bewegungszustand (Duty/Speed/Fehler zum alten Ziel),
+  // - _moveDir nur als letzter Fallback.
+  // Hintergrund: Bei kurzen Retargets kann _moveDir kurzzeitig "alt" sein und
+  // faelschlich einen DIRCHANGE-Zweig triggern -> Ausrollweg in falsche Richtung.
+  int8_t curDir = 0;
   if (fabsf(_lastAppliedDuty) > 1.0f) {
     curDir = (_lastAppliedDuty > 0.0f) ? +1 : -1;
-  } else if (curDir == 0) {
-    if (fabsf(_speedCmdRampDegPerSec) > 1.0f) {
-      curDir = (_speedCmdRampDegPerSec > 0.0f) ? +1 : -1;
-    } else if (fabsf(_speedMeasDegPerSec) > 1.0f) {
-      curDir = (_speedMeasDegPerSec > 0.0f) ? +1 : -1;
-    } else {
-      curDir = desiredDirNew;
+  } else if (fabsf(_speedCmdRampDegPerSec) > 1.0f) {
+    curDir = (_speedCmdRampDegPerSec > 0.0f) ? +1 : -1;
+  } else if (fabsf(_speedMeasDegPerSec) > 1.0f) {
+    curDir = (_speedMeasDegPerSec > 0.0f) ? +1 : -1;
+  } else {
+    const int32_t errOldEnc = computeErrorDeg01(_targetDeg01, curDeg01);
+    curDir = (errOldEnc > 0) ? +1 : (errOldEnc < 0 ? -1 : 0);
+    if (curDir == 0) {
+      curDir = (_moveDir != 0) ? _moveDir : desiredDirNew;
     }
   }
 
@@ -776,7 +780,55 @@ _brakeHoldStartMs = 0;
   }
 
   // Waehrend der Fahrt: gleich/gegen Richtung unterscheiden
-  if (desiredDirNew != 0 && curDir != 0 && desiredDirNew != curDir) {
+  //
+  // WICHTIG:
+  // Wenn _posActive noch true ist, der Rotor aber praktisch schon steht
+  // (Duty ~0, kaum Restbewegung), darf ein neues Gegenziel NICHT erst eine
+  // virtuelle Bremsfahrt in alter Richtung starten. Genau das erzeugt bei kleinen
+  // Schrittbefehlen das massive "erst weglaufen, dann zurueck".
+  const bool quasiStanding =
+      (fabsf(_lastAppliedDuty) <= 1.0f) &&
+      (((nowMs - _noMoveSinceMs) >= 40) || (fabsf(_speedCmdRampDegPerSec) <= 1.0f));
+
+  if (!quasiStanding && desiredDirNew != 0 && curDir != 0 && desiredDirNew != curDir) {
+    int32_t absNewOutDeg01 = errOutDeg01;
+    if (absNewOutDeg01 < 0) absNewOutDeg01 = -absNewOutDeg01;
+
+    // Kleine Gegenrichtungs-Spruenge waehrend kurzer Fahrt:
+    // Nicht erst in alter Richtung auf ein virtuelles Bremsziel ausrollen
+    // (das fuehrt zu sichtbarem "Weglaufen"), sondern sofort auf neues Ziel
+    // umschalten und die Rampe ab aktueller Position neu aufbauen.
+    int32_t fineWinDeg01Local = (_cfg.fineWindowDeg01) ? (*_cfg.fineWindowDeg01) : 0;
+    if (fineWinDeg01Local < 0) fineWinDeg01Local = -fineWinDeg01Local;
+    const int32_t directOppositeWindowDeg01 = fineWinDeg01Local + kFineShortHybridExtraDeg01;
+    if (directOppositeWindowDeg01 > 0 && absNewOutDeg01 <= directOppositeWindowDeg01 + 2) {
+      _brakeRequest = false;
+      _brakeActive = false;
+      _brakeReason = 0;
+      _brakeHoldActive = false;
+      _brakeHoldStartMs = 0;
+      _pendingHasTarget = false;
+      _pendingSoftStart = false;
+
+      int32_t finalTgt = outputDeg01ToEncoderTargetDeg01_(tgtDeg01, desiredDirNew);
+      _lastBacklashAppliedDeg01 = finalTgt - tgtDeg01;
+      const int32_t amin = axisMinDeg01();
+      const int32_t amax = axisMaxDeg01();
+      if (finalTgt < amin) finalTgt = amin;
+      if (finalTgt > amax) finalTgt = amax;
+      _targetDeg01 = finalTgt;
+      {
+        const int32_t e0 = computeErrorDeg01(finalTgt, curDeg01);
+        _posInitialAbsErrDeg01 = (e0 < 0) ? -e0 : e0;
+      }
+
+      _moveDir = desiredDirNew;
+      _rampStartDeg01 = curDeg01;
+      _kickActive = false;
+      _posStartMs = nowMs;
+      return true;
+    }
+
     // Neues Ziel in GEGENRICHTUNG:
     // -> erst virtuelle Bremsfahrt (gleiche Abbremsrampe wie am Bewegungsende)
     // -> nach Stillstand in Gegenrichtung neu starten
@@ -793,8 +845,6 @@ _brakeHoldStartMs = 0;
     float rampDistDegLocal = (_cfg.rampDistDeg) ? (*_cfg.rampDistDeg) : 0.0f;
     if (!isfinite(rampDistDegLocal) || rampDistDegLocal < 0.5f) rampDistDegLocal = 0.5f;
     const int32_t rampDistDeg01Local = (int32_t)lroundf(rampDistDegLocal * 100.0f);
-    int32_t absNewOutDeg01 = errOutDeg01;
-    if (absNewOutDeg01 < 0) absNewOutDeg01 = -absNewOutDeg01;
     const bool shortOppositeRetarget = (absNewOutDeg01 <= rampDistDeg01Local + 2);
 
     _brakeReason = shortOppositeRetarget ? 4 : 2; // 4=DIRCHANGE_CLOSE, 2=DIRCHANGE

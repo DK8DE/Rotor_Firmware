@@ -114,10 +114,16 @@ void Rs485Proto::rxTaskLoop() {
     bool didWork = false;
 
     if ((_uart != nullptr) && (_ioMutex != nullptr)) {
-      // Nicht mit kurzem Timeout abbrechen: waehrend sendFrame() den Mutex haelt,
-      // muss der Empfang danach zuverlaessig weiterlaufen — sonst Luecken/FIFO-Ueberlauf.
-      if (xSemaphoreTake(_ioMutex, portMAX_DELAY) == pdTRUE) {
-        while (_uart->available() > 0) {
+      // WICHTIG:
+      // RX darf den UART-Mutex nicht unbegrenzt halten, sonst blockiert sendFrame()
+      // und ACKs koennen bei Buslast deutlich verspaetet rausgehen.
+      // Daher:
+      // - RX nimmt den Mutex nur non-blocking
+      // - liest pro Durchlauf nur ein kleines Byte-Budget
+      // -> TX/ACK bekommt regelmaessig die Chance, sofort zu senden.
+      if (xSemaphoreTake(_ioMutex, 0) == pdTRUE) {
+        int budget = 64;
+        while (budget-- > 0 && _uart->available() > 0) {
           int rv = _uart->read();
           if (rv < 0) break;
           processRxByte((char)rv, acc, accLen);
