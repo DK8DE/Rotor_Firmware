@@ -513,17 +513,14 @@ bool MotionController::commandSetPosDeg01(int32_t tgtDeg01, uint32_t nowMs) {
   // ------------------------------------------------------------------
   // Joerg: Neues Ziel waehrend Bremsrampe (STOP / Richtungswechsel)
   // ------------------------------------------------------------------
-  // Wenn waehrend des Abbremsens (virtuelles Bremsziel / Brems-Hold) schon
-  // ein neues Ziel ankommt, darf die PWM NICHT abrupt wieder hochspringen.
-  //
-  // Wir lassen die laufende Bremsrampe sauber zu Ende laufen und merken uns
-  // nur das neue Ziel als "pending".
-  // Der Neustart nach dem Brems-Hold erfolgt dann im Soft-KICK-Modus
-  // (Slew wie normale Rampe), damit es keinen Ruck gibt.
+  // Deterministisch:
+  // - Waehren aktiver Bremssequenz gilt "latest target wins".
+  // - Kein Direkt-Umbau der laufenden Bremsung.
+  // - Nach Brems-Hold immer weicher Neustart auf das zuletzt gemerkte Ziel.
   if (_posActive && (_brakeRequest || _brakeActive || _brakeHoldActive)) {
     _pendingHasTarget = true;
     _pendingTargetDeg01 = tgtDeg01;
-    // Richtungswechsel aus der laufenden Fahrt heraus: normaler Neustart (nicht Soft).
+    // Nach Brems-Hold weich neu starten.
     _pendingSoftStart = true;
 
     // Ein evtl. gemerkter STOP-Punkt ist ab jetzt irrelevant (neues Ziel hat Vorrang)
@@ -531,7 +528,7 @@ bool MotionController::commandSetPosDeg01(int32_t tgtDeg01, uint32_t nowMs) {
     _stopPointDeg01 = 0;
     _stopIssuedMs = 0;
 
-    // Timeout neu starten, damit wir im Bremsen nicht in ein altes Timeout laufen
+    // Timeout neu starten, damit wir im Bremsen nicht in ein altes Timeout laufen.
     _posStartMs = nowMs;
     return true;
   }
@@ -550,38 +547,33 @@ bool MotionController::commandSetPosDeg01(int32_t tgtDeg01, uint32_t nowMs) {
   //
   // Umsetzung:
   // - Wenn _decelPhaseActive==true und das neue Ziel die Richtung umkehrt,
-  //   merken wir das neue Ziel nur als pending und lassen das aktuelle Ziel unangetastet.
+  //   merken wir nur das neue Ziel als pending.
+  // - KEIN neuer _brakeRequest: wir sind bereits in der Abbremsrampe.
   if (_posActive && !_brakeRequest && !_brakeActive && !_brakeHoldActive && _decelPhaseActive) {
+    const int32_t curOutNow = encoderDeg01ToOutputDeg01_(curDeg01);
+    const int32_t oldOutNow = encoderDeg01ToOutputDeg01_(_targetDeg01);
+
     // Aktuelle Bewegungsrichtung (bevorzugt aus PWM)
     int8_t curDir = 0;
     if (fabsf(_lastAppliedDuty) > 1.0f) {
       curDir = (_lastAppliedDuty > 0.0f) ? +1 : -1;
     } else {
-      const int32_t errOld = computeErrorDeg01(_targetDeg01, curDeg01);
-      curDir = (errOld > 0) ? +1 : (errOld < 0 ? -1 : 0);
+      const int32_t errOldOut = computeErrorDeg01(oldOutNow, curOutNow);
+      curDir = (errOldOut > 0) ? +1 : (errOldOut < 0 ? -1 : 0);
     }
 
-    const int32_t errNew = computeErrorDeg01(tgtDeg01, curDeg01);
-    const int8_t newDir = (errNew > 0) ? +1 : (errNew < 0 ? -1 : 0);
+    const int32_t errNewOut = computeErrorDeg01(tgtDeg01, curOutNow);
+    const int8_t newDir = (errNewOut > 0) ? +1 : (errNewOut < 0 ? -1 : 0);
 
     if (curDir != 0 && newDir != 0 && newDir != curDir) {
-      // Neues Ziel in Gegenrichtung: erst ausrollen, dann umdrehen
+      // Neues Ziel in Gegenrichtung waehrend Decel:
+      // nur als pending merken und laufende Decel unveraendert zu Ende fahren.
       _pendingHasTarget = true;
       _pendingTargetDeg01 = tgtDeg01;
-      _pendingSoftStart = false;
+      _pendingSoftStart = true;
 
-      // WICHTIG: Ohne Bremsanforderung bleibt pending nur in der Ankunftslogik des ALTEN
-      // Ziels haengen — bei Fein-Korrektur ohne sauberes inPosTol kommt man nie dort an,
-      // dann werden keine weiteren SETPOSDG mehr umgesetzt. Gleiche Sequenz wie DIRCHANGE.
-      _brakeRequest = true;
-      _brakeActive = false;
-      _brakeHoldActive = false;
-      _brakeHoldStartMs = 0;
-      _brakeReason = 2;
-      _brakeIssuedMs = nowMs;
-      _kickActive = false;
-
-      // Timeout neu starten, damit wir beim Ausrollen nicht in ein altes Timeout laufen
+      // Keine neue Bremssequenz triggern (verhindert "doppelte Rampe").
+      // Timeout neu starten, damit wir waehrend der Rest-Decel nicht in ein altes Timeout laufen.
       _posStartMs = nowMs;
       return true;
     }
@@ -790,18 +782,40 @@ _brakeHoldStartMs = 0;
       (fabsf(_lastAppliedDuty) <= 1.0f) &&
       (((nowMs - _noMoveSinceMs) >= 40) || (fabsf(_speedCmdRampDegPerSec) <= 1.0f));
 
+  // Low-Energy-Sonderfall:
+  // Wenn wir am Ende bereits nur noch mit Min-PWM laufen und ein kurzes Gegenziel kommt,
+  // wuerde eine neue Bremssequenz unnoetig Strecke verlaengern ("doppelte Rampe").
+  // Dann direkt auf das neue Ziel umschalten (ohne weiteren Brake-Aufbau).
   if (!quasiStanding && desiredDirNew != 0 && curDir != 0 && desiredDirNew != curDir) {
+    float kickMinAbsNow = (_cfg.pwmKickMinAbs) ? (*_cfg.pwmKickMinAbs) : 0.0f;
+    if (kickMinAbsNow < 0.0f) kickMinAbsNow = -kickMinAbsNow;
+    float finePwmAbsNow = (_cfg.finePwmAbs) ? (*_cfg.finePwmAbs) : 12.0f;
+    if (finePwmAbsNow < 0.0f) finePwmAbsNow = -finePwmAbsNow;
+    if (kickMinAbsNow > finePwmAbsNow) finePwmAbsNow = kickMinAbsNow;
+    const float dutyAbsNow = fabsf(_lastAppliedDuty);
+
     int32_t absNewOutDeg01 = errOutDeg01;
     if (absNewOutDeg01 < 0) absNewOutDeg01 = -absNewOutDeg01;
+    int32_t absOldOutDeg01 = computeErrorDeg01(currentTargetOutDeg01, curOutDeg01);
+    if (absOldOutDeg01 < 0) absOldOutDeg01 = -absOldOutDeg01;
 
-    // Kleine Gegenrichtungs-Spruenge waehrend kurzer Fahrt:
-    // Nicht erst in alter Richtung auf ein virtuelles Bremsziel ausrollen
-    // (das fuehrt zu sichtbarem "Weglaufen"), sondern sofort auf neues Ziel
-    // umschalten und die Rampe ab aktueller Position neu aufbauen.
-    int32_t fineWinDeg01Local = (_cfg.fineWindowDeg01) ? (*_cfg.fineWindowDeg01) : 0;
-    if (fineWinDeg01Local < 0) fineWinDeg01Local = -fineWinDeg01Local;
-    const int32_t directOppositeWindowDeg01 = fineWinDeg01Local + kFineShortHybridExtraDeg01;
-    if (directOppositeWindowDeg01 > 0 && absNewOutDeg01 <= directOppositeWindowDeg01 + 2) {
+    int32_t fineWinNowDeg01 = (_cfg.fineWindowDeg01) ? (*_cfg.fineWindowDeg01) : 0;
+    if (fineWinNowDeg01 < 0) fineWinNowDeg01 = -fineWinNowDeg01;
+    float rampDistDegNow = (_cfg.rampDistDeg) ? (*_cfg.rampDistDeg) : 0.0f;
+    if (!isfinite(rampDistDegNow) || rampDistDegNow < 0.5f) rampDistDegNow = 0.5f;
+    const int32_t rampDistNowDeg01 = (int32_t)lroundf(rampDistDegNow * 100.0f);
+
+    // "MinPWM/Low-Energy": wir sind bereits im unteren Bereich (Fein-/Min-PWM),
+    // nicht mehr in einer hochenergetischen Grobfahrt.
+    const bool lowEnergyNow = (kickMinAbsNow > 0.01f) &&
+                              (dutyAbsNow <= (finePwmAbsNow + 2.0f));
+    // Optional nur wenn das alte Ziel ebenfalls schon nah ist (wir sind wirklich am Ende).
+    const bool nearOldTargetNow = (absOldOutDeg01 <= (rampDistNowDeg01 + 2));
+    const bool shortOpposite = (fineWinNowDeg01 > 0) &&
+                               (absNewOutDeg01 <= (fineWinNowDeg01 + kFineShortHybridExtraDeg01 + 2));
+    const bool shortOppositeFallback = (absNewOutDeg01 <= (rampDistNowDeg01 + 2));
+
+    if (lowEnergyNow && nearOldTargetNow && (shortOpposite || shortOppositeFallback)) {
       _brakeRequest = false;
       _brakeActive = false;
       _brakeReason = 0;
@@ -809,6 +823,10 @@ _brakeHoldStartMs = 0;
       _brakeHoldStartMs = 0;
       _pendingHasTarget = false;
       _pendingSoftStart = false;
+
+      _stopPointActive = false;
+      _stopPointDeg01 = 0;
+      _stopIssuedMs = 0;
 
       int32_t finalTgt = outputDeg01ToEncoderTargetDeg01_(tgtDeg01, desiredDirNew);
       _lastBacklashAppliedDeg01 = finalTgt - tgtDeg01;
@@ -828,33 +846,24 @@ _brakeHoldStartMs = 0;
       _posStartMs = nowMs;
       return true;
     }
+  }
 
-    // Neues Ziel in GEGENRICHTUNG:
-    // -> erst virtuelle Bremsfahrt (gleiche Abbremsrampe wie am Bewegungsende)
-    // -> nach Stillstand in Gegenrichtung neu starten
+  if (!quasiStanding && desiredDirNew != 0 && curDir != 0 && desiredDirNew != curDir) {
+    // Gegenrichtung in normaler Fahrt:
+    // kontrolliert auslaufen (Rampe runter), Brems-Hold, dann weich neu starten.
     _pendingHasTarget = true;
     _pendingTargetDeg01 = tgtDeg01;
 
     _brakeRequest = true;
     _brakeActive = false;
+    _brakeHoldActive = false;
+    _brakeHoldStartMs = 0;
 
-_brakeHoldActive = false;
-_brakeHoldStartMs = 0;
-    // Kleine Gegenrichtungs-Spruenge duerfen nicht mit voller Rampenlaenge ausrollen,
-    // sonst laufen wir unnoetig weit "in alte Richtung" und kommen erst dann zurueck.
-    float rampDistDegLocal = (_cfg.rampDistDeg) ? (*_cfg.rampDistDeg) : 0.0f;
-    if (!isfinite(rampDistDegLocal) || rampDistDegLocal < 0.5f) rampDistDegLocal = 0.5f;
-    const int32_t rampDistDeg01Local = (int32_t)lroundf(rampDistDegLocal * 100.0f);
-    const bool shortOppositeRetarget = (absNewOutDeg01 <= rampDistDeg01Local + 2);
-
-    _brakeReason = shortOppositeRetarget ? 4 : 2; // 4=DIRCHANGE_CLOSE, 2=DIRCHANGE
+    _brakeReason = 2; // DIRCHANGE
     _brakeIssuedMs = nowMs;
-    _pendingSoftStart = shortOppositeRetarget;
-
-    // Waehrend Bremsphase kein KICK
+    _pendingSoftStart = true;
     _kickActive = false;
-
-    // Aktuelles Ziel erstmal stehen lassen; update() setzt dann _targetDeg01 = virtuelles Bremsziel
+    _posStartMs = nowMs;
     return true;
   }
 
@@ -939,9 +948,20 @@ _brakeHoldStartMs = 0;
     int32_t absNewOut = computeErrorDeg01(tgtDeg01, curOutDeg01_tmp);
     if (absNewOut < 0) absNewOut = -absNewOut;
 
-    // Nur wenn das neue Ziel wirklich weiter weg ist (kleine Aenderungen ignorieren)
+    // Nur wenn das neue Ziel wirklich weiter weg ist (kleine Aenderungen ignorieren).
+    // Bei Fahrt nahe PWM-Max (Cruise) KEINE neue Rampe starten:
+    // dort soll eine Zielverlaengerung in gleicher Richtung einfach mit voller
+    // Geschwindigkeit weiterlaufen.
     if (absNewOut > absOldOut + 2) {
-      _rampStartDeg01 = curDeg01;
+      float pwmMaxNow = (_cfg.pwmMaxAbs) ? (*_cfg.pwmMaxAbs) : 100.0f;
+      if (pwmMaxNow < 0.0f) pwmMaxNow = -pwmMaxNow;
+      if (pwmMaxNow < 5.0f) pwmMaxNow = 5.0f;
+
+      const float dutyAbsNow = fabsf(_lastAppliedDuty);
+      const bool nearCruiseNow = (dutyAbsNow >= (pwmMaxNow - 1.5f));
+      if (!nearCruiseNow) {
+        _rampStartDeg01 = curDeg01;
+      }
     }
   }
 
@@ -1147,47 +1167,8 @@ float MotionController::update(uint32_t nowMs, uint32_t dtMs) {
       dir = (errTmp > 0) ? +1 : (errTmp < 0 ? -1 : 0);
     }
 
-    // Bremsweg (PWM-Profil-Modus):
-    // Wir nutzen die Rampenlaenge als definierten Auslaufweg.
-    // Damit ist STOP/Richtungswechsel deterministisch und braucht keine Speed-Schaetzung.
+    // Bremsweg: immer die konfigurierte NVS-Rampe verwenden.
     float brakeDistDeg = rampDistDeg;
-
-    // Wenn waehrend einer laufenden Fahrt ein neues Ziel "sehr nah" kommt
-    // (RETARGET_CLOSE oder DIRCHANGE_CLOSE), kann die volle Rampenlaenge
-    // zu unnötig grossem Ueberfahren fuehren.
-    //
-    // Daher: Bremsweg proportional zur aktuell anliegenden PWM (als Proxy fuer aktuelle Geschwindigkeit).
-    // - Bei hoher PWM -> voller Bremsweg (wie bisher)
-    // - Bei kleiner PWM -> kuerzerer Bremsweg
-    //
-    // STOP bleibt bewusst bei voller Rampenlaenge.
-    if (_brakeReason == 3 || _brakeReason == 4) { // RETARGET_CLOSE / DIRCHANGE_CLOSE
-      const float dutyAbs = fabsf(_lastAppliedDuty);
-      float frac = 1.0f;
-      if (pwmMaxEff > 1.0f) {
-        frac = dutyAbs / pwmMaxEff;
-      }
-
-      // Zusaetzlich auf den tatsaechlichen Restweg zum pending-Ziel begrenzen.
-      // So bleibt die Ausrollstrecke bei sehr kleinen Gegenrichtungsbefehlen kurz.
-      if (_pendingHasTarget) {
-        const int32_t curOutNow = encoderDeg01ToOutputDeg01_(curDeg01);
-        int32_t remOutDeg01 = computeErrorDeg01(_pendingTargetDeg01, curOutNow);
-        if (remOutDeg01 < 0) remOutDeg01 = -remOutDeg01;
-
-        const float rampDistDeg01f = rampDistDeg * 100.0f;
-        if (rampDistDeg01f > 1.0f) {
-          float fracByTarget = (float)remOutDeg01 / rampDistDeg01f;
-          fracByTarget = clampFloat(fracByTarget, 0.08f, 1.0f);
-          if (fracByTarget < frac) frac = fracByTarget;
-        }
-      }
-
-      // Untergrenze, damit es nicht in eine quasi-harte Bremse kippt.
-      frac = clampFloat(frac, 0.10f, 1.0f);
-      brakeDistDeg *= frac;
-    }
-
     if (!isfinite(brakeDistDeg) || brakeDistDeg < 0.5f) brakeDistDeg = 0.5f;
 
     const int32_t brakeDistDeg01 = (int32_t)lroundf(brakeDistDeg * 100.0f);
