@@ -170,7 +170,7 @@ static float g_homeSeekMinPwmPercent = 60.0f;
 //   sicher wieder ausgeloest und erneut sauber gedrueckt werden kann.
 //
 // Typische Werte: 20..40% (je nach Mechanik)
-static float g_homeBackoff = 22.0f;
+static float g_homeBackoff = 35.0f;
 
 // Homing: nach Referenzfahrt auf 0deg zurueckfahren?
 // true = nach Homing ist Position 0deg (Referenz = Nullpunkt).
@@ -432,7 +432,7 @@ static int32_t g_fineWindowDeg01 = 200;
 // Tuning:
 // - Wenn er in der Feinphase stehen bleibt oder kurze Wege nicht anlaufen -> erhoehen.
 // - Wenn er in der Feinphase zu aggressiv wirkt -> leicht senken (aber nicht so weit, dass er klebt!).
-static float   g_minPwm = 25.0f;
+static float   g_minPwm = 35.0f;
 
 // Stall-Ueberwachung aktiv (gilt fuer Homing + Positionsfahrt)
 // true  = Stall aktiv (Blockade wird erkannt)
@@ -453,7 +453,7 @@ static bool g_stallMonitorEnabled = true;
 //   (aber nicht unter g_minPwm!).
 // Default bewusst etwas ueber g_minPwm, damit beim Creep (g_minPwm) keine
 // falschen SE_STALL auftreten (z.B. beim rechten Endschalter-Suchlauf im Homing).
-static float   g_minStallPwm = 25.0f;
+static float   g_minStallPwm = 35.0f;
 
 // Stall Timeout (ms): innerhlab dieser Zeit muessen mindestens g_stallMinCounts Encoder-Counts kommen,
 // wenn eine Bewegung erwartet wird (Duty >= g_minStallPwm).
