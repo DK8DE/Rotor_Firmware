@@ -200,6 +200,9 @@ private:
   // Startpunkt fuer Anfahr-Rampe (in 0,01deg)
   // Wird gesetzt, wenn eine Positionsfahrt aus dem Stillstand startet oder wenn wir die Richtung wechseln.
   int32_t _rampStartDeg01 = 0;
+  // Nach Zielverlaengerung in der Abbremsphase: Hochlauf von diesem PWM-Betrag statt von pwmMinAbs.
+  // < 0 = aus (normales Dreieckprofil pwmMin..pwmMax).
+  float _pwmRampUpAnchorAbs = -1.0f;
   // Bewegungsrichtung, zu der _rampStartDeg01 gehoert.
   // +1 = positive Richtung, -1 = negative Richtung, 0 = unbekannt/steht.
   int8_t _moveDir = 0;

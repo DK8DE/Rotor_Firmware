@@ -128,6 +128,7 @@ void MotionController::resetControllerState(uint32_t nowMs) {
   _posTimeoutEvent = false;
 
   _rampStartDeg01 = 0;
+  _pwmRampUpAnchorAbs = -1.0f;
   // Merken, aus welcher Richtung zuletzt wirklich gefahren wurde.
   // Das ist wichtig fuer Umkehrspiel-Kompensation, wenn spaeter aus Stillstand in die Gegenrichtung gestartet wird
   // (nur sinnvoll bei Encoder auf Motorachse).
@@ -683,6 +684,7 @@ bool MotionController::commandSetPosDeg01(int32_t tgtDeg01, uint32_t nowMs) {
   _inTolSinceMs = 0;
 
   if (startingFromIdle) {
+    _pwmRampUpAnchorAbs = -1.0f;
     // Startpunkt fuer Anfahr-Rampe setzen
     _rampStartDeg01 = curDeg01;
     _moveDir = desiredDirNew;
@@ -842,6 +844,7 @@ _brakeHoldStartMs = 0;
 
       _moveDir = desiredDirNew;
       _rampStartDeg01 = curDeg01;
+      _pwmRampUpAnchorAbs = -1.0f;
       _kickActive = false;
       _posStartMs = nowMs;
       return true;
@@ -937,8 +940,10 @@ _brakeHoldStartMs = 0;
   _brakeHoldActive = false;
   _brakeHoldStartMs = 0;
 
-  // Wenn wir gerade in der Abbremsphase waren und das neue Ziel weiter weg in gleicher Richtung liegt,
-  // starten wir die Beschleunigungsrampe ab "jetzt" neu, damit es keinen PWM-Sprung auf MAX gibt.
+  // Ziel in gleicher Richtung verlaengern waehrend _decelPhaseActive:
+  // _rampStartDeg01 = Ist; Hochlauf in update() von |lastAppliedDuty| bis pwmMax (Anker), nicht von pwmMinAbs.
+  // So keine PWM-Spruenge und keine kuenstliche Delle nahe Max (ohne feste %-Schwellen).
+  _pwmRampUpAnchorAbs = -1.0f;
   if (_decelPhaseActive && desiredDirNew != 0) {
     const int32_t curOutDeg01_tmp = encoderDeg01ToOutputDeg01_(curDeg01);
     const int32_t oldOutDeg01_tmp = encoderDeg01ToOutputDeg01_(_targetDeg01);
@@ -948,19 +953,20 @@ _brakeHoldStartMs = 0;
     int32_t absNewOut = computeErrorDeg01(tgtDeg01, curOutDeg01_tmp);
     if (absNewOut < 0) absNewOut = -absNewOut;
 
-    // Nur wenn das neue Ziel wirklich weiter weg ist (kleine Aenderungen ignorieren).
-    // Bei Fahrt nahe PWM-Max (Cruise) KEINE neue Rampe starten:
-    // dort soll eine Zielverlaengerung in gleicher Richtung einfach mit voller
-    // Geschwindigkeit weiterlaufen.
     if (absNewOut > absOldOut + 2) {
-      float pwmMaxNow = (_cfg.pwmMaxAbs) ? (*_cfg.pwmMaxAbs) : 100.0f;
-      if (pwmMaxNow < 0.0f) pwmMaxNow = -pwmMaxNow;
-      if (pwmMaxNow < 5.0f) pwmMaxNow = 5.0f;
-
-      const float dutyAbsNow = fabsf(_lastAppliedDuty);
-      const bool nearCruiseNow = (dutyAbsNow >= (pwmMaxNow - 1.5f));
-      if (!nearCruiseNow) {
-        _rampStartDeg01 = curDeg01;
+      _rampStartDeg01 = curDeg01;
+      float pwmMaxCfg = (_cfg.pwmMaxAbs) ? fabsf(*_cfg.pwmMaxAbs) : 100.0f;
+      if (pwmMaxCfg < 5.0f) pwmMaxCfg = 100.0f;
+      float kickM = (_cfg.pwmKickMinAbs) ? fabsf(*_cfg.pwmKickMinAbs) : 0.0f;
+      float anchor = fabsf(_lastAppliedDuty);
+      if (anchor < kickM) {
+        anchor = kickM;
+      }
+      if (anchor > pwmMaxCfg) {
+        anchor = pwmMaxCfg;
+      }
+      if (anchor < pwmMaxCfg - 0.05f) {
+        _pwmRampUpAnchorAbs = anchor;
       }
     }
   }
@@ -1714,6 +1720,13 @@ if (upAlpha < 0.0f) upAlpha = 0.0f;
 if (upAlpha > 1.0f) upAlpha = 1.0f;
 
 float pwmUpAbs = pwmMinAbs + (pwmMax - pwmMinAbs) * upAlpha;
+if (_pwmRampUpAnchorAbs >= 0.0f) {
+  const float anchor = clampFloat(_pwmRampUpAnchorAbs, pwmMinAbs, pwmMax);
+  pwmUpAbs = anchor + (pwmMax - anchor) * upAlpha;
+  if (upAlpha >= 0.999f) {
+    _pwmRampUpAnchorAbs = -1.0f;
+  }
+}
 
 // Ramp-Down (pwmMax -> endAbs)
 float downAlpha = 1.0f;
@@ -1731,9 +1744,8 @@ float pwmDownAbs = endAbs + (pwmMax - endAbs) * downAlpha;
 // haeufig beide Kurven auf demselben Wert liegen. Dann waeren wir formal schon in
 // der Abbremsphase, obwohl real noch gar nicht abgebremst wird.
 // Folge waere bei einem neuen Ziel in gleicher Richtung, aber weiter weg:
-// - _decelPhaseActive wird TRUE
-// - commandSetPosDeg01() setzt _rampStartDeg01 neu
-// - das PWM faellt kurz ab und beschleunigt dann wieder
+// - _decelPhaseActive kann TRUE sein
+// - Zielverlaengerung: _rampStartDeg01 neu + optional _pwmRampUpAnchorAbs = |Duty| (Hochrampe bis pwmMax)
 //
 // Gewuenscht ist _decelPhaseActive nur dann, wenn die Ramp-Down-Kurve die Fahrt
 // tatsaechlich bereits begrenzt, also wir real im Auslaufbereich sind.
