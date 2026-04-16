@@ -2361,8 +2361,8 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   // - 1 = ENCTYPE_MOTOR_AXIS
   // - 2 = ENCTYPE_RING_OUTPUT
   if (cmd == "GETENCTYPE") {
-    uint8_t v = safeU8(_cfg.encTypeU8, 2);
-    if (v != 1 && v != 2) v = 2;
+    uint8_t v = safeU8(_cfg.encTypeU8, 1);
+    if (v != 1 && v != 2) v = 1;
     if (shouldReply) sendAck(f.master, "GETENCTYPE", String((int)v));
     return;
   }
@@ -2374,7 +2374,7 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
       return;
     }
 
-    const uint8_t old = safeU8(_cfg.encTypeU8, 2);
+    const uint8_t old = safeU8(_cfg.encTypeU8, 1);
     persistPutU8("ect", _cfg.encTypeU8, nv);
 
     if (shouldReply) sendAck(f.master, "SETENCTYPE", "1");

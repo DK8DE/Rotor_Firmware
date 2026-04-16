@@ -80,8 +80,8 @@ struct EncoderAxisConfig {
   int32_t rangeDegOffsetDeg01 = 0;
 
   // Encoder-Typ
-  // Default: Ring/Abtrieb (2)
-  EncoderType encType = ENCTYPE_RING_OUTPUT;
+  // Default: Motorachse (1)
+  EncoderType encType = ENCTYPE_MOTOR_AXIS;
 };
 
 struct EncoderZStats {
