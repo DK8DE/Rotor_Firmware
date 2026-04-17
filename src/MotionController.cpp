@@ -647,6 +647,25 @@ bool MotionController::commandSetPosDeg01(int32_t tgtDeg01, uint32_t nowMs) {
   // RS485-Ziel ist Abtrieb (OUT). Der Encoder kann ggf. auf der Motorachse liegen.
   const int32_t curOutDeg01 = encoderDeg01ToOutputDeg01_(curDeg01);
   const int32_t errOutDeg01 = computeErrorDeg01(tgtDeg01, curOutDeg01);
+
+  // Wiederholtes SETPOSDG auf dieselbe OUT-Lage nach Ankunft:
+  // resetControllerState() setzt _targetDeg01=0, daher greift der alte Gleichheits-Check unten oft nicht.
+  // Liegt der Restfehler nur in der Ankunftstoleranz und der Motor steht, wuerde sonst desiredDir
+  // um 0 herum toggeln -> unterschiedliche Backlash-Abbildung (ENC-Ziel springt um ~Spiel).
+  {
+    int32_t tol01 = (_cfg.arriveTolDeg01) ? (*_cfg.arriveTolDeg01) : 2;
+    if (tol01 < 0) tol01 = -tol01;
+    const int32_t absErrOut = (errOutDeg01 < 0) ? -errOutDeg01 : errOutDeg01;
+    const uint32_t holdMs = (_cfg.arriveHoldMs) ? (*_cfg.arriveHoldMs) : 200u;
+    const bool stableNoMove = (nowMs - _noMoveSinceMs) >= holdMs;
+    const bool quietMotor = (fabsf(_lastAppliedDuty) <= 1.0f);
+    const bool noBrakePhase = !_brakeActive && !_brakeRequest && !_brakeHoldActive;
+    if (noBrakePhase && quietMotor && stableNoMove && absErrOut <= tol01) {
+      _posStartMs = nowMs;
+      return true;
+    }
+  }
+
   const int8_t desiredDirNew = (errOutDeg01 > 0) ? +1 : (errOutDeg01 < 0 ? -1 : 0);// Aktuelle Bewegungsrichtung bestimmen
 
   // Gleiches SOLL (RS485 liefert OUT-Grad): _targetDeg01 liegt in Encoder-Koordinate —
