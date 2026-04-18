@@ -18,6 +18,8 @@
   3) LEFT SLOW (Touch1)-> bis END_MIN
   4) BACKOFF MIN SLOW  -> bis END_MIN frei (Release merken)
   5) LEFT SLOW (Touch2)-> bis END_MIN -> setCountsZero() + backlashCounts messen
+      (Counts-Strecke frei->wieder MIN; Deg01-Umrechnung erst in Schritt 10 mit
+       backlashMeasuredToModelScale, typ. 0.5, weil die Messstrecke ~2x einseitiges Spiel enthaelt)
 
   6) RIGHT FAST        -> bis END_MAX
   7) BACKOFF MAX FAST  -> bis END_MAX frei
@@ -114,6 +116,11 @@ struct HomingConfig {
   float returnRampDeg = 30.0f;
 
   bool returnToZero = true;          // optional wieder zurueck auf 0
+
+  // Skalierung MIN-Backlash-Messstrecke (END_MIN frei -> wieder gedrueckt) auf
+  // das einseitige b fuer MotionController (typ. 0.5, NVS bms). Ohne Skalierung
+  // wirkt Umkehrspiel bei SETPOS oft zu gross (Messung: zwei Umkehrungen + Schalter).
+  float backlashMeasuredToModelScale = 0.5f;
 
   // Nach dem finalen Freifahren (END_MIN frei) noch auf logische 0 fahren.
   // 0 = aus (wie bisher)

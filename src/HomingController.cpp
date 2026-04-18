@@ -350,8 +350,10 @@ void HomingController::update(uint32_t nowMs) {
   // ------------------------------------------------------------
   if (_state == HOME_SEEK_MIN_SLOW_2) {
     if (endMin) {
-      // Backlash/Schalterhysterese in Encoder-Counts messen:
-      // Strecke zwischen "frei" und "wieder gedrueckt" nach Umkehr.
+      // Encoder-Strecke zwischen END_MIN „frei“ (+Backoff) und „wieder gedrueckt“
+      // (zweiter −Anlauf). Wird spaeter mit backlashMeasuredToModelScale in Deg01
+      // umgerechnet (siehe HOME_SEEK_MAX_SLOW_2), damit es zum einseitigen b
+      // in der Positionsregelung passt.
       if (_haveBacklashBase) {
         const long pressCounts = _enc->getCountsDefault();
         long d = pressCounts - _backlashReleaseCounts;
@@ -504,11 +506,13 @@ void HomingController::update(uint32_t nowMs) {
       //   den globalen DGOFFSET korrigiert (EncoderAxis nutzt CPR_effektiv).
       // - Damit Backlash in Deg01 konsistent zur Positionsskalierung bleibt,
       //   rechnen wir hier ebenfalls mit dem effektiven CPR.
+      // - backlashMeasuredToModelScale (typ. 0.5, NVS bms): siehe HomingConfig.
       const int32_t cprEff = _enc->getCountsPerRevEffective();
       if (_backlashCounts > 0 && cprEff > 0) {
         const float degPerCount = 360.0f / (float)cprEff;
         const float backlashDeg = (float)_backlashCounts * degPerCount;
-        _backlashDeg01 = (int32_t)lroundf(backlashDeg * 100.0f);
+        const float scale = clampFloat(_cfg.backlashMeasuredToModelScale, 0.1f, 1.0f);
+        _backlashDeg01 = (int32_t)lroundf(backlashDeg * 100.0f * scale);
         if (_backlashDeg01 < 0) _backlashDeg01 = -_backlashDeg01;
       }
 

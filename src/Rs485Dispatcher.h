@@ -57,6 +57,8 @@ struct Rs485DispatcherConfig {
   float*    homeBackoff        = nullptr;
   bool*     homeReturnToZero   = nullptr;
   uint32_t* homeTimeoutMs      = nullptr;
+  // Homing: Skalierung Backlash-Messung -> Motion b (0.1..1.0, typ. 0.5). NVS bms.
+  float*    homeBacklashMeasScale = nullptr;
 
   uint32_t* posTimeoutMs      = nullptr;
 

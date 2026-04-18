@@ -177,6 +177,10 @@ static float g_homeBackoff = 35.0f;
 // false = Position bleibt am Referenzpunkt (Endschalter-Position).
 static bool g_homeReturnToZero = true;
 
+// Homing: Skalierung der gemessenen MIN-Backlash-Strecke auf Motion-b (0.1..1.0, typ. 0.5).
+// NVS bms; RS485 GETHOMEBLSCALE / SETHOMEBLSCALE. Nach Aenderung SETREF erneut fahren.
+static float g_homeBacklashMeasScale = 0.35f;
+
 // Homing-Timeout pro Segment (ms).
 // Zu klein -> Homing bricht ab, zu gross -> Fehler wird spaet erkannt.
 // Beispiel: bei langsamer Mechanik 60000 ms.
@@ -751,6 +755,10 @@ static void loadPreferencesIntoGlobals() {
   g_homeReturnToZero   = g_prefs.getBool("hrz",  g_homeReturnToZero);
   g_homeTimeoutMs      = g_prefs.getUInt("hto",  g_homeTimeoutMs);
 
+  g_homeBacklashMeasScale = g_prefs.getFloat("bms", g_homeBacklashMeasScale);
+  if (g_homeBacklashMeasScale < 0.1f) g_homeBacklashMeasScale = 0.1f;
+  if (g_homeBacklashMeasScale > 1.0f) g_homeBacklashMeasScale = 1.0f;
+
   g_posTimeoutMs       = g_prefs.getUInt("pto",  g_posTimeoutMs);
 
   g_handSpeedPercent   = g_prefs.getFloat("hsp", g_handSpeedPercent);
@@ -1067,6 +1075,7 @@ void setup() {
   hcfg.backoffPwmPercent = g_homeBackoff;
   hcfg.returnToZero = g_homeReturnToZero;
   hcfg.segmentTimeoutMs = g_homeTimeoutMs;
+  hcfg.backlashMeasuredToModelScale = g_homeBacklashMeasScale;
   homing.begin(&board, &motor, &encoder, hcfg);
 
   // -------------------------
@@ -1187,6 +1196,7 @@ dcfg.homeFastPwmPercent = &g_homeFastPwmPercent;
 dcfg.homeBackoff        = &g_homeBackoff;
 dcfg.homeReturnToZero   = &g_homeReturnToZero;
 dcfg.homeTimeoutMs      = &g_homeTimeoutMs;
+dcfg.homeBacklashMeasScale = &g_homeBacklashMeasScale;
 
 dcfg.posTimeoutMs       = &g_posTimeoutMs;
 

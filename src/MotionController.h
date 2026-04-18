@@ -148,9 +148,12 @@ private:
   // - Je nach letzter Bewegungsrichtung ist ein Offset (Backlash) aktiv.
   // --------------------------------------------------------------------------
   int32_t readBacklashDeg01_() const;
-  int8_t  engagedDir_() const; // +1 = positive Flanke, -1 = negative Flanke, 0 = unbekannt
+  int8_t  engagedDir_() const; // +1 = positive Flanke, -1 = negative Flanke (phys., nicht PWM-sprunghaft)
+  int32_t encoderDeg01ToOutCore_(int32_t encDeg01, int8_t flankDir) const;
   int32_t encoderDeg01ToOutputDeg01_(int32_t encDeg01) const;
   int32_t outputDeg01ToEncoderTargetDeg01_(int32_t outDeg01, int8_t desiredDir) const;
+  void armOutMapSlackIfReversing_(int32_t curEncDeg01, int8_t desiredDirNew);
+  void advanceOutMapFlank_(int32_t curEncDeg01);
 
   static float clampFloat(float v, float lo, float hi);
 
@@ -211,6 +214,15 @@ private:
   // Wird genutzt, um bei ENCTYPE_MOTOR_AXIS auch nach einem Stillstand zu wissen,
   // aus welcher Richtung "vorgeladen" wurde (Umkehrspiel-Kompensation beim erneuten Anfahren).
   int8_t _lastMoveDirNonZero = 0;
+
+  // Motor-Encoder + Backlash: physische Abtriebsflanke fuer OUT=f(ENC).
+  // Nicht bei |PWM|>0 sofort umschalten — sonst springt die OUT-Schaetzung um ~b,
+  // obwohl der Abtrieb noch auf der alten Flanke steht (Umkehrspiel muss erst
+  // per Encoderweg aufgenommen werden).
+  int8_t _outMapFlankDir = +1;
+  int8_t _outMapPendingDir = 0;
+  int32_t _outMapSlackStartEncDeg01 = 0;
+  int32_t _outMapFrozenOutDeg01 = 0;
 
   // Zuletzt angewendeter Backlash-Offset (0,01deg). Nur zur Diagnose/Debug.
   int32_t _lastBacklashAppliedDeg01 = 0;

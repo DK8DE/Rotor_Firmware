@@ -655,6 +655,13 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     hc.returnToZero     = (_cfg.homeReturnToZero) ? *_cfg.homeReturnToZero : hc.returnToZero;
     hc.segmentTimeoutMs = (_cfg.homeTimeoutMs) ? *_cfg.homeTimeoutMs : hc.segmentTimeoutMs;
 
+    if (_cfg.homeBacklashMeasScale) {
+      float s = *_cfg.homeBacklashMeasScale;
+      if (s < 0.1f) s = 0.1f;
+      if (s > 1.0f) s = 1.0f;
+      hc.backlashMeasuredToModelScale = s;
+    }
+
     _homing->updateConfig(hc);
   };
 
@@ -2090,6 +2097,24 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     applyHomingUpdate();
     if (shouldReply) sendAck(f.master, "SETHOMETIMEOUT", "1");
     serialEventState("SETHOMETIMEOUT");
+    return;
+  }
+
+  // Homing: Skalierung gemessenes Umkehrspiel -> effektives b (0.1..1.0, Default 0.5)
+  if (cmd == "GETHOMEBLSCALE") {
+    const float v = (_cfg.homeBacklashMeasScale) ? *_cfg.homeBacklashMeasScale : 0.5f;
+    if (shouldReply) sendAck(f.master, "GETHOMEBLSCALE", formatFloatComma(v, 2));
+    return;
+  }
+
+  if (cmd == "SETHOMEBLSCALE") {
+    float v = parseFloatParam(f.params);
+    if (v < 0.1f) v = 0.1f;
+    if (v > 1.0f) v = 1.0f;
+    persistPutFloat("bms", _cfg.homeBacklashMeasScale, v);
+    applyHomingUpdate();
+    if (shouldReply) sendAck(f.master, "SETHOMEBLSCALE", "1");
+    serialEventState("SETHOMEBLSCALE");
     return;
   }
 

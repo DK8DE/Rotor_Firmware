@@ -27,17 +27,65 @@ int32_t MotionController::readBacklashDeg01_() const {
 }
 
 int8_t MotionController::engagedDir_() const {
-  // Waehrend aktiver Fahrt muss die aktuell wirksame Flanke verwendet werden,
-  // sonst wird OUT<->ENC bei kleinen Richtungswechseln einseitig um backlash
-  // verschoben (typisch: kleine CCW-Schritte laufen deutlich zu weit).
-  if (fabsf(_lastAppliedDuty) > 1.0f) {
-    return (_lastAppliedDuty > 0.0f) ? +1 : -1;
-  }
-  if (_moveDir != 0) return _moveDir;
+  // Physische Flanke fuer das Backlash-Modell (siehe _outMapFlankDir / advanceOutMapFlank_).
+  return _outMapFlankDir;
+}
 
-  // Fallback: zuletzt bekannte, nicht-null Fahrtrichtung.
-  if (_lastMoveDirNonZero != 0) return _lastMoveDirNonZero;
-  return +1;
+int32_t MotionController::encoderDeg01ToOutCore_(int32_t encDeg01, int8_t flankDir) const {
+  const int32_t amin = axisMinDeg01();
+  const int32_t amax = axisMaxDeg01();
+
+  if (encDeg01 <= amin) return amin;
+  if (encDeg01 >= amax) return amax;
+
+  const int32_t b = readBacklashDeg01_();
+  if (b <= 0) {
+    return encDeg01;
+  }
+
+  int32_t outDeg01 = encDeg01;
+  if (flankDir < 0) {
+    outDeg01 = encDeg01 + b;
+  }
+
+  if (outDeg01 < amin) outDeg01 = amin;
+  if (outDeg01 > amax) outDeg01 = amax;
+  return outDeg01;
+}
+
+void MotionController::armOutMapSlackIfReversing_(int32_t curEncDeg01, int8_t desiredDirNew) {
+  const int32_t b = readBacklashDeg01_();
+  if (b <= 0 || desiredDirNew == 0) {
+    return;
+  }
+  if (desiredDirNew == _outMapFlankDir) {
+    _outMapPendingDir = 0;
+    return;
+  }
+  _outMapPendingDir = desiredDirNew;
+  _outMapSlackStartEncDeg01 = curEncDeg01;
+  _outMapFrozenOutDeg01 = encoderDeg01ToOutCore_(curEncDeg01, _outMapFlankDir);
+}
+
+void MotionController::advanceOutMapFlank_(int32_t curEncDeg01) {
+  if (_outMapPendingDir == 0) return;
+  const int32_t b = readBacklashDeg01_();
+  if (b <= 0) {
+    _outMapPendingDir = 0;
+    return;
+  }
+  const int32_t d = computeDeltaDeg01(curEncDeg01, _outMapSlackStartEncDeg01);
+  if (_outMapPendingDir > 0) {
+    if (d >= b) {
+      _outMapFlankDir = +1;
+      _outMapPendingDir = 0;
+    }
+  } else {
+    if (d <= -b) {
+      _outMapFlankDir = -1;
+      _outMapPendingDir = 0;
+    }
+  }
 }
 
 int32_t MotionController::encoderDeg01ToOutputDeg01_(int32_t encDeg01) const {
@@ -61,18 +109,16 @@ int32_t MotionController::encoderDeg01ToOutputDeg01_(int32_t encDeg01) const {
     return encDeg01;
   }
 
-  // Modell:
-  // - Nach positiver Bewegung (engagedDir=+1) gilt: OUT = ENC
-  // - Nach negativer Bewegung (engagedDir=-1) gilt: OUT = ENC + backlash
-  int32_t outDeg01 = encDeg01;
-  if (engagedDir_() < 0) {
-    outDeg01 = encDeg01 + b;
+  // Waehrend Umkehrspiel-Aufnahme: Abtrieb (OUT) bleibt naeherungsweise konstant,
+  // Encoder laeuft zuerst ohne gleichen Abtriebsweg (siehe armOutMapSlackIfReversing_).
+  if (_outMapPendingDir != 0) {
+    int32_t fo = _outMapFrozenOutDeg01;
+    if (fo < amin) fo = amin;
+    if (fo > amax) fo = amax;
+    return fo;
   }
 
-  // Ergebnis immer auf den logischen Achsbereich begrenzen.
-  if (outDeg01 < amin) outDeg01 = amin;
-  if (outDeg01 > amax) outDeg01 = amax;
-  return outDeg01;
+  return encoderDeg01ToOutCore_(encDeg01, _outMapFlankDir);
 }
 
 int32_t MotionController::outputDeg01ToEncoderTargetDeg01_(int32_t outDeg01, int8_t desiredDir) const {
@@ -136,6 +182,11 @@ void MotionController::resetControllerState(uint32_t nowMs) {
     _lastMoveDirNonZero = _moveDir;
   }
   _moveDir = 0;
+
+  _outMapPendingDir = 0;
+  if (_lastMoveDirNonZero != 0) {
+    _outMapFlankDir = _lastMoveDirNonZero;
+  }
 
   // Debug: zuletzt angewendete Backlash-Kompensation zuruecksetzen.
   _lastBacklashAppliedDeg01 = 0;
@@ -748,6 +799,7 @@ bool MotionController::commandSetPosDeg01(int32_t tgtDeg01, uint32_t nowMs) {
     // Wenn der Encoder auf der MOTORACHSE sitzt (ENCTYPE_MOTOR_AXIS), sehen wir das Umkehrspiel nicht direkt.
     // Darum verschieben wir bei einem Richtungswechsel das Ziel um "backlash" in die neue Richtung.
     // Bei ENCTYPE_RING_OUTPUT (Encoder auf Ausgangsachse) wird NICHT kompensiert.
+    armOutMapSlackIfReversing_(curDeg01, desiredDirNew);
     int32_t finalTgt = outputDeg01ToEncoderTargetDeg01_(tgtDeg01, desiredDirNew);
 
 // Debug: zuletzt angewendete Backlash-Abbildung (Encoderziel - OUT-Ziel)
@@ -849,6 +901,7 @@ _brakeHoldStartMs = 0;
       _stopPointDeg01 = 0;
       _stopIssuedMs = 0;
 
+      armOutMapSlackIfReversing_(curDeg01, desiredDirNew);
       int32_t finalTgt = outputDeg01ToEncoderTargetDeg01_(tgtDeg01, desiredDirNew);
       _lastBacklashAppliedDeg01 = finalTgt - tgtDeg01;
       const int32_t amin = axisMinDeg01();
@@ -891,17 +944,22 @@ _brakeHoldStartMs = 0;
 
   
   // ------------------------------------------------------------------
-  // Joerg: Neues Ziel ist naeher als das aktuelle Ziel (gleiche Richtung)
+  // Joerg: Neues Ziel ist in gleicher Richtung naeher als das alte Ziel
+  //        UND wir sind bereits in der Abbremsrampe (Abbrems-Band).
   // ------------------------------------------------------------------
-  // Problem:
-  // - Wenn waehrend einer laufenden Fahrt ein neues Ziel kommt, das in der gleichen Richtung liegt,
-  //   aber deutlich naeher ist (z.B. kurz vor der aktuellen Position), dann wuerde ein direktes
-  //   Umschalten des Ziels den Soll-PWM sprunghaft reduzieren -> "hartes Bremsen".
+  // Beobachtung:
+  // - Aus voller Fahrt laesst sich in der Abbremsrampe ueber nur ~rampDist kein
+  //   zusaetzlicher Zielversatz (~1deg) zuverlaessig noch "einfangen":
+  //   der Rotor ueberfaehrt altes UND neues Ziel deutlich und muss danach hart
+  //   zurueck. Jede virtuelle Bremse/aktive Bremse in diesem Pfad wirkt entweder
+  //   zu zahm (Ueberfahren) oder zu hart (keine Rampe mehr).
   //
-  // Loesung:
-  // - Wie beim STOP: erst ueber die definierte Rampenlaenge ausrollen/bremsen (virtuelles Bremsziel),
-  //   danach das neue Ziel anfahren (pending).
-  if (_posActive && !_brakeRequest && !_brakeActive && !_brakeHoldActive) {
+  // Regel (gewuenscht von Joerg):
+  // - In der Abbremsrampe: ALTES Ziel normal zu Ende fahren, neues Ziel nur als
+  //   pending merken. Nach Ankunft startet die normale Positionsfahrt zum neuen
+  //   Ziel — das ist dann automatisch eine Gegenfahrt (kurz), aber vollstaendig
+  //   mit regulaerer Rampe. Keine Bremse/Rampen-Logik wird hier angefasst.
+  if (_posActive && !_brakeRequest && !_brakeActive && !_brakeHoldActive && _decelPhaseActive) {
     const int32_t curOutDeg01_tmp = encoderDeg01ToOutputDeg01_(curDeg01);
     const int32_t oldOutDeg01_tmp = encoderDeg01ToOutputDeg01_(_targetDeg01);
 
@@ -914,37 +972,18 @@ _brakeHoldStartMs = 0;
     const int8_t dirOldOut = (errOldOut > 0) ? +1 : (errOldOut < 0 ? -1 : 0);
     const int8_t dirNewOut = (errNewOut > 0) ? +1 : (errNewOut < 0 ? -1 : 0);
 
-    float rampDistDeg = (_cfg.rampDistDeg) ? (*_cfg.rampDistDeg) : 0.0f;
-    if (!isfinite(rampDistDeg) || rampDistDeg < 0.5f) rampDistDeg = 0.5f;
-    const int32_t rampDistDeg01 = (int32_t)lroundf(rampDistDeg * 100.0f);
-
-    // Nur wenn das neue Ziel in gleicher Richtung liegt, aber deutlich naeher ist
-    // und zudem so nah, dass ein direktes Umschalten zu einem harten Brems-Sprung fuehren wuerde.
-    if (dirOldOut != 0 && dirNewOut == dirOldOut && (absNewOut + 2) < absOldOut && absNewOut <= rampDistDeg01) {
+    // Gleiche raeumliche Richtung, neues Ziel liegt VOR dem alten (aus Fahrtsicht).
+    // D.h. der Rotor wuerde das neue Ziel auf dem Weg zum alten ueberschreiten -
+    // das ist der problematische Fall. Kleine Toleranz (2 deg01) gegen Jitter.
+    if (dirOldOut != 0 && dirNewOut == dirOldOut && (absNewOut + 2) < absOldOut) {
+      // Nur pending merken. Altes Ziel, laufende Rampe und alle Brems-Flags
+      // bleiben UNVERAENDERT — altes Ziel wird normal zu Ende gefahren.
       _pendingHasTarget = true;
       _pendingTargetDeg01 = tgtDeg01;
-      _pendingSoftStart = true;
+      _pendingSoftStart = false;
 
-      // STOP-Punkt ist hier nicht relevant
-      _stopPointActive = false;
-      _stopPointDeg01 = 0;
-      _stopIssuedMs = 0;
-
-      // Virtuelles Bremsziel anfordern (wie STOP/DIRCHANGE)
-      _brakeRequest = true;
-      _brakeActive = false;
-
-      _brakeHoldActive = false;
-      _brakeHoldStartMs = 0;
-
-      _brakeReason = 3; // RETARGET_CLOSE
-      _brakeIssuedMs = nowMs;
-
-      // Waehrend Bremsphase kein KICK
-      _kickActive = false;
-
-      // Timeout neu starten
-      _posStartMs = nowMs;
+      // Timeout fuer das pending-Anschlussziel NICHT hier neu starten —
+      // das uebernimmt commandSetPosDeg01 beim echten Uebergang im Arrival-Pfad.
       return true;
     }
   }
@@ -990,6 +1029,7 @@ _brakeHoldStartMs = 0;
     }
   }
 
+  armOutMapSlackIfReversing_(curDeg01, desiredDirNew);
   int32_t finalTgt = outputDeg01ToEncoderTargetDeg01_(tgtDeg01, desiredDirNew);
 
   // Debug: zuletzt angewendete Backlash-Abbildung (Encoderziel - OUT-Ziel)
@@ -1072,6 +1112,8 @@ float MotionController::update(uint32_t nowMs, uint32_t dtMs) {
   // Istposition / Counts
   int32_t curDeg01 = 0;
   _encoder->getPositionDeg01(curDeg01);
+
+  advanceOutMapFlank_(curDeg01);
 
   const long countsNow = _encoder->getCountsRaw();
   // Joerg: Fuer Stillstand/KICK benutzen wir bewusst RAW-Counts.
@@ -1639,6 +1681,7 @@ if (brakingNow) {
         const int8_t nextDirOut = (errOut > 0) ? +1 : (errOut < 0 ? -1 : 0);
 
         // OUT-Ziel -> Encoder-Ziel abbilden (Backlash)
+        armOutMapSlackIfReversing_(curDeg01, nextDirOut);
         int32_t nextTgt = outputDeg01ToEncoderTargetDeg01_(nextOutDeg01, nextDirOut);
         _lastBacklashAppliedDeg01 = nextTgt - nextOutDeg01;
 
