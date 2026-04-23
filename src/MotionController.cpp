@@ -944,22 +944,23 @@ _brakeHoldStartMs = 0;
 
   
   // ------------------------------------------------------------------
-  // Joerg: Neues Ziel ist in gleicher Richtung naeher als das alte Ziel
-  //        UND wir sind bereits in der Abbremsrampe (Abbrems-Band).
-  // ------------------------------------------------------------------
-  // Beobachtung:
-  // - Aus voller Fahrt laesst sich in der Abbremsrampe ueber nur ~rampDist kein
-  //   zusaetzlicher Zielversatz (~1deg) zuverlaessig noch "einfangen":
-  //   der Rotor ueberfaehrt altes UND neues Ziel deutlich und muss danach hart
-  //   zurueck. Jede virtuelle Bremse/aktive Bremse in diesem Pfad wirkt entweder
-  //   zu zahm (Ueberfahren) oder zu hart (keine Rampe mehr).
+  // Joerg: Neues Ziel ist in gleicher Richtung naeher als das alte Ziel.
+  //        Zwei Unterfaelle — in BEIDEN soll die normale Rampe/Slew erhalten
+  //        bleiben, nur der Weg dorthin ist anders:
   //
-  // Regel (gewuenscht von Joerg):
-  // - In der Abbremsrampe: ALTES Ziel normal zu Ende fahren, neues Ziel nur als
-  //   pending merken. Nach Ankunft startet die normale Positionsfahrt zum neuen
-  //   Ziel — das ist dann automatisch eine Gegenfahrt (kurz), aber vollstaendig
-  //   mit regulaerer Rampe. Keine Bremse/Rampen-Logik wird hier angefasst.
-  if (_posActive && !_brakeRequest && !_brakeActive && !_brakeHoldActive && _decelPhaseActive) {
+  //   (A) Wir sind in der Abbremsrampe (_decelPhaseActive):
+  //       → ALTES Ziel normal zu Ende fahren; neues Ziel nur pending.
+  //         Nach Arrival startet die normale (kurze) Gegenfahrt zum neuen Ziel.
+  //
+  //   (B) Wir sind NICHT in der Abbremsrampe (Cruise/Hochlauf) und das neue
+  //       Ziel liegt im Abbremsband vor cur (absNewOut <= rampDist):
+  //       → Direktes Umschalten auf das neue Ziel wuerde pwmDown sofort fast
+  //         auf 0 zwingen — der Rotor "faellt" auf Min-PWM (Suchgeschwindigkeit)
+  //         und macht keine saubere Rampe. Stattdessen virtuelles Bremsziel
+  //         bei cur+dir*rampDist (wie STOP), Rotor nutzt die volle Bremsrampe,
+  //         faehrt leicht ueber das neue Ziel hinaus, pending regelt zurueck.
+  // ------------------------------------------------------------------
+  if (_posActive && !_brakeRequest && !_brakeActive && !_brakeHoldActive) {
     const int32_t curOutDeg01_tmp = encoderDeg01ToOutputDeg01_(curDeg01);
     const int32_t oldOutDeg01_tmp = encoderDeg01ToOutputDeg01_(_targetDeg01);
 
@@ -972,18 +973,48 @@ _brakeHoldStartMs = 0;
     const int8_t dirOldOut = (errOldOut > 0) ? +1 : (errOldOut < 0 ? -1 : 0);
     const int8_t dirNewOut = (errNewOut > 0) ? +1 : (errNewOut < 0 ? -1 : 0);
 
-    // Gleiche raeumliche Richtung, neues Ziel liegt VOR dem alten (aus Fahrtsicht).
-    // D.h. der Rotor wuerde das neue Ziel auf dem Weg zum alten ueberschreiten -
-    // das ist der problematische Fall. Kleine Toleranz (2 deg01) gegen Jitter.
-    if (dirOldOut != 0 && dirNewOut == dirOldOut && (absNewOut + 2) < absOldOut) {
-      // Nur pending merken. Altes Ziel, laufende Rampe und alle Brems-Flags
-      // bleiben UNVERAENDERT — altes Ziel wird normal zu Ende gefahren.
+    float rampDistDeg = (_cfg.rampDistDeg) ? (*_cfg.rampDistDeg) : 0.0f;
+    if (!isfinite(rampDistDeg) || rampDistDeg < 0.5f) rampDistDeg = 0.5f;
+    const int32_t rampDistDeg01 = (int32_t)lroundf(rampDistDeg * 100.0f);
+
+    // Gemeinsame Grundbedingung: gleiche raeumliche Richtung, neues Ziel
+    // liegt aus Fahrtsicht VOR dem alten (kleine Toleranz gegen Jitter).
+    const bool sameDirNearer =
+        (dirOldOut != 0 && dirNewOut == dirOldOut && (absNewOut + 2) < absOldOut);
+
+    if (sameDirNearer && _decelPhaseActive) {
+      // (A) Abbremsphase: altes Ziel zu Ende fahren, neues nur pending.
       _pendingHasTarget = true;
       _pendingTargetDeg01 = tgtDeg01;
       _pendingSoftStart = false;
+      return true;
+    }
 
-      // Timeout fuer das pending-Anschlussziel NICHT hier neu starten —
-      // das uebernimmt commandSetPosDeg01 beim echten Uebergang im Arrival-Pfad.
+    if (sameDirNearer && !_decelPhaseActive && absNewOut <= rampDistDeg01) {
+      // (B) Cruise/Hochlauf, neues Ziel liegt im Abbremsband:
+      //     virtuelle Bremse mit voller rampDist-Strecke einleiten (wie STOP),
+      //     das echte neue Ziel als pending merken. update() berechnet dann
+      //     brakeTarget = cur + dir*rampDist und nutzt die schnelle Slew-Rate
+      //     (_brakeActive). Der Rotor ueberfaehrt das neue Ziel und regelt
+      //     danach als ganz normale Gegenfahrt auf das pending-Ziel zurueck.
+      _pendingHasTarget = true;
+      _pendingTargetDeg01 = tgtDeg01;
+      _pendingSoftStart = true;
+
+      _stopPointActive = false;
+      _stopPointDeg01 = 0;
+      _stopIssuedMs = 0;
+
+      _brakeRequest = true;
+      _brakeActive = false;
+      _brakeHoldActive = false;
+      _brakeHoldStartMs = 0;
+
+      _brakeReason = 3; // RETARGET_CLOSE (Cruise-Variante)
+      _brakeIssuedMs = nowMs;
+
+      _kickActive = false;
+      _posStartMs = nowMs;
       return true;
     }
   }
