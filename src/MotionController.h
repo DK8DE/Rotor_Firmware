@@ -10,7 +10,7 @@
 // ============================================================================
 // MotionConfigPointers: Pointer auf INO-Globals (spaeter EEPROM/NVS)
 // ============================================================================
-// Alle Parameter sind Pointer, damit du sie spaeter leicht auf EEPROM/NVS umstellen kannst.
+// Alle Parameter sind Pointer, damit sie spaeter leicht auf EEPROM/NVS umgestellt werden koennen.
 // Wenn ein Pointer nullptr ist, wird im MotionController ein sinnvoller Default genutzt.
 // ============================================================================
 struct MotionConfigPointers {
@@ -114,15 +114,15 @@ public:
   // MotionController die Fahrt (Duty=0) und setzt ein Event-Flag.
   //
   // Hintergrund:
-  // - Bisher wurde die Fahrt still beendet (kein Fehler). Du wolltest aber,
-  //   dass ein Timeout wie ein normaler Fehler behandelt wird.
+  // - Bisher wurde die Fahrt still beendet (kein Fehler). Stattdessen soll
+  //   ein Timeout wie ein normaler Fehler behandelt werden.
   // - Das eigentliche Fehler-Latching und der RS485 ERR-Broadcast passieren
   //   zentral ueber SafetyMonitor in der INO.
   //
   // Diese Funktion liefert true GENAU EINMAL pro Timeout-Ereignis.
   bool consumePosTimeoutEvent();
 
-  // Joerg: true, wenn wir gerade eine Bremssequenz (STOP / Richtungswechsel) fahren.
+  // true, wenn gerade eine Bremssequenz (STOP / Richtungswechsel) laeuft.
   // In dieser Phase darf Safety NICHT ueber Encoder-Stall ausloesen.
   bool isBrakeSequenceActive() const { return _brakeRequest || _brakeActive || _brakeHoldActive; }
 
@@ -231,7 +231,7 @@ private:
   // knapp ueber dem Feinfenster (siehe fineShortHybridMove in update()).
   int32_t _posInitialAbsErrDeg01 = 0;
 
-  // Brems- / Umkehr-Sequenz (Joerg):
+  // Brems- / Umkehr-Sequenz:
   // STOP und Ziel in Gegenrichtung sollen NICHT abrupt stoppen, sondern die gleiche
   // Abbremsrampe nutzen wie am Ende einer normalen Bewegung.
   // Dafuer wird ein virtuelles Bremsziel in aktueller Bewegungsrichtung erzeugt.
@@ -252,9 +252,8 @@ uint32_t _brakeHoldStartMs = 0;
   bool _pendingHasTarget = false;
   int32_t _pendingTargetDeg01 = 0;
 
-  // Joerg:
-  // Wenn ein neues Ziel WAERHREND einer Bremssequenz (STOP / Richtungswechsel)
-  // ankommt, wollen wir danach WEICH neu starten.
+  // Neues Ziel waehrend Bremssequenz (STOP / Richtungswechsel): danach weich
+  // neu starten statt mit hartem KICK.
   // Hintergrund:
   // - Der Rotor ist in diesem Moment noch am Ausrollen / Abbremsen.
   // - Ein "harter" KICK mit sehr hoher Slew-Rate kann dann beim Neustart
@@ -278,7 +277,7 @@ uint32_t _brakeHoldStartMs = 0;
   long _kickStartCounts = 0;
   int8_t _kickDir = 0;
 
-  // Joerg: KICK muss robust gegen "Count-Flattern" / Nachlauf sein.
+  // KICK muss robust gegen "Count-Flattern" / Nachlauf sein.
   // Beim Umschalten nach STOP/Richtungswechsel kann der Encoder noch wenige
   // Counts liefern, obwohl der neue KICK noch gar nicht wirklich "zieht".
   // Wenn wir den KICK dann zu frueh beenden, bleibt die Grobrampe bei
@@ -335,7 +334,7 @@ uint32_t _brakeHoldStartMs = 0;
   bool _decelPhaseActive = false;
 
   // ------------------------------------------------------------
-  // Feinphase: Exakt-Nachjustage (Joerg)
+  // Feinphase: Exakt-Nachjustage
   // ------------------------------------------------------------
   // In einer Richtung kann es vorkommen, dass wir nach der einseitigen
   // Ankunft (innerhalb der Toleranz, z.B. -1/-2 Deg01) nicht exakt auf 0

@@ -226,7 +226,7 @@ static float g_homeReturnRampDeg = 30.0f;
 //     -> Z-Signal kann vorhanden sein, ist aber je nach Encoder/Anbau nicht zwingend.
 // - ENCTYPE_RING_OUTPUT:
 //     Ring-Encoder sitzt auf der Ausgangsachse.
-//     -> Du misst direkt die Abtriebsposition (Spiel wird "mitgemessen"), daher in der Regel KEINE
+//     -> Direkte Messung der Abtriebsposition (Spiel wird "mitgemessen"), daher in der Regel KEINE
 //        zusaetzliche Umkehrspiel-Kompensation noetig.
 //     -> In unserem Projekt nutzt dieser Modus zusaetzlich das Z-Signal (Index) zur Korrektur/CPR-Lernen.
 // Hinweis: falscher Typ fuehrt zu falscher Z-Auswertung und ggf. falschem Umkehrspiel-Verhalten.
@@ -289,7 +289,7 @@ static bool g_restrictEndstops = true;
 //
 // Richtwerte:
 // - 20..50 ms ist meist ideal.
-// - Wenn du extrem traege/alte Schalter hast: 60..100 ms.
+// - Bei extrem traegen/alten Schaltern: 60..100 ms.
 static uint32_t g_endstopDebounceMs = 30;
 
 // ============================================================================
@@ -298,7 +298,7 @@ static uint32_t g_endstopDebounceMs = 30;
 //
 // WICHTIG: Es werden mV-Werte der Strommess-Eingaenge ausgewertet (nicht Ampere!).
 // Je nach Board/Hardware entspricht ein bestimmter mV-Wert einem bestimmten Motorstrom.
-// Fuer eine sinnvolle Einstellung musst du im Debug beobachten, welche IS-mV-Werte
+// Fuer eine sinnvolle Einstellung im Debug beobachten, welche IS-mV-Werte
 // bei normaler Fahrt, bei Anlaufspitze und bei Blockade auftreten.
 //
 // Typisches Vorgehen:
@@ -324,7 +324,7 @@ static uint32_t g_isSampleIntervalMs = 5; // Abtastintervall (ms). Kleiner=schne
 // - Beim Start (setup) wird bei MOTOR AUS / PWM=0 der IS1/IS2-Grundwert gemessen.
 // - Dieser Wert wird waehrend des Betriebs immer abgezogen (Clamp auf 0mV).
 //
-// Optional kannst du zusaetzlich einen kleinen manuellen Trim setzen (z.B. wenn ein Kanal konstant
+// Optional zusaetzlich einen kleinen manuellen Trim setzen (z.B. wenn ein Kanal konstant
 // 5..10mV daneben liegt). Standard: 0.
 static bool     g_isAutoCalEnabled = true;   // true: Offset beim Start automatisch messen
 static uint32_t g_isAutoCalSettleMs = 250;   // Wartezeit nach Start (ms), damit ADC/Signale stabil sind
@@ -382,7 +382,7 @@ static bool g_safetyDutyPositiveMovesRightEndstop = true;
 static int32_t  g_arriveTolDeg01 = 2;          // 0,02deg
 
  // Haltezeit (ms), die innerhalb der Toleranz erreicht werden muss.
- // Erhoehen, wenn du bei Vibrationen/Federung ein Flattern um die Toleranz siehst.
+ // Erhoehen bei Vibrationen/Federung, wenn ein Flattern um die Toleranz auftritt.
  // Senken, wenn es schneller "fertig" melden soll.
 static uint32_t g_arriveHoldMs = 200;
 
@@ -453,7 +453,7 @@ static bool g_stallMonitorEnabled = true;
 // Tuning:
 // - g_minStallPwm sollte IMMER etwas groesser als g_minPwm sein (typisch +2 .. +5).
 // - Wenn bei Mini-Schritten noch SE_STALL kommt -> g_minStallPwm erhoehen.
-// - Wenn du Blockaden auch bei sehr langsamer/kleiner PWM schneller erkennen willst -> g_minStallPwm senken
+// - Blockaden auch bei sehr langsamer/kleiner PWM schneller erkennen -> g_minStallPwm senken
 //   (aber nicht unter g_minPwm!).
 // Default bewusst etwas ueber g_minPwm, damit beim Creep (g_minPwm) keine
 // falschen SE_STALL auftreten (z.B. beim rechten Endschalter-Suchlauf im Homing).
@@ -498,7 +498,7 @@ static float g_pwmMaxAbsNv = 100.0f;
 // Temperatur / LoadMonitor (Kalibrierung + Statistik)
 // ============================================================================
 // DS18B20 OneWire-Pin (Umgebung + optional Motor)
-// Hinweis: Sensor wurde von Joerg an GPIO 2 getestet.
+// Hinweis: Sensor wurde an GPIO 2 validiert (Referenz-Hardware).
 static uint8_t  g_tempOneWirePin = 2;     // GPIO2
 static uint32_t g_tempIntervalMs = 1000;  // Messintervall (ms)
 
@@ -548,7 +548,7 @@ static bool g_windEnable = true;
 // ============================================================================
 // Anemometer (Windmesser, analog 0..2V)
 // ============================================================================
-// Joerg: Windmesser an IO9 liefert 0..2V.
+// Windmesser an IO9: analog 0..2V.
 // - 0V  = 0 km/h (Windstille)
 // - 2V  = 200 km/h
 //
@@ -793,7 +793,7 @@ static void loadPreferencesIntoGlobals() {
   if (g_minStallPwm < 0.0f) g_minStallPwm = 0.0f;
   if (g_minStallPwm > 100.0f) g_minStallPwm = 100.0f;
 
-  // Joerg: Stall-Arming muss ueber g_minPwm liegen, sonst kann bei Creep-PWM
+  // Stall-Arming muss ueber g_minPwm liegen, sonst kann bei Creep-PWM
   // (z.B. Endschalter-Suche im Homing) ein falscher Stall-Fehler entstehen.
   // Empfehlung: +2..+5% ueber g_minPwm.
   const float minStallSuggested = g_minPwm + 2.0f;
@@ -1349,7 +1349,7 @@ dcfg.restartAtMs      = &g_restartAtMs;
 // ============================================================================
 // PWM-Max Laufzeit-Rampe (SETPWM waehrend der Fahrt)
 // ============================================================================
-// Joerg: Wenn du per RS485 (SETPWM) die Geschwindigkeit waehrend einer Bewegung aenderst,
+// Aenderung der Geschwindigkeit per RS485 (SETPWM) waehrend einer Bewegung:
 // darf die PWM nicht springen. Deshalb gibt es zwei Werte:
 // - g_pwmMaxAbsCmd : Sollwert (kommt direkt aus SETPWM/SETMAXPWM)
 // - g_pwmMaxAbs    : geglaetteter Istwert, den MotionController wirklich nutzt
@@ -1572,7 +1572,7 @@ void loop() {
   // ------------------------------------------------------------
   // Mindest-PWM (g_minPwm) als harter Untergrenzwert
   //
-  // Anforderung von Joerg:
+  // Anforderung (Mindest-PWM bei Bewegung):
   // - Sobald Bewegung gefordert ist (Duty != 0), darf die PWM niemals
   //   unter g_minPwm fallen - egal ob Homing, Positionsfahrt, Rampen etc.
   // - 0 bleibt 0 (Stop ist weiterhin moeglich).
@@ -1603,7 +1603,7 @@ void loop() {
 
   // Safety (Strom + Stall + Endstops + Deadman)
   const long safetyEncCounts = encoder.getCountsRaw(); // Stall-Check bewusst RAW, damit Z-Korrektur/Offsets keinen Fake-Fortschritt erzeugen
-  // Joerg: Stall-Erkennung darf waehrend STOP-/Richtungswechsel-Bremssequenzen nicht ausloesen.
+  // Stall-Erkennung darf waehrend STOP-/Richtungswechsel-Bremssequenzen nicht ausloesen.
   // Sonst kann es passieren, dass bei auslaufender PWM noch > Stall-Schwelle ist,
   // aber nur wenige Counts kommen (gewollt), und trotzdem SE_STALL gelatcht wird.
   const float safeDuty = safety.update(nowMs, desiredDutyForSafety, rsMotionActive, lastMotionCmdMs, safetyEncCounts);
@@ -1644,7 +1644,7 @@ if (wantBrake) {
     motor.enable(true);
 
     // ------------------------------------------------------------
-    // Harte Mindest-PWM (Joerg):
+    // Harte Mindest-PWM:
     // - Sobald Bewegung gefordert ist (Duty != 0), niemals unter g_minPwm.
     // - 0 bleibt 0 (STOP bleibt moeglich).
     //

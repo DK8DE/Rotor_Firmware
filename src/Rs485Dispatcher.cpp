@@ -544,7 +544,13 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   cmd.trim();
   cmd.toUpperCase();
 
-  // Deadman/Keepalive (Joerg):
+  // SETPOSCC: wird von diesem Rotor nicht unterstuetzt (Fremd-/Legacy-Master).
+  // Stillschweigend verwerfen — kein ACK, kein NAK, keine Seiteneffekte (auch kein Deadman).
+  if (f.slave == ownId && cmd == "SETPOSCC") {
+    return;
+  }
+
+  // Deadman/Keepalive:
   // - Es soll NUR dann als Lebenszeichen zaehlen, wenn ein Frame an UNSERE
   //   eigene ID adressiert ist.
   // - Broadcast (255) soll den Deadman NICHT "am Leben halten", weil sonst
@@ -1808,7 +1814,7 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   // ------------------------------------------------------------------------
   // SETREF
   // ------------------------------------------------------------------------
-  // Joerg: SETREF quittiert Fehler (ERR) und startet (wie frueher) das Homing.
+  // SETREF quittiert Fehler (ERR) und startet (wie frueher) das Homing.
   // Steuerung ueber Parameter:
   //   SETREF:0  -> nur ERR quittieren (kein Homing)
   //   SETREF:1  -> Homing starten (Standard/Legacy)

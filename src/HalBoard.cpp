@@ -33,7 +33,7 @@ void HalBoard::begin() {
   // Hinweis:
   // - In dieser Projekt-Hardware sind Pullups extern vorhanden.
   // - Daher wird hier INPUT verwendet (kein interner Pullup).
-  //   Falls du KEINE externen Pullups hast: INPUT_PULLUP verwenden!
+  //   Ohne externe Pullups: INPUT_PULLUP verwenden.
   // ------------------------------------------------------------
   pinMode(PIN_END_LEFT, INPUT);
   pinMode(PIN_END_RIGHT, INPUT);

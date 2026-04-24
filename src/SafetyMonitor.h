@@ -44,7 +44,7 @@ struct SafetyConfig {
   //   duty > 0  -> Bewegung Richtung RIGHT-Endschalter (MAX)
   //   duty < 0  -> Bewegung Richtung LEFT-Endschalter  (MIN)
   //
-  // Wenn bei dir beim Homing das Backoff aus dem Endschalter mit ERR11
+  // Wenn beim Homing das Backoff aus dem Endschalter mit ERR11
   // (SE_ENDSTOP) blockiert wird, obwohl der Motor physisch aus dem
   // Endschalter heraus fahren soll, dann ist die Richtungskonvention
   // invertiert -> hier false setzen.
@@ -108,7 +108,7 @@ struct SafetyConfig {
 
 
   // IS-Offsets (mV) - werden von den Rohwerten abgezogen (clamp >=0)
-  // Damit kannst du einen Grundoffset der IS-Eingaenge kompensieren.
+  // Damit laesst sich ein Grundoffset der IS-Eingaenge kompensieren.
   uint32_t isOffset1Mv = 0;
   uint32_t isOffset2Mv = 0;
 
@@ -331,7 +331,7 @@ private:
   uint32_t _graceUntilMs = 0;
   uint32_t _hardOverSinceMs = 0;
 
-  // Joerg: MotionController-Bremssequenz aktiv (STOP / Richtungswechsel).
+  // MotionController-Bremssequenz aktiv (STOP / Richtungswechsel).
   // Wenn true, wird die Encoder-Stall-Erkennung ausgesetzt.
 
 

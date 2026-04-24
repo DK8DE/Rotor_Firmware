@@ -2,7 +2,7 @@
 
 #include <Arduino.h>
 
-// DS18B20 (OneWire) Bibliothek (wie von Joerg getestet)
+// DS18B20 (OneWire) Bibliothek (Referenz-Konfiguration)
 #include <7semi_DS18B20.h>
 
 // ============================================================================

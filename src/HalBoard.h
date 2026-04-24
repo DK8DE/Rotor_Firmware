@@ -29,7 +29,7 @@ static const int PIN_IS2_ADC     = 16;  // BTN8982 IS2, analog 0..3.3V
 // Wind- & Richtungsmesser (RS485 / Modbus)
 // ------------------------------------------------------------
 // Neuer Sensor laeuft separat ueber RS485 (nicht ueber unser Master-RS485).
-// Verkabelung laut Joerg:
+// Verkabelung (Referenz):
 // - RX = Pin 9
 // - TX = Pin 8
 // - DE/RE (Senden/Empfangen Umschaltung) = Pin 38

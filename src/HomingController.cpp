@@ -385,7 +385,7 @@ void HomingController::update(uint32_t nowMs) {
       return;
     }
 
-    // Joerg (Homing-Fahrt rechts / rechter Endschalter):
+    // Homing-Fahrt rechts / rechter Endschalter:
     // -------------------------------------------------
     // Zielverhalten (wie besprochen):
     // - Die \"Schaetz-Strecke\" (z.B. ~160000 Counts) wird mit g_homeFastPwmPercent gefahren.

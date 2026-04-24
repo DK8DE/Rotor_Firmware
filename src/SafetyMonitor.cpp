@@ -640,7 +640,7 @@ float SafetyMonitor::update(uint32_t nowMs,
   float duty = clampFloat(desiredDutySigned, -100.0f, 100.0f);
 
   // ----------------------------------------------------------
-  // Deadman-Logik (Joerg):
+  // Deadman-Logik:
   // - Deadman soll NUR dann zuschlagen, wenn WAEHREND EINER BEWEGUNG
   //   (d.h. es wird eine PWM != 0 angefordert) laenger als cmdTimeoutMs
   //   KEIN gueltiges Kommando vom Master empfangen wurde.

@@ -374,7 +374,7 @@ bool LoadMonitor::startCalibration(uint32_t nowMs) {
   if (!_motion) return false;
   if (_calState == LC_STATE_RUNNING) return false;
 
-  // Joerg: Falls kurz davor noch eine Live-Auswertung aktiv war (z.B. Master hat SETPOSDG gestartet
+  // Falls kurz davor noch eine Live-Auswertung aktiv war (z.B. Master hat SETPOSDG gestartet
   // und direkt danach SETCAL gesendet), brechen wir die Live-Auswertung ab.
   // Kalibrierung soll IMMER exklusiv laufen, ohne dass alte Bin-Visited Flags/Live-States stoehren.
   abortLiveMoveTracking();

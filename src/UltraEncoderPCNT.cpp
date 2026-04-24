@@ -106,7 +106,7 @@ bool UltraEncoderPCNT::begin(uint8_t accelPercent,
 
     // Wenn schon aktiv: sauber stoppen (inkl. PCNT/Task)
     // Z bleibt dabei deaktiviert, weil stop() detachZ() macht.
-    // Falls du Z dauerhaft willst: nach begin() wieder attachZ() aufrufen.
+    // Fuer dauerhaftes Z: nach begin() erneut attachZ() aufrufen.
     stop();
 
     // PCNT initialisieren

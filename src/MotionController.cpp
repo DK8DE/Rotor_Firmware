@@ -301,7 +301,7 @@ void MotionController::startKickIfNeeded(uint32_t nowMs, int32_t curDeg01) {
 
   // Optional: KICK aktivieren, bis Encoder-Counts Bewegung zeigen.
   //
-  // WICHTIG (Fix fuer Joerg):
+  // WICHTIG:
   // Bei STOP / Richtungswechsel laufen wir zuerst in eine Bremssequenz und gehen
   // danach wieder in eine neue Positionsfahrt.
   // In genau diesem Uebergang kann _moveDir kurzfristig 0 sein (z.B. wenn wir
@@ -444,7 +444,7 @@ float MotionController::applyPwmSlewCustom(float targetDuty, float lastDuty, uin
 }
 
 float MotionController::updatePwmMaxAbsEffective(uint32_t dtMs) {
-  // Joerg: PWM-Max wird bereits ausserhalb (INO) geglaettet:
+  // PWM-Max wird bereits ausserhalb (INO) geglaettet:
   // - g_pwmMaxAbsCmd (Soll) -> g_pwmMaxAbs (Ist)
   // Der MotionController soll hier daher NICHT nochmals eine eigene Rampe bauen,
   // sondern einfach den aktuellen Istwert verwenden.
@@ -467,7 +467,7 @@ void MotionController::commandStopSoft() {
 }
 
 void MotionController::commandStopToCurrentPosition(uint32_t nowMs) {
-  // STOP (Joerg):
+  // STOP:
   // - Position merken, an der STOP ankam (Stop-Punkt)
   // - NICHT abrupt auf 0 gehen!
   // - Stattdessen ein virtuelles Bremsziel in aktueller Bewegungsrichtung erzeugen,
@@ -496,7 +496,7 @@ void MotionController::commandStopToCurrentPosition(uint32_t nowMs) {
 
 
   // ------------------------------------------------------------------
-  // Joerg: Neues Ziel in Gegenrichtung WAERHREND normaler Abbremsphase
+  // Neues Ziel in Gegenrichtung WAERHREND normaler Abbremsphase
   // ------------------------------------------------------------------
   // Problem:
   // - Wenn wir bereits im Ramp-Down (Abbremsphase) zum aktuellen Ziel sind
@@ -553,7 +553,7 @@ bool MotionController::commandSetPosDeg01(int32_t tgtDeg01, uint32_t nowMs) {
   if (!_encoder) return false;
 
   // Start aus Stillstand?
-  // (Joerg: Wenn wir am Ziel in der Feinjustage stehen und ein neues Ziel kommt,
+  // Wenn wir am Ziel in der Feinjustage stehen und ein neues Ziel kommt,
   //  soll die Justage sofort abgebrochen werden und die neue Fahrt wie aus Stillstand starten.)
   bool startingFromIdle = (!_posActive);
 
@@ -563,7 +563,7 @@ bool MotionController::commandSetPosDeg01(int32_t tgtDeg01, uint32_t nowMs) {
   _encoder->getPositionDeg01(curDeg01);
 
   // ------------------------------------------------------------------
-  // Joerg: Neues Ziel waehrend Bremsrampe (STOP / Richtungswechsel)
+  // Neues Ziel waehrend Bremsrampe (STOP / Richtungswechsel)
   // ------------------------------------------------------------------
   // Deterministisch:
   // - Waehren aktiver Bremssequenz gilt "latest target wins".
@@ -587,7 +587,7 @@ bool MotionController::commandSetPosDeg01(int32_t tgtDeg01, uint32_t nowMs) {
 
 
   // ------------------------------------------------------------------
-  // Joerg: Neues Ziel in Gegenrichtung WAERHREND normaler Abbremsphase (Ramp-Down)
+  // Neues Ziel in Gegenrichtung WAERHREND normaler Abbremsphase (Ramp-Down)
   // ------------------------------------------------------------------
   // Wenn wir bereits im Ramp-Down zum aktuellen Ziel sind und es kommt ein neues Ziel
   // in Gegenrichtung, dann wuerde ein direktes Umschalten des _targetDeg01 die
@@ -640,7 +640,7 @@ bool MotionController::commandSetPosDeg01(int32_t tgtDeg01, uint32_t nowMs) {
     const float idleMeasTol = 0.4f; // deg/s
     const bool speedSmall = (fabsf(_speedMeasDegPerSec) <= idleMeasTol) && (fabsf(_speedCmdRampDegPerSec) <= 1.0f);
 
-    // Joerg: Sonderfall "Umkehren in der Feinphase".
+    // Sonderfall "Umkehren in der Feinphase".
     // Wenn wir kurz vor dem Ziel sind (Feinfenster) und ein neues Ziel in Gegenrichtung kommt,
     // darf die Logik NICHT in die Bremsfahrt schalten. Grund:
     // - In der Bremsfahrt ist der Fein-Kick deaktiviert und die Brems-PWM wird niemals erhoeht.
@@ -686,7 +686,7 @@ bool MotionController::commandSetPosDeg01(int32_t tgtDeg01, uint32_t nowMs) {
   }
 
   // STOP/Brake abbrechen, wenn ein neues Ziel kommt
-  // (Joerg: neues Ziel kann Fahrt verlaengern oder aendern)
+  // Neues Ziel kann Fahrt verlaengern oder aendern.
   _stopPointActive = false;
   _stopPointDeg01 = 0;
   _stopIssuedMs = 0;
@@ -768,7 +768,7 @@ bool MotionController::commandSetPosDeg01(int32_t tgtDeg01, uint32_t nowMs) {
     _kickStartCounts = _encoder->getCountsRaw();
     _kickDir = desiredDirNew;
 
-    // Joerg: Counts/Jitter vor dem echten "Ziehen" ignorieren.
+    // Counts/Jitter vor dem echten "Ziehen" ignorieren.
     _kickDriveStarted = false;
     _kickDriveStartMs = 0;
     _kickDriveStartCounts = 0;
@@ -805,7 +805,7 @@ bool MotionController::commandSetPosDeg01(int32_t tgtDeg01, uint32_t nowMs) {
 // Debug: zuletzt angewendete Backlash-Abbildung (Encoderziel - OUT-Ziel)
 _lastBacklashAppliedDeg01 = finalTgt - tgtDeg01;
 
-// clamp (wrap ist bei dir AUS)
+// clamp (Achsen-Wrap ist deaktiviert)
 const int32_t amin = axisMinDeg01();
 const int32_t amax = axisMaxDeg01();
 if (finalTgt < amin) finalTgt = amin;
@@ -944,7 +944,7 @@ _brakeHoldStartMs = 0;
 
   
   // ------------------------------------------------------------------
-  // Joerg: Neues Ziel ist in gleicher Richtung naeher als das alte Ziel.
+  // Neues Ziel ist in gleicher Richtung naeher als das alte Ziel.
   //        Zwei Unterfaelle — in BEIDEN soll die normale Rampe/Slew erhalten
   //        bleiben, nur der Weg dorthin ist anders:
   //
@@ -1066,7 +1066,7 @@ _brakeHoldStartMs = 0;
   // Debug: zuletzt angewendete Backlash-Abbildung (Encoderziel - OUT-Ziel)
   _lastBacklashAppliedDeg01 = finalTgt - tgtDeg01;
 
-  // clamp (wrap ist bei dir AUS)
+  // clamp (Achsen-Wrap ist deaktiviert)
   const int32_t amin = axisMinDeg01();
   const int32_t amax = axisMaxDeg01();
   if (finalTgt < amin) finalTgt = amin;
@@ -1130,7 +1130,7 @@ float MotionController::update(uint32_t nowMs, uint32_t dtMs) {
   // Timeout
   const uint32_t posTimeout = (_cfg.posTimeoutMs) ? (*_cfg.posTimeoutMs) : 60000;
   if ((nowMs - _posStartMs) > posTimeout) {
-    // Joerg: Bisher wurde ein Positions-Timeout still beendet (kein Error).
+    // Bisher wurde ein Positions-Timeout still beendet (kein Error).
     // Gewuenscht: Timeout wie normaler Fehler behandeln.
     // Die eigentliche Fehlerbehandlung (Safety-Fault + ERR-Broadcast) erfolgt
     // zentral in der INO. Hier setzen wir nur ein Event-Flag.
@@ -1147,7 +1147,7 @@ float MotionController::update(uint32_t nowMs, uint32_t dtMs) {
   advanceOutMapFlank_(curDeg01);
 
   const long countsNow = _encoder->getCountsRaw();
-  // Joerg: Fuer Stillstand/KICK benutzen wir bewusst RAW-Counts.
+  // Fuer Stillstand/KICK benutzen wir bewusst RAW-Counts.
   // Grund: Z-Korrektur / Offset-Korrektur kann die "korrigierten" Counts auch im Stillstand springen lassen
   // (z.B. +/- wenige Counts oder in groesseren Korrekturschritten). Das wuerde _noMoveSinceMs dauernd resetten
   // und STOP/Richtungswechsel in der Brems-Hold-Phase "haengen" lassen.
@@ -1161,7 +1161,7 @@ float MotionController::update(uint32_t nowMs, uint32_t dtMs) {
     _lastMoveCounts = countsNow;
     _noMoveSinceMs = nowMs;
   } else {
-    // Joerg: Bei sehr hochaufloesenden Encodern (z.B. 160k CPR) koennen
+    // Bei sehr hochaufloesenden Encodern (z.B. 160k CPR) koennen
     // Einzel-Counts durch Rauschen/Quantisierung flackern. Wenn wir hier schon
     // bei +/-1 Count "Bewegung" erkennen, resetten wir _noMoveSinceMs dauernd.
     // Das verhindert dann sowohl die Ankunfts-Erkennung (Stillstand) als auch
@@ -1220,7 +1220,7 @@ float MotionController::update(uint32_t nowMs, uint32_t dtMs) {
   // ------------------------------------------------------------
   // Rampenweg bestimmen (primaer Grad, optional Counts)
   // ------------------------------------------------------------
-  // Hinweis (Joerg): Im neuen Profil-Modus (PWM-Rampenprofil) nutzen wir KEINE
+  // Hinweis: Im Profil-Modus (PWM-Rampenprofil) nutzen wir KEINE
   // Speed-Trajektorie mehr. Die Rampenlaenge ist eine reine Weggroesse (Grad),
   // ueber die wir PWM von Minimum -> Maximum -> Minimum/Fein-PWM auslaufen lassen.
 
@@ -1237,7 +1237,7 @@ float MotionController::update(uint32_t nowMs, uint32_t dtMs) {
 
   // Auto-Slew aus Speed-Rampe ist hier nicht mehr sinnvoll (wir haben keine
   // Speed-Rampe mehr). Wir lassen applyPwmSlew() auf seinen Default-Fallback
-  // (Default-Slew, aktuell 20%/s) zurueckfallen, oder du setzt pwmSlewPerSec explizit.
+  // (Default-Slew, aktuell 20%/s) zurueckfallen, oder pwmSlewPerSec explizit setzen.
   _autoPwmSlewPerSec = 0.0f;
 
   // ------------------------------------------------------------
@@ -1273,7 +1273,7 @@ float MotionController::update(uint32_t nowMs, uint32_t dtMs) {
 
     int32_t brakeTarget = curDeg01 + (int32_t)dir * brakeDistDeg01;
 
-    // Achsenbereich clamp (wrap ist bei dir AUS)
+    // Achsenbereich clamp (Achsen-Wrap ist deaktiviert)
     const int32_t amin = axisMinDeg01();
     const int32_t amax = axisMaxDeg01();
     if (brakeTarget < amin) brakeTarget = amin;
@@ -1338,7 +1338,7 @@ const float errDeg = (float)errDeg01 / 100.0f;
   if (arriveTolDeg01 < 0) arriveTolDeg01 = -arriveTolDeg01;
   const uint32_t arriveHoldMs = (_cfg.arriveHoldMs) ? (*_cfg.arriveHoldMs) : 200;
 
-  // Joerg: Ziel-Toleranz darf nur auf der "positiven" Seite gelten.
+  // Ziel-Toleranz darf nur auf der "positiven" Seite gelten.
   // Das Fenster ist damit immer [target .. target+tol] und nie unterhalb des Solls.
   // errDeg01 = target - current
   // - errDeg01 <= 0   -> current >= target (wir sind nicht UNTER dem Soll)
@@ -1394,7 +1394,7 @@ const float errDeg = (float)errDeg01 / 100.0f;
   // ------------------------------------------------------------
   // Grobphase: Wenn wir "kleben" (Haftreibung / Last) -> KICK erneut aktivieren
   // ------------------------------------------------------------
-  // Problem (Joerg): Nach STOP oder Richtungswechsel kann der Motor in der
+  // Problem: Nach STOP oder Richtungswechsel kann der Motor in der
   // neuen Richtung manchmal nicht mehr anlaufen, weil er nur knapp am Mindest-
   // PWM arbeitet. Dann sieht man im Log z.B.:
   //   v=0.00, m=COARSE, duty~19..20, err>0
@@ -1434,7 +1434,7 @@ const float errDeg = (float)errDeg01 / 100.0f;
       _kickStartCounts = countsNow;
       _kickDir = desiredDirToTarget;
 
-      // Joerg: Counts/Jitter vor dem echten "Ziehen" ignorieren.
+      // Counts/Jitter vor dem echten "Ziehen" ignorieren.
       _kickDriveStarted = false;
       _kickDriveStartMs = 0;
       _kickDriveStartCounts = 0;
@@ -1451,7 +1451,7 @@ const float errDeg = (float)errDeg01 / 100.0f;
       _kickSoftMode = false;
     } else {
       const long cNow = _encoder->getCountsRaw();
-      // Joerg: Sehr kleine Count-Aenderungen koennen bei manchen Encodern auch
+      // Sehr kleine Count-Aenderungen koennen bei manchen Encodern auch
       // ohne echte Bewegung auftreten (Rauschen/Flattern). Beim Umschalten
       // nach STOP/Richtungswechsel kann es ausserdem einen kleinen Nachlauf geben.
       //
@@ -1555,7 +1555,7 @@ const float errDeg = (float)errDeg01 / 100.0f;
 
   
 // ------------------------------------------------------------
-// PWM-Profil (Joerg): Ramp-Up -> Cruise -> Ramp-Down
+// PWM-Profil: Ramp-Up -> Cruise -> Ramp-Down
 // ------------------------------------------------------------
 // Grobfahrt wird jetzt NICHT mehr ueber Speed-PI gefahren, sondern ueber ein
 // einfaches PWM-Profil, positionsgefuehrt ueber Encoder.
@@ -1597,7 +1597,7 @@ if (!brakingNow) {
 }
 
 // Ziel-/Toleranzfenster getroffen?
-// Joerg: Das Fenster ist jetzt bewusst EINSEITIG.
+// Das Fenster ist jetzt bewusst EINSEITIG.
 // Beispiel bei Soll 300,10 und Toleranz 0,02deg:
 // - 300,09  => NICHT angekommen
 // - 300,10  => angekommen
@@ -1648,7 +1648,7 @@ if (brakingNow) {
   const bool remGone = (remainingDeg <= 0.0001f);
   const bool dutySmall = (fabsf(_lastAppliedDuty) <= 3.0f);
 
-  // Joerg: WICHTIGER Fix fuer Richtungswechsel/STOP
+  // WICHTIGER Fix fuer Richtungswechsel/STOP
   // -------------------------------------------------
   // Problem:
   // - Bei STOP oder Richtungswechsel setzen wir ein "virtuelles Bremsziel" (brakeTarget)
@@ -1716,7 +1716,7 @@ if (brakingNow) {
         int32_t nextTgt = outputDeg01ToEncoderTargetDeg01_(nextOutDeg01, nextDirOut);
         _lastBacklashAppliedDeg01 = nextTgt - nextOutDeg01;
 
-        // clamp (wrap ist bei dir AUS)
+        // clamp (Achsen-Wrap ist deaktiviert)
         const int32_t amin = axisMinDeg01();
         const int32_t amax = axisMaxDeg01();
         if (nextTgt < amin) nextTgt = amin;
@@ -1770,7 +1770,7 @@ if (pwmMinAbs < 0.0f) pwmMinAbs = 0.0f;
 if (pwmMinAbs > pwmMax) pwmMinAbs = pwmMax;
 
 // Ramp-Up (Start -> pwmMax)
-// WICHTIG (Joerg): Bei sehr kurzen Fahrten kann es passieren, dass die Start-Rampe
+// WICHTIG: Bei sehr kurzen Fahrten kann es passieren, dass die Start-Rampe
 // am Rand des Feinfensters (remainingDeg ~= fineWin) noch NICHT bis zur Fein-PWM
 // (endAbs) "hochgezogen" hat. Dann waere das Minimum aus Up/Down < endAbs und beim
 // Umschalten auf Feinphase gaebe es einen PWM-Sprung (Ruck).
@@ -1831,7 +1831,7 @@ if (downAlpha > 1.0f) downAlpha = 1.0f;
 
 float pwmDownAbs = endAbs + (pwmMax - endAbs) * downAlpha;
 
-// Joerg: Merker fuer Abbremsphase (Ramp-Down limitiert das Dreieckprofil)
+// Merker fuer Abbremsphase (Ramp-Down limitiert das Dreieckprofil)
 // WICHTIG:
 // Ein blosses "pwmDownAbs <= pwmUpAbs" ist zu grob, weil bei Vollfahrt / Plateau
 // haeufig beide Kurven auf demselben Wert liegen. Dann waeren wir formal schon in
