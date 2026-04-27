@@ -1949,6 +1949,30 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   }
 
   // ------------------------------------------------------------------------
+  // SETROTORID (nur Broadcast 255)
+  // ------------------------------------------------------------------------
+  // Wenn die Slave-ID unbekannt ist: Master sendet an 255, Payload = neue ID.
+  // Gleiche Persistenz/Uebernahme wie SETID, aber ohne ACK (Bus-Kollisionen vermeiden).
+  if (cmd == "SETROTORID") {
+    if (f.slave != 255) {
+      if (shouldReply) sendNak(f.master, "SETROTORID", "NBCAST");
+      return;
+    }
+
+    const uint8_t newId = parseU8Param(f.params);
+    const bool changed = (_cfg.ownSlaveId && (*_cfg.ownSlaveId != newId));
+    if (changed) {
+      persistPutU8("id", _cfg.ownSlaveId, newId);
+      if (_rs485) _rs485->setOwnSlaveId(newId);
+      serialEventState("SETROTORID");
+      return;
+    }
+
+    serialEventState("SETROTORID");
+    return;
+  }
+
+  // ------------------------------------------------------------------------
   // Achsgrenzen (deg01)
   // ------------------------------------------------------------------------
   if (cmd == "GETBEGINDG") {

@@ -104,6 +104,7 @@ Die Kommunikation erfolgt über RS485 mit konfigurierbarer Slave-ID.
 | Kommando | Beschreibung |
 |----------|--------------|
 | `SETID:<id>` | Slave-ID setzen (1–247) |
+| `SETROTORID:<id>` | Wie `SETID`, aber **nur** als Broadcast an Adresse `255` (wenn die Slave-ID unbekannt ist). Keine RS485-Antwort. Adressiert man eine konkrete ID, antwortet der Slave mit NAK `NBCAST`. |
 | `SETPWM:<prozent>` | Maximale PWM setzen (0–100%) |
 | `SETMINPWM:<prozent>` | Mindest-PWM setzen |
 | `SETSTALLTO:<ms>` | Stall-Timeout setzen |
