@@ -248,7 +248,7 @@ static UltraEncoderMode g_encMode = ULTRA_MODE_SINGLE;
 // Handspeed (% PWM) fuer lokale Tasterbedienung (links/rechts) ohne Rampe.
 // Diese Funktion ist bewusst "hart" (keine Beschleunigungsrampe), damit es sich direkt anfuehlt.
 // Beispiel: 15% fuer sehr sanft, 30% fuer zuegig.
-static float g_handSpeedPercent  = 25.0f;
+static float g_handSpeedPercent  = 35.0f;
 
 // ============================================================================
 // Timeouts
@@ -256,7 +256,7 @@ static float g_handSpeedPercent  = 25.0f;
 // Timeout fuer Positionsfahrt (ms).
 // Wenn Ziel in dieser Zeit nicht erreicht wird -> Fehler/Abbruch (Safety).
 // Beispiel: sehr langsame Fahrt: 120000 ms.
-static uint32_t g_posTimeoutMs = 60000;
+static uint32_t g_posTimeoutMs = 120000;
 
 // Deadman / Keepalive fuer RS485-Betrieb (ms).
 // 0 = deaktiviert.
@@ -266,7 +266,7 @@ static uint32_t g_posTimeoutMs = 60000;
 //        vom Master empfangen wurde.
 //      - In Haltephasen (PWM ~ 0) soll es keinen Timeout geben.
 // Beispiel: 2000 -> 2 Sekunden ohne Poll waehrend Bewegung => SE_TIMEOUT.
-static uint32_t g_cmdTimeoutMs = 2000;
+static uint32_t g_cmdTimeoutMs = 3000;
 
 // ============================================================================
 // Safety
@@ -290,7 +290,7 @@ static bool g_restrictEndstops = true;
 // Richtwerte:
 // - 20..50 ms ist meist ideal.
 // - Bei extrem traegen/alten Schaltern: 60..100 ms.
-static uint32_t g_endstopDebounceMs = 30;
+static uint32_t g_endstopDebounceMs = 20;
 
 // ============================================================================
 // Stromueberwachung (IS) in mV (EEPROM-tauglich)
