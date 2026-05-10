@@ -771,10 +771,20 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   }
 
   // ------------------------------------------------------------------------
-  // GETREF
+  // GETREF (nur Referenz-Flag; waehrend Homing bleibt 0 bis HOME_DONE)
   // ------------------------------------------------------------------------
   if (cmd == "GETREF") {
     if (shouldReply) sendAck(f.master, "GETREF", _homing->isReferenced() ? "1" : "0");
+    return;
+  }
+
+  // ------------------------------------------------------------------------
+  // GETHOMING (Homing laeuft gerade — 1 waehrend SETREF-Prozess, sonst 0)
+  // ------------------------------------------------------------------------
+  // Hinweis fuer Master/Display: GETREF==0 und GETHOMING==1 => „Referenzierung laeuft“,
+  // nicht mit „nicht referenziert/Idle“ verwechseln.
+  if (cmd == "GETHOMING") {
+    if (shouldReply) sendAck(f.master, "GETHOMING", _homing->isActive() ? "1" : "0");
     return;
   }
 
@@ -1203,6 +1213,95 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     persistPutFloat("ag3", _cfg.angle3Deg, v);
     if (shouldReply) sendAck(f.master, "SETANGLE3", "1");
     serialEventState("SETANGLE3");
+    return;
+  }
+
+  // ------------------------------------------------------------------------
+  // Antennen-Flags 1..3 (bool 0/1, nur persistent / fuer Master)
+  // GETANTDP1-3 / SETANTDP1-3 — NVS Keys ad1, ad2, ad3
+  // ------------------------------------------------------------------------
+  if (cmd == "GETANTDP1") {
+    const bool v = (_cfg.antDp1) ? *_cfg.antDp1 : false;
+    if (shouldReply) sendAck(f.master, "GETANTDP1", v ? "1" : "0");
+    return;
+  }
+  if (cmd == "SETANTDP1") {
+    const bool v = parseBoolParam(f.params);
+    persistPutBool("ad1", _cfg.antDp1, v);
+    if (shouldReply) sendAck(f.master, "SETANTDP1", "1");
+    serialEventState("SETANTDP1");
+    return;
+  }
+
+  if (cmd == "GETANTDP2") {
+    const bool v = (_cfg.antDp2) ? *_cfg.antDp2 : false;
+    if (shouldReply) sendAck(f.master, "GETANTDP2", v ? "1" : "0");
+    return;
+  }
+  if (cmd == "SETANTDP2") {
+    const bool v = parseBoolParam(f.params);
+    persistPutBool("ad2", _cfg.antDp2, v);
+    if (shouldReply) sendAck(f.master, "SETANTDP2", "1");
+    serialEventState("SETANTDP2");
+    return;
+  }
+
+  if (cmd == "GETANTDP3") {
+    const bool v = (_cfg.antDp3) ? *_cfg.antDp3 : false;
+    if (shouldReply) sendAck(f.master, "GETANTDP3", v ? "1" : "0");
+    return;
+  }
+  if (cmd == "SETANTDP3") {
+    const bool v = parseBoolParam(f.params);
+    persistPutBool("ad3", _cfg.antDp3, v);
+    if (shouldReply) sendAck(f.master, "SETANTDP3", "1");
+    serialEventState("SETANTDP3");
+    return;
+  }
+
+  // ------------------------------------------------------------------------
+  // Antennen-Display-Werte 1..3 (uint32 0..99999, nur persistent)
+  // GETANTDIS1-3 / SETANTDIS1-3 — NVS Keys di1, di2, di3
+  // ------------------------------------------------------------------------
+  if (cmd == "GETANTDIS1") {
+    const uint32_t v = safeU32(_cfg.antDis1, 0);
+    if (shouldReply) sendAck(f.master, "GETANTDIS1", String(v));
+    return;
+  }
+  if (cmd == "SETANTDIS1") {
+    uint32_t v = parseU32Param(f.params);
+    if (v > 99999u) v = 99999u;
+    persistPutU32("di1", _cfg.antDis1, v);
+    if (shouldReply) sendAck(f.master, "SETANTDIS1", "1");
+    serialEventState("SETANTDIS1");
+    return;
+  }
+
+  if (cmd == "GETANTDIS2") {
+    const uint32_t v = safeU32(_cfg.antDis2, 0);
+    if (shouldReply) sendAck(f.master, "GETANTDIS2", String(v));
+    return;
+  }
+  if (cmd == "SETANTDIS2") {
+    uint32_t v = parseU32Param(f.params);
+    if (v > 99999u) v = 99999u;
+    persistPutU32("di2", _cfg.antDis2, v);
+    if (shouldReply) sendAck(f.master, "SETANTDIS2", "1");
+    serialEventState("SETANTDIS2");
+    return;
+  }
+
+  if (cmd == "GETANTDIS3") {
+    const uint32_t v = safeU32(_cfg.antDis3, 0);
+    if (shouldReply) sendAck(f.master, "GETANTDIS3", String(v));
+    return;
+  }
+  if (cmd == "SETANTDIS3") {
+    uint32_t v = parseU32Param(f.params);
+    if (v > 99999u) v = 99999u;
+    persistPutU32("di3", _cfg.antDis3, v);
+    if (shouldReply) sendAck(f.master, "SETANTDIS3", "1");
+    serialEventState("SETANTDIS3");
     return;
   }
 
@@ -1727,8 +1826,9 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
 
   // GETWARN (gesammelte Warnungen)
   // ------------------------------------------------------------------------
-  // Antwortformat (mit CMD, wie bei allen anderen ACKs):
-  //   #<DEVICEID>:<MASTERID>:ACK_WARN:<WARNID>;<WARNID>;...:<CS>$
+  // Antwort wie bei allen anderen GET-Befehlen: ACK_GETWARN (nicht ACK_WARN),
+  // damit generische Master/Parser dasselbe Muster wie ACK_GETTEMPA etc. nutzen koennen.
+  //   #<DEVICEID>:<MASTERID>:ACK_GETWARN:<WARNID>;<WARNID>;...:<CS>$
   //
   // Hinweise:
   // - Warnungen werden von Safety gesammelt (max 8) und NICHT automatisch geloescht.
@@ -1751,12 +1851,7 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
       }
     }
 
-    if (shouldReply) {
-      // Wichtig: Master sendet GETWARN, wir antworten bewusst mit ACK_WARN
-      // (kurz/lesbar und konsistent zu anderen ACKs).
-      const uint8_t own = safeU8(_cfg.ownSlaveId, 0);
-      _rs485->sendFrame(own, f.master, "ACK_WARN", payload);
-    }
+    if (shouldReply) sendAck(f.master, "GETWARN", payload);
     return;
   }
 

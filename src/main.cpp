@@ -576,6 +576,16 @@ static float g_angle1Deg = 0.0f;
 static float g_angle2Deg = 0.0f;
 static float g_angle3Deg = 0.0f;
 
+// Antennen-Display-Preset (o.ae.) 1..3 — bool, nur NVS + RS485 (GETANTDP/SETANTDP).
+static bool g_antDp1 = false;
+static bool g_antDp2 = false;
+static bool g_antDp3 = false;
+
+// Antennen-Display-Zahlen 1..3 (0..99999), NVS GETANTDIS/SETANTDIS, Keys di1..di3
+static uint32_t g_antDis1 = 0;
+static uint32_t g_antDis2 = 0;
+static uint32_t g_antDis3 = 0;
+
 // ============================================================================
 // Homing Kick Retry (optional)
 // ============================================================================
@@ -622,9 +632,9 @@ static uint32_t g_ledLastToggleMs = 0;
 // Helper
 // ============================================================================
 static bool isMovingByCommand(bool homingActive, float appliedDuty) {
-  // Homing setzt PWM direkt am Motor. Fuer die LED ist entscheidend, ob tatsaechlich PWM anliegt.
-  // Wenn appliedDuty ~ 0 ist, soll die LED im Idle-Pattern blinken.
-  (void)homingActive;
+  // Waehrend Homing ist PWM oft kurz 0 (motorStop zwischen Segmenten) —
+  // trotzdem als „Bewegung“ werten, sonst LED/„Kreiseln“ bricht ab.
+  if (homingActive) return true;
   return (fabsf(appliedDuty) > 0.01f);
 }
 
@@ -867,6 +877,17 @@ static void loadPreferencesIntoGlobals() {
   g_angle1Deg          = g_prefs.getFloat("ag1", g_angle1Deg);
   g_angle2Deg          = g_prefs.getFloat("ag2", g_angle2Deg);
   g_angle3Deg          = g_prefs.getFloat("ag3", g_angle3Deg);
+
+  g_antDp1             = g_prefs.getBool("ad1", g_antDp1);
+  g_antDp2             = g_prefs.getBool("ad2", g_antDp2);
+  g_antDp3             = g_prefs.getBool("ad3", g_antDp3);
+
+  g_antDis1            = g_prefs.getUInt("di1", g_antDis1);
+  g_antDis2            = g_prefs.getUInt("di2", g_antDis2);
+  g_antDis3            = g_prefs.getUInt("di3", g_antDis3);
+  if (g_antDis1 > 99999u) g_antDis1 = 99999u;
+  if (g_antDis2 > 99999u) g_antDis2 = 99999u;
+  if (g_antDis3 > 99999u) g_antDis3 = 99999u;
 
   // Wind- & Richtungssensor Enable (bool)
   g_windEnable         = g_prefs.getBool("wen", g_windEnable);
@@ -1242,6 +1263,12 @@ dcfg.antOffset3Deg      = &g_antOffset3Deg;
 dcfg.angle1Deg          = &g_angle1Deg;
 dcfg.angle2Deg          = &g_angle2Deg;
 dcfg.angle3Deg          = &g_angle3Deg;
+dcfg.antDp1             = &g_antDp1;
+dcfg.antDp2             = &g_antDp2;
+dcfg.antDp3             = &g_antDp3;
+dcfg.antDis1            = &g_antDis1;
+dcfg.antDis2            = &g_antDis2;
+dcfg.antDis3            = &g_antDis3;
 
 // Wind- & Richtungssensor Enable
 dcfg.windEnable         = &g_windEnable;

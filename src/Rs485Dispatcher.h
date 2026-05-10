@@ -143,6 +143,17 @@ struct Rs485DispatcherConfig {
   float*    angle2Deg          = nullptr;
   float*    angle3Deg          = nullptr;
 
+  // Antennen-Display-Preset (o.ae.) 1..3: nur persistent, 0/1.
+  // NVS Keys: ad1, ad2, ad3
+  bool*     antDp1             = nullptr;
+  bool*     antDp2             = nullptr;
+  bool*     antDp3             = nullptr;
+
+  // Antennen-Display-Zahlen 1..3 (0..99999), NVS Keys di1, di2, di3
+  uint32_t* antDis1            = nullptr;
+  uint32_t* antDis2            = nullptr;
+  uint32_t* antDis3            = nullptr;
+
   // ----------------------------------------------------------
   // Temperatur / LoadMonitor / Kalibrierung
   // ----------------------------------------------------------
