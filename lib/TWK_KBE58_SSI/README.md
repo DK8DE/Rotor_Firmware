@@ -339,12 +339,13 @@ Example sketch: `examples/RD130_ArduinoSPI`
 ESP32 precise SPI mode uses the ESP-IDF SPI master API directly (not `SPIClass`) and generates exactly 13 SSI clock pulses.
 
 ```cpp
+encoder.setSpiMode(SPI_MODE3);   // RD130 default (CPOL=1, CPHA=1)
+
 if (!encoder.beginESP32PreciseSPI(PIN_SSI_CLOCK, PIN_SSI_DATA, 100000))
 {
   Serial.println("ESP32 precise SPI init failed");
 }
 
-encoder.setSpiMode(SPI_MODE3);   // RD130 default (CPOL=1, CPHA=1)
 encoder.setRawBitShift(0);       // optional fine tuning of raw bit alignment
 ```
 
@@ -371,8 +372,8 @@ encoder.startBackgroundRead(10);
 **ESP32 precise SPI** — `RD130_ESP32_SPI_Background`:
 
 ```cpp
-encoder.beginESP32PreciseSPI(PIN_SSI_CLOCK, PIN_SSI_DATA, 100000);
 encoder.setSpiMode(SPI_MODE3);
+encoder.beginESP32PreciseSPI(PIN_SSI_CLOCK, PIN_SSI_DATA, 100000);
 encoder.setRawBitShift(0);
 encoder.setFramePauseUs(80);
 encoder.startBackgroundRead(10);

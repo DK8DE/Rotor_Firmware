@@ -238,7 +238,7 @@ static float g_homeReturnRampDeg = 30.0f;
 //     Ring-Encoder sitzt auf der Ausgangsachse.
 // - ENCTYPE_ABSOLUTE_SSI:
 //     TWK KBE58 SSI auf Pin 8/9, SET0 Pin 4 — kein Homing, Position sofort bekannt.
-//     Getriebe 2:1 Abtrieb:Encoder — ssiAngleScaleNum/Den = 2/1 in EncoderAxisConfig.
+//     Encoder-Welle und Abtriebsachse laufen 1:1 — ssiAngleScaleNum/Den = 1/1.
 static EncoderType g_encType = ENCTYPE_MOTOR_AXIS;
 
 // Encoder-Modus (Aufloesung / Entstoerung):

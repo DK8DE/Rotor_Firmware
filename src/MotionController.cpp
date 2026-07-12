@@ -159,14 +159,18 @@ bool MotionController::applyCloserTargetRamp_(int32_t tgtOutDeg01, int32_t curDe
   //   → Virtuelle Bremse: volle rampDist in aktueller Richtung ausrollen,
   //     Ziel als pending merken — danach sauberer Neustart.
   //
-  // Wenn absNew >= rampDist (genug Platz) ODER bereits langsam:
-  //   → Ziel direkt setzen + Ausroll-Rampe von |Duty| auf finePwm.
+  // Wenn absNew >= rampDist (genug Platz):
+  //   -> Ziel direkt ersetzen, aktuelle Fahrt/Rampe unveraendert weiterlaufen lassen.
+  //      Beispiel: alter Zielpunkt 95deg, neuer 88deg, Ist 20deg, rampDist 5deg:
+  //      Es gibt noch genug Strecke, daher kein PWM-Abfall und kein erneuter Hochlauf.
+  //
+  // Wenn absNew < rampDist und Motor bereits langsam:
+  //   -> Ziel direkt setzen + Ausroll-Rampe von |Duty| auf finePwm.
   if (absNewDeg < rampDistDeg && dutyAbs > finePwm + 2.0f) {
     armVirtualBrakeRetarget_(tgtOutDeg01, nowMs);
     return true;
   }
 
-  // Genug Platz (oder Motor schon langsam): Decel-Rampe direkt auf Ziel.
   clearRetargetDecelRamp_();
 
   _brakeRequest = false;
@@ -179,8 +183,15 @@ bool MotionController::applyCloserTargetRamp_(int32_t tgtOutDeg01, int32_t curDe
 
   commitOutTargetDeg01_(tgtOutDeg01, curDeg01, desiredDirNew);
 
+  if (absNewDeg >= rampDistDeg) {
+    _posStartMs = nowMs;
+    return true;
+  }
+
+  // Motor schon langsam und Ziel liegt innerhalb der Bremsrampe:
+  // kontrolliert bis zum naeheren Ziel ausrollen.
   // Rampe immer ueber rampDistDeg (wenn Platz reicht), sonst absNewDeg.
-  float decelDist = (absNewDeg >= rampDistDeg) ? rampDistDeg : absNewDeg;
+  float decelDist = absNewDeg;
   if (decelDist < 0.05f) decelDist = 0.05f;
   armRetargetDecelRamp_(dutyAbs, decelDist, moveDirOut, curDeg01, _encoder->getCountsRaw());
   _posStartMs = nowMs;
@@ -1243,7 +1254,9 @@ _brakeHoldStartMs = 0;
         float anchor = fabsf(_lastAppliedDuty);
         if (anchor < kickM) anchor = kickM;
         if (anchor > pwmMaxCfg) anchor = pwmMaxCfg;
-        if (anchor < pwmMaxCfg - 0.05f) {
+        // Auch bei bereits erreichtem pwmMax ankern. Sonst setzt der neue
+        // Rampenstart upAlpha auf 0 und erzeugt einen unnoetigen PWM-Dip.
+        if (anchor >= kickM) {
           _pwmRampUpAnchorAbs = anchor;
         }
       }
@@ -1260,7 +1273,9 @@ _brakeHoldStartMs = 0;
       float anchor = fabsf(_lastAppliedDuty);
       if (anchor < kickM) anchor = kickM;
       if (anchor > pwmMaxCfg) anchor = pwmMaxCfg;
-      if (anchor >= kickM && anchor < pwmMaxCfg - 0.05f) {
+      // Auch bei bereits erreichtem pwmMax ankern. Sonst setzt der neue
+      // Rampenstart upAlpha auf 0 und erzeugt einen unnoetigen PWM-Dip.
+      if (anchor >= kickM) {
         _pwmRampUpAnchorAbs = anchor;
       }
     }

@@ -155,6 +155,10 @@ void setup()
 #if defined(ESP32)
   Serial0.begin(115200);
 
+  // RD130 timing matches BitBang sampling best with CPOL=1, CPHA=1 (SPI_MODE3).
+  // If your hardware differs, test SPI_MODE2 before beginESP32PreciseSPI().
+  encoder.setSpiMode(SPI_MODE3);
+
   if (!encoder.beginESP32PreciseSPI(PIN_SSI_CLOCK, PIN_SSI_DATA, SPI_FREQUENCY_HZ))
   {
     Serial.println("ESP32 precise SPI init failed");
@@ -165,9 +169,6 @@ void setup()
     }
   }
 
-  // RD130 timing matches BitBang sampling best with CPOL=1, CPHA=1 (SPI_MODE3).
-  // If your hardware differs, test SPI_MODE2.
-  encoder.setSpiMode(SPI_MODE3);
   encoder.setRawBitShift(0);
   encoder.setFramePauseUs(80);
   encoder.configureZeroPin(PIN_SET_ZERO, ZERO_PULSE_MS);

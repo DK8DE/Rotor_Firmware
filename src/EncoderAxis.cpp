@@ -81,13 +81,14 @@ bool EncoderAxis::beginSsi() {
     return false;
   }
 
+  _ssi->setSpiMode(SPI_MODE3);
+
   if (!_ssi->beginESP32PreciseSPI((uint8_t)_cfg.ssiClockPin, (uint8_t)_cfg.ssiDataPin, _cfg.ssiSpiFreqHz)) {
     delete _ssi;
     _ssi = nullptr;
     return false;
   }
 
-  _ssi->setSpiMode(SPI_MODE3);
   _ssi->setRawBitShift(0);
   _ssi->setFramePauseUs(80);
 

@@ -56,7 +56,7 @@ TWK_KBE58_SSI::TWK_KBE58_SSI(uint8_t clockPin, uint8_t dataPin)
   _mode = Mode::BitBang;
   _spi = nullptr;
   _spiFrequencyHz = 100000;
-  _spiMode = SPI_MODE2;
+  _spiMode = SPI_MODE3;
   _spiTransferBits = 16;
   _spiRightShift = 3;
   _spiDummySsPin = -1;
@@ -99,7 +99,7 @@ TWK_KBE58_SSI::TWK_KBE58_SSI(uint8_t clockPin, uint8_t dataPin, uint8_t usefulBi
   _mode = Mode::BitBang;
   _spi = nullptr;
   _spiFrequencyHz = 100000;
-  _spiMode = SPI_MODE2;
+  _spiMode = SPI_MODE3;
   _spiTransferBits = 16;
   _spiRightShift = 3;
   _spiDummySsPin = -1;
