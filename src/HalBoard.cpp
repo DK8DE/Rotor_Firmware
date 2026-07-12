@@ -35,11 +35,6 @@ void HalBoard::begin() {
   // - Daher wird hier INPUT verwendet (kein interner Pullup).
   //   Ohne externe Pullups: INPUT_PULLUP verwenden.
   // ------------------------------------------------------------
-  pinMode(PIN_END_LEFT, INPUT);
-  pinMode(PIN_END_RIGHT, INPUT);
-
-    pinMode(PIN_WIND_RS485_RX, INPUT_PULLUP);
-
   // LED aktiv LOW
   pinMode(PIN_LED_LB, OUTPUT);
   digitalWrite(PIN_LED_LB, HIGH); // aus
@@ -49,12 +44,6 @@ void HalBoard::begin() {
   // ------------------------------------------------------------
   pinMode(PIN_SRV_LEFT, INPUT_PULLUP);
   pinMode(PIN_SRV_RIGHT, INPUT_PULLUP);
-
-  // ------------------------------------------------------------
-  // Schaltet den Level-Shifter an nach dem Start
-  // ------------------------------------------------------------
-   pinMode(PIN_OE_INVERTER, OUTPUT);
-   digitalWrite(PIN_OE_INVERTER, LOW);
 
   // ADC
   analogReadResolution(12);
@@ -77,26 +66,36 @@ void HalBoard::begin() {
   analogSetPinAttenuation(PIN_IS2_ADC, ADC_11db);
 
 
-  // ------------------------------------------------------------
-  // Wind- & Richtungsmesser (RS485 / Modbus)
-  // ------------------------------------------------------------
-  // Der Sensor laeuft an einer eigenen UART (Serial2), damit unser Master-RS485
-  // (Serial1) unbeeinflusst bleibt.
-  // Wichtig:
-  // - DE/RE LOW = Empfangen
-  // - RX/TX Pins sind fix laut Verkabelung.
-  _wind.begin(Serial2, PIN_WIND_RS485_RX, PIN_WIND_RS485_TX, PIN_WIND_RS485_DIR, 0x01, 9600);
-  _windInit = true;
-
-  // Persistente Offsets werden spaeter in setup() gesetzt.
-  _wind.setSpeedOffsetMps(0.0f);
-  _wind.setAngleOffsetDeg(0.0f);
-
-  // Eigener Mutex fuer exklusiven Zugriff auf die Sensor-Library.
   if (_windSensorMutex == nullptr) {
     _windSensorMutex = xSemaphoreCreateMutex();
   }
+}
 
+void HalBoard::applyHardwareProfile(EncoderType encType) {
+  if (encType == ENCTYPE_ABSOLUTE_SSI) {
+    _windHardwareAvailable = false;
+    _windInit = false;
+
+    pinMode(PIN_OE_INVERTER, OUTPUT);
+    digitalWrite(PIN_OE_INVERTER, HIGH);
+    return;
+  }
+
+  _windHardwareAvailable = true;
+
+  pinMode(PIN_END_LEFT, INPUT);
+  pinMode(PIN_END_RIGHT, INPUT);
+
+  pinMode(PIN_WIND_RS485_RX, INPUT_PULLUP);
+
+  pinMode(PIN_OE_INVERTER, OUTPUT);
+  digitalWrite(PIN_OE_INVERTER, LOW);
+
+  _wind.begin(Serial2, PIN_WIND_RS485_RX, PIN_WIND_RS485_TX, PIN_WIND_RS485_DIR, 0x01, 9600);
+  _windInit = true;
+
+  _wind.setSpeedOffsetMps(0.0f);
+  _wind.setAngleOffsetDeg(0.0f);
 }
 
 // ------------------------------------------------------------

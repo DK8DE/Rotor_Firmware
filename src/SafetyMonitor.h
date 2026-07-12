@@ -140,6 +140,11 @@ struct SafetyConfig {
   float    stallArmDutyAbs = 10.0f;
   uint32_t stallTimeoutMs = 2000;
   uint32_t stallMinCounts = 10;
+
+  // Absolutencoder (ENCTYPE=3): Fortschritt als kuerzeste Wegstrecke auf dem Ring,
+  // nicht vorzeichengebunden zur PWM (Positionsregler wechselt die Richtung haeufiger).
+  bool     stallAbsoluteEncoder = false;
+  int32_t  stallCountsPerRev = 0;  // 0 = kein Wrap (linear)
 };
 
 struct SafetyIsSnapshot {

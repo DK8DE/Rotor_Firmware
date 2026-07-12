@@ -169,6 +169,29 @@ private:
   int32_t computeDeltaDeg01(int32_t curDeg01, int32_t lastDeg01) const;
   int32_t wrapDeltaDeg01(int32_t curDeg01, int32_t lastDeg01) const;
 
+  // SSI (4096 CPR): Groessen in deg01 / Counts an Encoder-Aufloesung anpassen.
+  int32_t encoderDeg01PerCount_() const;
+  int32_t effectiveArriveTolDeg01_() const;
+  int32_t effectiveInPosTolDeg01_() const;
+  int32_t effectiveFineWindowDeg01_() const;
+  uint32_t effectiveArriveHoldMs_() const;
+  long moveDetectCounts_() const;
+  long kickDetectCounts_() const;
+  bool isAbsoluteSsiMotion_() const;
+
+  // SSI: Counts nur in Fahrtrichtung weiterfuehren (kein Zurueckspringen im PWM-Profil).
+  void armSsiRampStart_(long countsNow);
+  void updateSsiFilteredCounts_(long rawCounts, int8_t moveDir);
+  // Virtuelle Bremsrampe (STOP/Retarget): volle rampDist ausrollen, danach pending.
+  void armVirtualBrakeRetarget_(int32_t pendingOutDeg01, uint32_t nowMs);
+  bool applyCloserTargetRamp_(int32_t tgtOutDeg01, int32_t curDeg01, int8_t desiredDirNew,
+                              int32_t absNewOut, int8_t moveDirOut, uint32_t nowMs);
+  // Naeheres Ziel mit genug Restweg: Ziel setzen + PWM linear von |Duty| ausrollen.
+  void armRetargetDecelRamp_(float startDutyAbs, float decelDistDeg, int8_t moveDir,
+                             int32_t startDeg01, long startCounts);
+  void clearRetargetDecelRamp_();
+  bool commitOutTargetDeg01_(int32_t tgtOutDeg01, int32_t curEncDeg01, int8_t desiredDirNew);
+
   // PWM-Slew (optional)
   float applyPwmSlew(float targetDuty, float lastDuty, uint32_t dtMs) const;
   // PWM-Slew mit explizit vorgegebener Slew-Rate (z.B. fuer kurze "Losbrechhilfe" in der Feinzone).
@@ -206,6 +229,16 @@ private:
   // Nach Zielverlaengerung in der Abbremsphase: Hochlauf von diesem PWM-Betrag statt von pwmMinAbs.
   // < 0 = aus (normales Dreieckprofil pwmMin..pwmMax).
   float _pwmRampUpAnchorAbs = -1.0f;
+  // SSI (4096 CPR): monotoner Count-Filter fuer Dreieckprofil (Position quantisiert ~0,09deg).
+  bool _ssiFilterActive = false;
+  long _ssiRampStartCounts = 0;
+  long _ssiFilterCounts = 0;
+  // Naeheres Ziel: erzwungene Ausroll-Rampe von Start-|Duty| (kein pwmDown-Sprung).
+  bool _retargetDecelActive = false;
+  float _retargetDecelStartDuty = 0.0f;
+  float _retargetDecelDistDeg = 0.0f;
+  int8_t _retargetDecelMoveDir = 0;
+  int32_t _retargetDecelStartDeg01 = 0;
   // Bewegungsrichtung, zu der _rampStartDeg01 gehoert.
   // +1 = positive Richtung, -1 = negative Richtung, 0 = unbekannt/steht.
   int8_t _moveDir = 0;
@@ -241,6 +274,7 @@ private:
   int8_t _brakeDir = 0;            // Richtung der Bremsfahrt (+1/-1)
   uint32_t _brakeIssuedMs = 0;     // Zeitpunkt der Anforderung
   int32_t _brakeTargetDeg01 = 0;   // virtuelles Bremsziel
+  float _brakeStartDutyAbs = 0.0f; // |PWM| bei Bremsstart (Runterraumpe unabhaengig von Hochrampe)
 
 // Bremsfahrt-Hold: Wenn wir am Ende der Bremsfahrt nahe 0 sind, gehen wir in einen
 // reinen Stillstands-Hold (PWM -> 0) um jegliches "Zittern" / Vor-Zurueck zu vermeiden.

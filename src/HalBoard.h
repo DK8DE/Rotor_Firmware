@@ -8,6 +8,7 @@
 // Externe Library (wird NICHT mit in unser Projekt-zip gepackt)
 // Erwartet: RS485_Anemometer (Ordnername: RS485_Anemometer)
 #include <RS485_Anemometer.h>
+#include "EncoderAxis.h"
 
 // -----------------------------
 // Pinout
@@ -48,6 +49,12 @@ static const int PIN_SRV_RIGHT   = 48;  // Service-Taster rechts, aktiv LOW
 class HalBoard {
 public:
   void begin();
+
+  // Pin-Profil nach NVS-Laden (EncoderType): Typ 1/2 = OE/Endschalter/Wind;
+  // Typ 3 = SSI (Pin 4 HIGH), kein Anemometer auf 8/9/38.
+  void applyHardwareProfile(EncoderType encType);
+
+  bool isWindHardwareAvailable() const { return _windHardwareAvailable; }
 
   // Startet den Hintergrund-Task fuer den Windsensor erst dann,
   // wenn die Preferences bereits geladen und die initialen Offsets/Enable-Zustaende
@@ -127,6 +134,7 @@ private:
   // Wind-Sensor intern (Cache)
   // ------------------------------------------------------------
   RS485_Anemometer _wind;
+  bool     _windHardwareAvailable = true;
   bool     _windInit = false;
   bool     _windConfiguredEnable = true;
   bool     _windAutoDisabled = false;

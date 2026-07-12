@@ -29,6 +29,11 @@
 #define ENC_PIN_Z 5
 #define ENC_Z_ACTIVE_HIGH true
 
+// SSI-Absolutencoder (ENCTYPE=3) — RD130 TWK KBE58
+#define ENC_SSI_CLOCK_PIN 8
+#define ENC_SSI_DATA_PIN  9
+#define ENC_SSI_ZERO_PIN  4
+
 // ============================================================================
 // RS485
 // ============================================================================
@@ -211,6 +216,11 @@ static int32_t g_homeSeekMaxAccelRampCountsRing = 13300;
 static int32_t g_homeSeekMaxDecelStartCountsRing = 150000;
 
 static int32_t g_homeSeekMaxDecelRampCountsRing = 10000;
+
+// Feste CPR-Referenz fuer Skalierung der Homing-Rampen (*_Ring-Werte oben).
+// SETENCCRI/SETENCCAX skaliert linear: scale = expectedCounts / k_homeRampScaleBasisCountsRing.
+static constexpr int32_t k_homeRampScaleBasisCountsRing = 160000;
+
 // Rueckweg zur 0 (Return-to-Zero) - Rampen in Grad.
 // 30deg Anfahr-Rampe, 30deg vor Ziel abbremsen.
 static float g_homeReturnRampDeg = 30.0f;
@@ -226,10 +236,8 @@ static float g_homeReturnRampDeg = 30.0f;
 //     -> Z-Signal kann vorhanden sein, ist aber je nach Encoder/Anbau nicht zwingend.
 // - ENCTYPE_RING_OUTPUT:
 //     Ring-Encoder sitzt auf der Ausgangsachse.
-//     -> Direkte Messung der Abtriebsposition (Spiel wird "mitgemessen"), daher in der Regel KEINE
-//        zusaetzliche Umkehrspiel-Kompensation noetig.
-//     -> In unserem Projekt nutzt dieser Modus zusaetzlich das Z-Signal (Index) zur Korrektur/CPR-Lernen.
-// Hinweis: falscher Typ fuehrt zu falscher Z-Auswertung und ggf. falschem Umkehrspiel-Verhalten.
+// - ENCTYPE_ABSOLUTE_SSI:
+//     TWK KBE58 SSI auf Pin 8/9, SET0 Pin 4 — kein Homing, Position sofort bekannt.
 static EncoderType g_encType = ENCTYPE_MOTOR_AXIS;
 
 // Encoder-Modus (Aufloesung / Entstoerung):
@@ -822,12 +830,14 @@ static void loadPreferencesIntoGlobals() {
   if (g_homeExpectedCountsRing <= 0)  g_homeExpectedCountsRing = 158000;
   if (g_homeExpectedCountsMotor <= 0) g_homeExpectedCountsMotor = 28000;
 
-  // EncoderType: 1=MOTOR_AXIS, 2=RING_OUTPUT (Default: 1)
+  // EncoderType: 1=MOTOR_AXIS, 2=RING_OUTPUT, 3=ABSOLUTE_SSI (Default: 1)
   // Kompatibilitaet: alter/ungesetzter Wert 0 wird als RING interpretiert.
   {
     uint8_t ect = g_prefs.getUChar("ect", 1);
     if (ect == 1) {
       g_encType = ENCTYPE_MOTOR_AXIS;
+    } else if (ect == 3) {
+      g_encType = ENCTYPE_ABSOLUTE_SSI;
     } else {
       g_encType = ENCTYPE_RING_OUTPUT;
     }
@@ -898,6 +908,13 @@ static void loadPreferencesIntoGlobals() {
   g_pwmMaxAbs          = g_pwmMaxAbsNv;
 }
 
+static bool isRotorReferenced() {
+  if (g_encType == ENCTYPE_ABSOLUTE_SSI) {
+    return encoder.isSsiValid();
+  }
+  return homing.isReferenced();
+}
+
 void setup() {
   Serial.begin(115200);
   delay(200);
@@ -934,19 +951,25 @@ void setup() {
   // Preferences laden (persistente Konfiguration)
   loadPreferencesIntoGlobals();
 
+  board.applyHardwareProfile(g_encType);
+
+  if (g_encType == ENCTYPE_ABSOLUTE_SSI) {
+    g_windEnable = false;
+    g_restrictEndstops = false;
+  }
+
   // Persistente Wind-Offsets in den Wind-Sensor uebernehmen
   // (Speed-Offset bleibt kompatibel zum alten Analogsensor: km/h)
   board.setWindSpeedOffsetKmh(g_anemoOffsetKmh);
   board.setWindDirOffsetDeg(g_windDirOffsetDeg);
 
-  // Wind-Sensor Enable aus Preferences anwenden
-  board.setWindEnable(g_windEnable);
-
-  // Den Wind-Task erst jetzt starten:
-  // - Preferences sind geladen
-  // - Offsets und Enable sind gesetzt
-  // - damit spricht waehrend setup() nur ein einziger Kontext mit Serial2
-  board.startWindTask();
+  // Wind-Sensor Enable aus Preferences anwenden (nur wenn Hardware vorhanden)
+  if (board.isWindHardwareAvailable()) {
+    board.setWindEnable(g_windEnable);
+    board.startWindTask();
+  } else {
+    board.setWindEnable(false);
+  }
 
   motor.begin(PWM_GPIO_IN1, PWM_GPIO_IN2, ENABLE_GPIO, PWM_FREQUENCY_HZ, 10UL * 1000UL * 1000UL);
 
@@ -1013,6 +1036,14 @@ void setup() {
   safetyCfg.stallArmDutyAbs = g_minStallPwm;
   safetyCfg.stallTimeoutMs = g_stallTimeoutMs;
   safetyCfg.stallMinCounts = g_stallMinCounts;
+  if (g_encType == ENCTYPE_ABSOLUTE_SSI) {
+    safetyCfg.stallAbsoluteEncoder = true;
+    safetyCfg.stallCountsPerRev = 4096;
+    // 4096 CPR: 10 Counts ~0,88deg — beim langsamen Anlauf zu streng.
+    if (safetyCfg.stallMinCounts > 3u) {
+      safetyCfg.stallMinCounts = 3u;
+    }
+  }
 
   safety.begin(&board, safetyCfg);
   safety.setSerialLogging(g_debug);
@@ -1033,34 +1064,41 @@ void setup() {
 
   ecfg.encType = g_encType;
 
-  // Bereichs-Offset fuer rechte-Endschalter-Versatz (siehe g_dgOffsetDeg01)
-  ecfg.rangeDegOffsetDeg01 = g_dgOffsetDeg01;
+  if (g_encType == ENCTYPE_ABSOLUTE_SSI) {
+    ecfg.ssiClockPin = ENC_SSI_CLOCK_PIN;
+    ecfg.ssiDataPin = ENC_SSI_DATA_PIN;
+    ecfg.ssiZeroPin = ENC_SSI_ZERO_PIN;
+    ecfg.rangeDegOffsetDeg01 = 0;
+  } else {
+    ecfg.rangeDegOffsetDeg01 = g_dgOffsetDeg01;
 
-  if (g_encType == ENCTYPE_RING_OUTPUT) {
-    ecfg.zEnabled = true;
-    ecfg.zPin = ENC_PIN_Z;
-    ecfg.zActiveHigh = ENC_Z_ACTIVE_HIGH;
+    if (g_encType == ENCTYPE_RING_OUTPUT) {
+      ecfg.zEnabled = true;
+      ecfg.zPin = ENC_PIN_Z;
+      ecfg.zActiveHigh = ENC_Z_ACTIVE_HIGH;
 
-    ecfg.zMinIntervalUs = 2000;
-    ecfg.zMinAbsStepsBetween = 200;
+      ecfg.zMinIntervalUs = 2000;
+      ecfg.zMinAbsStepsBetween = 200;
 
-    ecfg.zCorrEnabled = true;
-    ecfg.zExpectedStepsBetweenZ = 2000;
-    ecfg.zMaxAbsErrorSteps = 20;
-    ecfg.zCorrGain = 1.0f;
+      ecfg.zCorrEnabled = true;
+      ecfg.zExpectedStepsBetweenZ = 2000;
+      ecfg.zMaxAbsErrorSteps = 20;
+      ecfg.zCorrGain = 1.0f;
   } else {
     ecfg.zEnabled = false;
     ecfg.zCorrEnabled = false;
+    }
+    ecfg.countsPerRevActual = 0;
   }
 
-  ecfg.countsPerRevActual = 0;
   if (!encoder.begin(ecfg)) {
     if (g_debug) Serial.println("FEHLER: Encoder begin() fehlgeschlagen!");
   }
 
   // -------------------------
-  // Homing
+  // Homing (nur Typ 1/2 — Typ 3: SSI liefert Position ohne Endschalter)
   // -------------------------
+  if (g_encType != ENCTYPE_ABSOLUTE_SSI) {
   HomingConfig hcfg;
   hcfg = HomingConfig{};
   hcfg.fastPwmPercent = g_homeFastPwmPercent;
@@ -1073,9 +1111,10 @@ void setup() {
   if (expectedCounts <= 0) expectedCounts = g_homeExpectedCountsRing;
   hcfg.expectedCountsPerRevHint = expectedCounts;
 
-  // Rampen-Counts aus Ring-Basiswerten ableiten.
-  // Skalierung linear ueber den Erwartungswert.
-  const float scale = (float)expectedCounts / (float)g_homeExpectedCountsRing;
+  // Rampen-Counts aus Ring-Basiswerten ableiten (kalibriert fuer 160k CPR).
+  // Skalierung linear zum aktiven Erwartungswert (Ring oder Motor), nicht zum
+  // aktuellen g_homeExpectedCountsRing — sonst scale=1 bei ENCTYPE_RING_OUTPUT.
+  const float scale = (float)expectedCounts / (float)k_homeRampScaleBasisCountsRing;
   hcfg.seekMinRampCounts = (int32_t)lroundf((float)g_homeSeekMinRampCountsRing * scale);
   hcfg.seekMinOverrunCounts = (int32_t)lroundf((float)g_homeSeekMinOverrunCountsRing * scale);
   hcfg.seekMaxAccelRampCounts = (int32_t)lroundf((float)g_homeSeekMaxAccelRampCountsRing * scale);
@@ -1098,6 +1137,12 @@ void setup() {
   hcfg.segmentTimeoutMs = g_homeTimeoutMs;
   hcfg.backlashMeasuredToModelScale = g_homeBacklashMeasScale;
   homing.begin(&board, &motor, &encoder, hcfg);
+  } else {
+    HomingConfig hcfg = HomingConfig{};
+    homing.begin(&board, &motor, &encoder, hcfg);
+    homing.setReferenced(false);
+    g_backlashDeg01 = 0;
+  }
 
   // -------------------------
   // Motion
@@ -1278,6 +1323,7 @@ dcfg.homeSeekMinPwmPercent = &g_homeSeekMinPwmPercent;
 dcfg.homeExpectedCountsRing = &g_homeExpectedCountsRing;
 dcfg.homeExpectedCountsMotor = &g_homeExpectedCountsMotor;
 dcfg.encTypeU8 = (uint8_t*)&g_encType; // Enum basiert auf uint8_t
+dcfg.encoderAxis = &encoder;
 
 // Neustart-Flags (werden von Rs485Dispatcher gesetzt)
 dcfg.restartRequested = &g_restartRequested;
@@ -1428,6 +1474,7 @@ static void updatePwmMaxApplied(uint32_t dtMs) {
 // - Wenn man sie waehrend der Bewegung aendert, "springt" die angezeigte Gradposition
 //   entsprechend leicht. Sinnvoll ist daher: aendern im Stillstand.
 static void updateEncoderRangeOffsetApplied() {
+  if (g_encType == ENCTYPE_ABSOLUTE_SSI) return;
   static int32_t s_lastOff = INT32_MIN;
   if (s_lastOff == g_dgOffsetDeg01) return;
   s_lastOff = g_dgOffsetDeg01;
@@ -1474,9 +1521,15 @@ void loop() {
   updatePwmMaxApplied(dtMs);
   updateEncoderRangeOffsetApplied();
 
-  // Homing
+  encoder.update();
+  if (g_encType == ENCTYPE_ABSOLUTE_SSI) {
+    homing.setReferenced(encoder.isSsiValid());
+  }
+
+  if (g_encType != ENCTYPE_ABSOLUTE_SSI) {
   homing.update(nowMs);
   rs485Dispatcher.updateHomingKickRetry(nowMs);
+  }
 
   // ------------------------------------------------------------
   // Homing-Fehler sichtbar machen (sonst wuerde Homing einfach "still" stehen bleiben)
@@ -1487,6 +1540,7 @@ void loop() {
   // - Wir ueberschreiben KEINEN bereits existierenden Safety-Fault (z.B. SE_STALL/SE_TIMEOUT).
   // - Quittierung erfolgt (wie gewuenscht) nur ueber SETREF (Rs485Dispatcher->clearFault()).
   static bool s_homeFailLatched = false;
+  if (g_encType != ENCTYPE_ABSOLUTE_SSI) {
   if (homing.getState() == HOME_ERROR) {
     if (!safety.isFault() && !s_homeFailLatched) {
       safety.triggerEmergencyStop(SE_HOME_FAIL);
@@ -1496,8 +1550,9 @@ void loop() {
     // Sobald Homing wieder laeuft/idle ist, Marker loesen (damit ein neuer HOME_ERROR wieder gelatched wird)
     s_homeFailLatched = false;
   }
+  }
 
-  // Homing-Status nach dem Update (wichtig, weil sich der Zustand in homing.update() aendern kann)
+  // Homing-Status nach dem Update
   const bool homingActive = homing.isActive();
 
   // Kalibrierfahrt (SETCAL) laeuft intern und darf NICHT am RS485-Deadman scheitern.
@@ -1529,13 +1584,8 @@ void loop() {
 
   // Umkehrspiel nach Homing uebernehmen (einmalig beim Uebergang auf referenced)
   static bool s_lastRefState = false;
-  bool refNow = homing.isReferenced();
+  bool refNow = isRotorReferenced();
   if (refNow && !s_lastRefState) {
-    // Wichtig:
-    // - ENCTYPE_MOTOR_AXIS: Umkehrspiel wird beim Homing ermittelt und muss in der Positionsregelung
-    //   als Ziel-Offset beim Richtungswechsel genutzt werden.
-    // - ENCTYPE_RING_OUTPUT: Encoder sitzt auf der Ausgangsachse (Ring) und liefert echte Position.
-    //   Hier darf KEIN Umkehrspiel-Offset angewendet werden -> backlash immer 0.
     if (g_encType == ENCTYPE_MOTOR_AXIS) {
       g_backlashDeg01 = homing.getBacklashDeg01();
     } else {
@@ -1544,7 +1594,13 @@ void loop() {
 
     if (g_debug) {
       Serial.print("[CFG] Homing done | encType=");
-      Serial.print((g_encType == ENCTYPE_MOTOR_AXIS) ? "MOTOR_AXIS" : "RING_OUTPUT");
+      if (g_encType == ENCTYPE_MOTOR_AXIS) {
+        Serial.print("MOTOR_AXIS");
+      } else if (g_encType == ENCTYPE_RING_OUTPUT) {
+        Serial.print("RING_OUTPUT");
+      } else {
+        Serial.print("ABSOLUTE_SSI");
+      }
 
       Serial.print(" | CPRlearned=");
       Serial.print(homing.getCountsPerRevLearned());

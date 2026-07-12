@@ -26,6 +26,218 @@ int32_t MotionController::readBacklashDeg01_() const {
   return b;
 }
 
+int32_t MotionController::encoderDeg01PerCount_() const {
+  if (!_encoder) return 1;
+  const int32_t cpr = _encoder->getCountsPerRevActual();
+  if (cpr <= 0) return 1;
+  const int32_t d = (int32_t)(36000LL / (int64_t)cpr);
+  return (d > 0) ? d : 1;
+}
+
+int32_t MotionController::effectiveArriveTolDeg01_() const {
+  int32_t tol = (_cfg.arriveTolDeg01) ? (*_cfg.arriveTolDeg01) : 2;
+  if (tol < 0) tol = -tol;
+  if (!_encoder || _encoder->getEncoderType() != ENCTYPE_ABSOLUTE_SSI) {
+    return tol;
+  }
+  // Mindesttoleranz = ceil(halber Count):
+  //   - Voller Count (~0.088deg bei 4096 CPR) blockierte Fahrbefehle < 0.088deg.
+  //   - Kein Floor fuehrte zu Oszillation: Ziel zwischen zwei Counts → Motor kippt
+  //     abwechselnd auf Count n und n+1 (max. Restfehler = 4.39deg01 > konfiguriertem Wert).
+  //   - Halber Count (ceil) = 5deg01 ≈ 0.044deg bei 4096 CPR:
+  //     max. Count-Rand-Fehler 4.39deg01 ≤ 5 → stoppt sicher, kein Pendeln.
+  //     0.1deg-Befehle (10deg01) > 5 → starten immer.
+  // encoderDeg01PerCount_() = floor(36000/cpr), daher /2+1 = ceil(Halbe Count).
+  const int32_t minTol = encoderDeg01PerCount_() / 2 + 1;
+  if (tol < minTol) tol = minTol;
+  return tol;
+}
+
+int32_t MotionController::effectiveInPosTolDeg01_() const {
+  // Fuer SSI: voller Count (ceil) als Ankunftstoleranz im update()-inPosTol-Check.
+  // Motor muss das Ziel UEBERschiessen (auf Overshoot-Seite stoppen) — dadurch kein
+  // Kurzschluss bei Zielen zwischen zwei Counts (waere mit halber Count-Toleranz passiert).
+  // Fuer PCNT: wie effectiveArriveTolDeg01_() (rueckwaertskompatibel).
+  if (!isAbsoluteSsiMotion_()) return effectiveArriveTolDeg01_();
+  // ceil(36000/cpr) = encoderDeg01PerCount_()+1 (da encoderDeg01PerCount_ = floor)
+  return encoderDeg01PerCount_() + 1;
+}
+
+int32_t MotionController::effectiveFineWindowDeg01_() const {
+  int32_t fw = (_cfg.fineWindowDeg01) ? (*_cfg.fineWindowDeg01) : 0;
+  if (fw < 0) fw = -fw;
+  if (!isAbsoluteSsiMotion_() || fw <= 0) return fw;
+  fw /= 4;
+  const int32_t perCount = encoderDeg01PerCount_();
+  if (fw < perCount) fw = perCount;
+  return fw;
+}
+
+uint32_t MotionController::effectiveArriveHoldMs_() const {
+  uint32_t ms = (_cfg.arriveHoldMs) ? (*_cfg.arriveHoldMs) : 200u;
+  if (!isAbsoluteSsiMotion_()) return ms;
+  ms /= 4;
+  if (ms < 25u) ms = 25u;
+  return ms;
+}
+
+long MotionController::moveDetectCounts_() const {
+  if (_encoder && _encoder->getEncoderType() == ENCTYPE_ABSOLUTE_SSI) {
+    return 1;
+  }
+  return 3;
+}
+
+long MotionController::kickDetectCounts_() const {
+  if (_encoder && _encoder->getEncoderType() == ENCTYPE_ABSOLUTE_SSI) {
+    return 2;
+  }
+  return 20;
+}
+
+bool MotionController::isAbsoluteSsiMotion_() const {
+  return _encoder && (_encoder->getEncoderType() == ENCTYPE_ABSOLUTE_SSI);
+}
+
+void MotionController::armSsiRampStart_(long countsNow) {
+  if (!isAbsoluteSsiMotion_()) {
+    _ssiFilterActive = false;
+    return;
+  }
+  _ssiRampStartCounts = countsNow;
+  _ssiFilterCounts = countsNow;
+  _ssiFilterActive = true;
+}
+
+void MotionController::updateSsiFilteredCounts_(long rawCounts, int8_t moveDir) {
+  if (!_ssiFilterActive || moveDir == 0) return;
+  const long d = rawCounts - _ssiFilterCounts;
+  if (moveDir > 0) {
+    if (d > 0) _ssiFilterCounts = rawCounts;
+  } else {
+    if (d < 0) _ssiFilterCounts = rawCounts;
+  }
+}
+
+bool MotionController::applyCloserTargetRamp_(int32_t tgtOutDeg01, int32_t curDeg01,
+                                              int8_t desiredDirNew, int32_t absNewOut,
+                                              int8_t moveDirOut, uint32_t nowMs) {
+  const int32_t fineWinDeg01 = effectiveFineWindowDeg01_();
+  if (fineWinDeg01 > 0 && absNewOut <= fineWinDeg01) {
+    // Im Feinfenster: kein Retarget-Eingriff noetig
+    return false;
+  }
+
+  float rampDistDeg = (_cfg.rampDistDeg) ? (*_cfg.rampDistDeg) : 0.0f;
+  if (!isfinite(rampDistDeg) || rampDistDeg < 0.5f) rampDistDeg = 0.5f;
+
+  float dutyAbs = fabsf(_lastAppliedDuty);
+  float kickM = (_cfg.pwmKickMinAbs) ? (*_cfg.pwmKickMinAbs) : 0.0f;
+  if (kickM < 0.0f) kickM = -kickM;
+  if (dutyAbs < kickM) dutyAbs = kickM;
+
+  float finePwm = (_cfg.finePwmAbs) ? (*_cfg.finePwmAbs) : 12.0f;
+  if (finePwm < 0.0f) finePwm = -finePwm;
+  if (kickM > finePwm) finePwm = kickM;
+
+  const float absNewDeg = (float)absNewOut / 100.0f;
+
+  // Kern-Entscheidung: reicht der verbleibende Weg zum sicheren Abbremsen?
+  //
+  // Wenn absNew < rampDist bei HOHER Geschwindigkeit (dutyAbs > finePwm+2):
+  //   → Motor kann in absNew NICHT physikalisch anhalten.
+  //   → Virtuelle Bremse: volle rampDist in aktueller Richtung ausrollen,
+  //     Ziel als pending merken — danach sauberer Neustart.
+  //
+  // Wenn absNew >= rampDist (genug Platz) ODER bereits langsam:
+  //   → Ziel direkt setzen + Ausroll-Rampe von |Duty| auf finePwm.
+  if (absNewDeg < rampDistDeg && dutyAbs > finePwm + 2.0f) {
+    armVirtualBrakeRetarget_(tgtOutDeg01, nowMs);
+    return true;
+  }
+
+  // Genug Platz (oder Motor schon langsam): Decel-Rampe direkt auf Ziel.
+  clearRetargetDecelRamp_();
+
+  _brakeRequest = false;
+  _brakeActive = false;
+  _brakeReason = 0;
+  _pendingHasTarget = false;
+  _brakeHoldActive = false;
+  _brakeHoldStartMs = 0;
+  _brakeStartDutyAbs = 0.0f;
+
+  commitOutTargetDeg01_(tgtOutDeg01, curDeg01, desiredDirNew);
+
+  // Rampe immer ueber rampDistDeg (wenn Platz reicht), sonst absNewDeg.
+  float decelDist = (absNewDeg >= rampDistDeg) ? rampDistDeg : absNewDeg;
+  if (decelDist < 0.05f) decelDist = 0.05f;
+  armRetargetDecelRamp_(dutyAbs, decelDist, moveDirOut, curDeg01, _encoder->getCountsRaw());
+  _posStartMs = nowMs;
+  return true;
+}
+
+void MotionController::armVirtualBrakeRetarget_(int32_t pendingOutDeg01, uint32_t nowMs) {
+  _pendingHasTarget = true;
+  _pendingTargetDeg01 = pendingOutDeg01;
+  _pendingSoftStart = true;
+
+  _stopPointActive = false;
+  _stopPointDeg01 = 0;
+  _stopIssuedMs = 0;
+
+  _brakeRequest = true;
+  _brakeActive = false;
+  _brakeHoldActive = false;
+  _brakeHoldStartMs = 0;
+
+  _brakeReason = 3; // RETARGET_CLOSE
+  _brakeIssuedMs = nowMs;
+
+  _kickActive = false;
+  _posStartMs = nowMs;
+}
+
+void MotionController::clearRetargetDecelRamp_() {
+  _retargetDecelActive = false;
+  _retargetDecelStartDuty = 0.0f;
+  _retargetDecelDistDeg = 0.0f;
+  _retargetDecelMoveDir = 0;
+  _retargetDecelStartDeg01 = 0;
+}
+
+void MotionController::armRetargetDecelRamp_(float startDutyAbs, float decelDistDeg, int8_t moveDir,
+                                             int32_t startDeg01, long startCounts) {
+  _retargetDecelActive = true;
+  _retargetDecelStartDuty = startDutyAbs;
+  _retargetDecelDistDeg = decelDistDeg;
+  _retargetDecelMoveDir = moveDir;
+  _retargetDecelStartDeg01 = startDeg01;
+  _kickActive = false;
+  _pwmRampUpAnchorAbs = -1.0f;
+  armSsiRampStart_(startCounts);
+}
+
+bool MotionController::commitOutTargetDeg01_(int32_t tgtOutDeg01, int32_t curEncDeg01,
+                                             int8_t desiredDirNew) {
+  armOutMapSlackIfReversing_(curEncDeg01, desiredDirNew);
+  int32_t finalTgt = outputDeg01ToEncoderTargetDeg01_(tgtOutDeg01, desiredDirNew);
+  _lastBacklashAppliedDeg01 = finalTgt - tgtOutDeg01;
+
+  const int32_t amin = axisMinDeg01();
+  const int32_t amax = axisMaxDeg01();
+  if (finalTgt < amin) finalTgt = amin;
+  if (finalTgt > amax) finalTgt = amax;
+
+  _targetDeg01 = finalTgt;
+  _moveDir = desiredDirNew;
+  {
+    const int32_t e0 = computeErrorDeg01(finalTgt, curEncDeg01);
+    _posInitialAbsErrDeg01 = (e0 < 0) ? -e0 : e0;
+  }
+  return true;
+}
+
 int8_t MotionController::engagedDir_() const {
   // Physische Flanke fuer das Backlash-Modell (siehe _outMapFlankDir / advanceOutMapFlank_).
   return _outMapFlankDir;
@@ -175,6 +387,10 @@ void MotionController::resetControllerState(uint32_t nowMs) {
 
   _rampStartDeg01 = 0;
   _pwmRampUpAnchorAbs = -1.0f;
+  _ssiFilterActive = false;
+  _ssiRampStartCounts = 0;
+  _ssiFilterCounts = 0;
+  clearRetargetDecelRamp_();
   // Merken, aus welcher Richtung zuletzt wirklich gefahren wurde.
   // Das ist wichtig fuer Umkehrspiel-Kompensation, wenn spaeter aus Stillstand in die Gegenrichtung gestartet wird
   // (nur sinnvoll bei Encoder auf Motorachse).
@@ -198,6 +414,7 @@ void MotionController::resetControllerState(uint32_t nowMs) {
   _brakeDir = 0;
   _brakeIssuedMs = 0;
   _brakeTargetDeg01 = 0;
+  _brakeStartDutyAbs = 0.0f;
 
 _brakeHoldActive = false;
 _brakeHoldStartMs = 0;
@@ -271,6 +488,9 @@ bool MotionController::consumePosTimeoutEvent() {
 void MotionController::startKickIfNeeded(uint32_t nowMs, int32_t curDeg01) {
   // Startpunkt fuer Anfahr-Rampe sicher auf die aktuelle Position legen.
   _rampStartDeg01 = curDeg01;
+  if (_encoder) {
+    armSsiRampStart_(_encoder->getCountsRaw());
+  }
 
   // Arrival-Flags zuruecksetzen
   _inTol = false;
@@ -313,6 +533,7 @@ void MotionController::startKickIfNeeded(uint32_t nowMs, int32_t curDeg01) {
   // Darum: KICK darf auch dann gestartet werden, wenn _moveDir==0.
   // Die Richtung wird spaeter in der KICK-Logik anhand des Ziel-Fehlers bestimmt.
   const float kickMin = (_cfg.pwmKickMinAbs) ? (*_cfg.pwmKickMinAbs) : 0.0f;
+  // SSI: KICK nur beim Start (Losbrechung). Auto-Re-KICK in der Grobfahrt bleibt aus.
   if (_encoder && kickMin > 0.0f) {
     _kickActive = true;
     _kickStartMs = nowMs;
@@ -549,8 +770,12 @@ void MotionController::commandClearMotionForSetRef(uint32_t nowMs) {
 }
 
 bool MotionController::commandSetPosDeg01(int32_t tgtDeg01, uint32_t nowMs) {
-  if (!_homing || !_homing->isReferenced()) return false;
   if (!_encoder) return false;
+  bool referenced = (_homing && _homing->isReferenced());
+  if (_encoder->getEncoderType() == ENCTYPE_ABSOLUTE_SSI) {
+    referenced = _encoder->isSsiValid();
+  }
+  if (!referenced) return false;
 
   // Start aus Stillstand?
   // Wenn wir am Ziel in der Feinjustage stehen und ein neues Ziel kommt,
@@ -649,8 +874,7 @@ bool MotionController::commandSetPosDeg01(int32_t tgtDeg01, uint32_t nowMs) {
     // Darum behandeln wir neue Ziele im Feinfenster wie einen Start aus Stillstand:
     // -> Feinjustage/Brems-Hold wird abgebrochen
     // -> neue Fahrt startet sofort mit Standardrampe + KICK.
-    int32_t fineWinDeg01 = (_cfg.fineWindowDeg01) ? (*_cfg.fineWindowDeg01) : 0;
-    if (fineWinDeg01 < 0) fineWinDeg01 = -fineWinDeg01;
+    int32_t fineWinDeg01 = effectiveFineWindowDeg01_();
     const int32_t errToOldDeg01 = computeErrorDeg01(_targetDeg01, curDeg01);
     const int32_t absErrToOldDeg01 = (errToOldDeg01 < 0) ? -errToOldDeg01 : errToOldDeg01;
     const bool inFineWindowNow = (fineWinDeg01 > 0 && absErrToOldDeg01 <= fineWinDeg01);
@@ -704,10 +928,9 @@ bool MotionController::commandSetPosDeg01(int32_t tgtDeg01, uint32_t nowMs) {
   // Liegt der Restfehler nur in der Ankunftstoleranz und der Motor steht, wuerde sonst desiredDir
   // um 0 herum toggeln -> unterschiedliche Backlash-Abbildung (ENC-Ziel springt um ~Spiel).
   {
-    int32_t tol01 = (_cfg.arriveTolDeg01) ? (*_cfg.arriveTolDeg01) : 2;
-    if (tol01 < 0) tol01 = -tol01;
+    int32_t tol01 = effectiveArriveTolDeg01_();
     const int32_t absErrOut = (errOutDeg01 < 0) ? -errOutDeg01 : errOutDeg01;
-    const uint32_t holdMs = (_cfg.arriveHoldMs) ? (*_cfg.arriveHoldMs) : 200u;
+    const uint32_t holdMs = effectiveArriveHoldMs_();
     const bool stableNoMove = (nowMs - _noMoveSinceMs) >= holdMs;
     const bool quietMotor = (fabsf(_lastAppliedDuty) <= 1.0f);
     const bool noBrakePhase = !_brakeActive && !_brakeRequest && !_brakeHoldActive;
@@ -758,9 +981,9 @@ bool MotionController::commandSetPosDeg01(int32_t tgtDeg01, uint32_t nowMs) {
     // Startpunkt fuer Anfahr-Rampe setzen
     _rampStartDeg01 = curDeg01;
     _moveDir = desiredDirNew;
+    armSsiRampStart_(_encoder->getCountsRaw());
 
     // KICK-Phase aktivieren: PWM wird angehoben, bis Encoder-Counts eine Bewegung zeigen.
-    // Normaler Start aus Stillstand: KICK darf hier "hart" sein (keine Soft-Sonderbehandlung).
     _pendingSoftStart = false;
     _kickSoftMode = false;
     _kickActive = true;
@@ -823,8 +1046,7 @@ _targetDeg01 = finalTgt;
     // des KICKs greift nur noch finePwmAbs -> mechanisch klar uebers Ziel (typ.
     // 318->316, Log zeigt z.B. ~301 bevor zurueckgeregelt wird).
     {
-      int32_t fineWinKick = (_cfg.fineWindowDeg01) ? (*_cfg.fineWindowDeg01) : 0;
-      if (fineWinKick < 0) fineWinKick = -fineWinKick;
+      int32_t fineWinKick = effectiveFineWindowDeg01_();
       if (fineWinKick > 0 &&
           _posInitialAbsErrDeg01 <= fineWinKick + kFineShortHybridExtraDeg01) {
         _kickActive = false;
@@ -872,8 +1094,7 @@ _brakeHoldStartMs = 0;
     int32_t absOldOutDeg01 = computeErrorDeg01(currentTargetOutDeg01, curOutDeg01);
     if (absOldOutDeg01 < 0) absOldOutDeg01 = -absOldOutDeg01;
 
-    int32_t fineWinNowDeg01 = (_cfg.fineWindowDeg01) ? (*_cfg.fineWindowDeg01) : 0;
-    if (fineWinNowDeg01 < 0) fineWinNowDeg01 = -fineWinNowDeg01;
+    int32_t fineWinNowDeg01 = effectiveFineWindowDeg01_();
     float rampDistDegNow = (_cfg.rampDistDeg) ? (*_cfg.rampDistDeg) : 0.0f;
     if (!isfinite(rampDistDegNow) || rampDistDegNow < 0.5f) rampDistDegNow = 0.5f;
     const int32_t rampDistNowDeg01 = (int32_t)lroundf(rampDistDegNow * 100.0f);
@@ -916,6 +1137,7 @@ _brakeHoldStartMs = 0;
 
       _moveDir = desiredDirNew;
       _rampStartDeg01 = curDeg01;
+      armSsiRampStart_(_encoder->getCountsRaw());
       _pwmRampUpAnchorAbs = -1.0f;
       _kickActive = false;
       _posStartMs = nowMs;
@@ -948,17 +1170,9 @@ _brakeHoldStartMs = 0;
   //        Zwei Unterfaelle — in BEIDEN soll die normale Rampe/Slew erhalten
   //        bleiben, nur der Weg dorthin ist anders:
   //
-  //   (A) Wir sind in der Abbremsrampe (_decelPhaseActive):
-  //       → ALTES Ziel normal zu Ende fahren; neues Ziel nur pending.
-  //         Nach Arrival startet die normale (kurze) Gegenfahrt zum neuen Ziel.
-  //
-  //   (B) Wir sind NICHT in der Abbremsrampe (Cruise/Hochlauf) und das neue
-  //       Ziel liegt im Abbremsband vor cur (absNewOut <= rampDist):
-  //       → Direktes Umschalten auf das neue Ziel wuerde pwmDown sofort fast
-  //         auf 0 zwingen — der Rotor "faellt" auf Min-PWM (Suchgeschwindigkeit)
-  //         und macht keine saubere Rampe. Stattdessen virtuelles Bremsziel
-  //         bei cur+dir*rampDist (wie STOP), Rotor nutzt die volle Bremsrampe,
-  //         faehrt leicht ueber das neue Ziel hinaus, pending regelt zurueck.
+  //   Naeheres Ziel (Restweg verkleinert): nie pwmDown-Sprung auf Suchgeschwindigkeit.
+  //   - Ausroll-Rampe von aktuellem |PWM| ueber min(Restweg, rampDist) auf Fein-PWM.
+  //   - Nur im Feinfenster: direktes Umschalten.
   // ------------------------------------------------------------------
   if (_posActive && !_brakeRequest && !_brakeActive && !_brakeHoldActive) {
     const int32_t curOutDeg01_tmp = encoderDeg01ToOutputDeg01_(curDeg01);
@@ -973,48 +1187,12 @@ _brakeHoldStartMs = 0;
     const int8_t dirOldOut = (errOldOut > 0) ? +1 : (errOldOut < 0 ? -1 : 0);
     const int8_t dirNewOut = (errNewOut > 0) ? +1 : (errNewOut < 0 ? -1 : 0);
 
-    float rampDistDeg = (_cfg.rampDistDeg) ? (*_cfg.rampDistDeg) : 0.0f;
-    if (!isfinite(rampDistDeg) || rampDistDeg < 0.5f) rampDistDeg = 0.5f;
-    const int32_t rampDistDeg01 = (int32_t)lroundf(rampDistDeg * 100.0f);
+    const int8_t refDir = (dirOldOut != 0) ? dirOldOut : curDir;
+    const bool sameDirCloser =
+        (refDir != 0 && dirNewOut == refDir && absNewOut < absOldOut);
 
-    // Gemeinsame Grundbedingung: gleiche raeumliche Richtung, neues Ziel
-    // liegt aus Fahrtsicht VOR dem alten (kleine Toleranz gegen Jitter).
-    const bool sameDirNearer =
-        (dirOldOut != 0 && dirNewOut == dirOldOut && (absNewOut + 2) < absOldOut);
-
-    if (sameDirNearer && _decelPhaseActive) {
-      // (A) Abbremsphase: altes Ziel zu Ende fahren, neues nur pending.
-      _pendingHasTarget = true;
-      _pendingTargetDeg01 = tgtDeg01;
-      _pendingSoftStart = false;
-      return true;
-    }
-
-    if (sameDirNearer && !_decelPhaseActive && absNewOut <= rampDistDeg01) {
-      // (B) Cruise/Hochlauf, neues Ziel liegt im Abbremsband:
-      //     virtuelle Bremse mit voller rampDist-Strecke einleiten (wie STOP),
-      //     das echte neue Ziel als pending merken. update() berechnet dann
-      //     brakeTarget = cur + dir*rampDist und nutzt die schnelle Slew-Rate
-      //     (_brakeActive). Der Rotor ueberfaehrt das neue Ziel und regelt
-      //     danach als ganz normale Gegenfahrt auf das pending-Ziel zurueck.
-      _pendingHasTarget = true;
-      _pendingTargetDeg01 = tgtDeg01;
-      _pendingSoftStart = true;
-
-      _stopPointActive = false;
-      _stopPointDeg01 = 0;
-      _stopIssuedMs = 0;
-
-      _brakeRequest = true;
-      _brakeActive = false;
-      _brakeHoldActive = false;
-      _brakeHoldStartMs = 0;
-
-      _brakeReason = 3; // RETARGET_CLOSE (Cruise-Variante)
-      _brakeIssuedMs = nowMs;
-
-      _kickActive = false;
-      _posStartMs = nowMs;
+    if (sameDirCloser &&
+        applyCloserTargetRamp_(tgtDeg01, curDeg01, desiredDirNew, absNewOut, dirNewOut, nowMs)) {
       return true;
     }
   }
@@ -1031,55 +1209,63 @@ _brakeHoldStartMs = 0;
 
   // Ziel in gleicher Richtung verlaengern waehrend _decelPhaseActive:
   // _rampStartDeg01 = Ist; Hochlauf in update() von |lastAppliedDuty| bis pwmMax (Anker), nicht von pwmMinAbs.
-  // So keine PWM-Spruenge und keine kuenstliche Delle nahe Max (ohne feste %-Schwellen).
+  // SSI: _rampStartDeg01 bei Decel nicht neu setzen (Quantisierung wuerde Rampe staendig resetten).
   _pwmRampUpAnchorAbs = -1.0f;
-  if (_decelPhaseActive && desiredDirNew != 0) {
-    const int32_t curOutDeg01_tmp = encoderDeg01ToOutputDeg01_(curDeg01);
-    const int32_t oldOutDeg01_tmp = encoderDeg01ToOutputDeg01_(_targetDeg01);
+  {
+    float pwmMaxCfg = (_cfg.pwmMaxAbs) ? fabsf(*_cfg.pwmMaxAbs) : 100.0f;
+    if (pwmMaxCfg < 5.0f) pwmMaxCfg = 100.0f;
+    float kickM = (_cfg.pwmKickMinAbs) ? fabsf(*_cfg.pwmKickMinAbs) : 0.0f;
+    if (kickM < 0.0f) kickM = -kickM;
 
-    int32_t absOldOut = computeErrorDeg01(oldOutDeg01_tmp, curOutDeg01_tmp);
-    if (absOldOut < 0) absOldOut = -absOldOut;
-    int32_t absNewOut = computeErrorDeg01(tgtDeg01, curOutDeg01_tmp);
-    if (absNewOut < 0) absNewOut = -absNewOut;
+    if (_decelPhaseActive && desiredDirNew != 0) {
+      const int32_t curOutDeg01_tmp = encoderDeg01ToOutputDeg01_(curDeg01);
+      const int32_t oldOutDeg01_tmp = encoderDeg01ToOutputDeg01_(_targetDeg01);
 
-    if (absNewOut > absOldOut + 2) {
-      _rampStartDeg01 = curDeg01;
-      float pwmMaxCfg = (_cfg.pwmMaxAbs) ? fabsf(*_cfg.pwmMaxAbs) : 100.0f;
-      if (pwmMaxCfg < 5.0f) pwmMaxCfg = 100.0f;
-      float kickM = (_cfg.pwmKickMinAbs) ? fabsf(*_cfg.pwmKickMinAbs) : 0.0f;
+      int32_t absOldOut = computeErrorDeg01(oldOutDeg01_tmp, curOutDeg01_tmp);
+      if (absOldOut < 0) absOldOut = -absOldOut;
+      int32_t absNewOut = computeErrorDeg01(tgtDeg01, curOutDeg01_tmp);
+      if (absNewOut < 0) absNewOut = -absNewOut;
+
+      if (absNewOut > absOldOut + 2) {
+        if (!isAbsoluteSsiMotion_()) {
+          _rampStartDeg01 = curDeg01;
+        }
+        float anchor = fabsf(_lastAppliedDuty);
+        if (anchor < kickM) anchor = kickM;
+        if (anchor > pwmMaxCfg) anchor = pwmMaxCfg;
+        if (anchor < pwmMaxCfg - 0.05f) {
+          _pwmRampUpAnchorAbs = anchor;
+        }
+      }
+    } else if (_posActive && desiredDirNew != 0 && desiredDirNew == curDir) {
+      // Hochlauf-Fall-through (Case A/B returnieren frueher): Anker = |Duty|,
+      // damit ein naeheres Ziel mit grossem Restweg die Rampe nicht von pwmMin neu startet.
       float anchor = fabsf(_lastAppliedDuty);
-      if (anchor < kickM) {
-        anchor = kickM;
-      }
-      if (anchor > pwmMaxCfg) {
-        anchor = pwmMaxCfg;
-      }
-      if (anchor < pwmMaxCfg - 0.05f) {
+      if (anchor < kickM) anchor = kickM;
+      if (anchor > pwmMaxCfg) anchor = pwmMaxCfg;
+      if (anchor >= kickM && anchor < pwmMaxCfg - 0.05f) {
         _pwmRampUpAnchorAbs = anchor;
       }
     }
   }
 
-  armOutMapSlackIfReversing_(curDeg01, desiredDirNew);
-  int32_t finalTgt = outputDeg01ToEncoderTargetDeg01_(tgtDeg01, desiredDirNew);
-
-  // Debug: zuletzt angewendete Backlash-Abbildung (Encoderziel - OUT-Ziel)
-  _lastBacklashAppliedDeg01 = finalTgt - tgtDeg01;
-
-  // clamp (Achsen-Wrap ist deaktiviert)
-  const int32_t amin = axisMinDeg01();
-  const int32_t amax = axisMaxDeg01();
-  if (finalTgt < amin) finalTgt = amin;
-  if (finalTgt > amax) finalTgt = amax;
-
-  _targetDeg01 = finalTgt;
-  {
-    const int32_t e0 = computeErrorDeg01(finalTgt, curDeg01);
-    _posInitialAbsErrDeg01 = (e0 < 0) ? -e0 : e0;
+  if (_posActive && desiredDirNew != 0 && desiredDirNew == curDir) {
+    int32_t absOldOutFt = computeErrorDeg01(currentTargetOutDeg01, curOutDeg01);
+    if (absOldOutFt < 0) absOldOutFt = -absOldOutFt;
+    int32_t absNewOutFt = errOutDeg01;
+    if (absNewOutFt < 0) absNewOutFt = -absNewOutFt;
+    if (absNewOutFt < absOldOutFt &&
+        applyCloserTargetRamp_(tgtDeg01, curDeg01, desiredDirNew, absNewOutFt, desiredDirNew,
+                               nowMs)) {
+      return true;
+    }
   }
 
-  // Bewegungsrichtung ggf. aktualisieren
-  _moveDir = desiredDirNew;
+  armOutMapSlackIfReversing_(curDeg01, desiredDirNew);
+  clearRetargetDecelRamp_();
+  commitOutTargetDeg01_(tgtDeg01, curDeg01, desiredDirNew);
+
+  // Debug: zuletzt angewendete Backlash-Abbildung (Encoderziel - OUT-Ziel) — in commitOutTargetDeg01_
   return true;
 }
 // ============================================================================
@@ -1168,7 +1354,7 @@ float MotionController::update(uint32_t nowMs, uint32_t dtMs) {
     // die automatische Losbrechhilfe.
     //
     // Darum: "Bewegung" erst ab einem kleinen Count-Schwellwert.
-    const long moveDetectCounts = 3; // 3 Counts ~ 0,007deg bei 160k CPR
+    const long moveDetectCounts = moveDetectCounts_();
     long d = countsNow - _lastMoveCounts;
     if (d < 0) d = -d;
     if (d >= moveDetectCounts) {
@@ -1286,6 +1472,20 @@ float MotionController::update(uint32_t nowMs, uint32_t dtMs) {
     _brakeRequest = false;
     _brakeDir = dir;
 
+    _brakeStartDutyAbs = fabsf(_lastAppliedDuty);
+    float kickMinBrake = (_cfg.pwmKickMinAbs) ? (*_cfg.pwmKickMinAbs) : 0.0f;
+    if (kickMinBrake < 0.0f) kickMinBrake = -kickMinBrake;
+    if (_brakeStartDutyAbs < kickMinBrake) _brakeStartDutyAbs = kickMinBrake;
+
+    if (isAbsoluteSsiMotion_()) {
+      armSsiRampStart_(_encoder->getCountsRaw());
+    }
+
+    // noMoveSinceMs frisch starten: SSI-Encoder aendert Position nur alle ~100ms
+    // (1 Count = 0.088deg bei 4096 CPR, typische Drehzahl 0.5-2 deg/s).
+    // Ohne Reset wuerde noMoveStable nach 80ms feuern, obwohl Motor noch faehrt.
+    _noMoveSinceMs = nowMs;
+
 // Brems-Hold zuruecksetzen (wird am Ende der Bremsfahrt aktiviert, um Zittern zu vermeiden)
 _brakeHoldActive = false;
 _brakeHoldStartMs = 0;
@@ -1312,8 +1512,7 @@ _brakeHoldStartMs = 0;
 
 const float errDeg = (float)errDeg01 / 100.0f;
 
-  int32_t fineWinDeg01 = (_cfg.fineWindowDeg01) ? (*_cfg.fineWindowDeg01) : 0;
-  if (fineWinDeg01 < 0) fineWinDeg01 = -fineWinDeg01;
+  int32_t fineWinDeg01 = effectiveFineWindowDeg01_();
   // Knapp UEBER dem Feinfenster (typ. ~2deg Fenster + ~1deg Grob): die Grobrampe
   // ist zu kurz zum sauberen Abbremsen -> Sprung in Fein-Creep mit zu viel Energie
   // (massives Ueberschwingen, besonders CCW). Dann gesamte Fahrt wie reine Feinfahrt.
@@ -1329,21 +1528,27 @@ const float errDeg = (float)errDeg01 / 100.0f;
   if (_moveDir == 0 && desiredDirToTarget != 0) {
     _moveDir = desiredDirToTarget;
     _rampStartDeg01 = curDeg01;
+    armSsiRampStart_(countsNow);
   }
 
   // ------------------------------------------------------------
   // Arrival (Position + Stillstand)
   // ------------------------------------------------------------
-  int32_t arriveTolDeg01 = (_cfg.arriveTolDeg01) ? (*_cfg.arriveTolDeg01) : 2;
-  if (arriveTolDeg01 < 0) arriveTolDeg01 = -arriveTolDeg01;
-  const uint32_t arriveHoldMs = (_cfg.arriveHoldMs) ? (*_cfg.arriveHoldMs) : 200;
+  int32_t arriveTolDeg01 = effectiveArriveTolDeg01_();
+  const uint32_t arriveHoldMs = effectiveArriveHoldMs_();
 
-  // Ziel-Toleranz darf nur auf der "positiven" Seite gelten.
-  // Das Fenster ist damit immer [target .. target+tol] und nie unterhalb des Solls.
-  // errDeg01 = target - current
-  // - errDeg01 <= 0   -> current >= target (wir sind nicht UNTER dem Soll)
-  // - errDeg01 >= -tol -> maximal tol ueber Soll (Overshoot erlaubt)
-  const bool inPosTol = (errDeg01 <= 0 && errDeg01 >= -arriveTolDeg01);
+  // Ankunftsfenster — immer asymmetrisch [target .. target+tol]:
+  // Motor muss das Ziel erreichen ODER leicht ueberschiessen (errDeg01 <= 0).
+  // "Zu kurz stoppen" gilt nicht als angekommen.
+  //
+  // SSI-Besonderheit: Ziel liegt oft zwischen zwei Encoder-Counts.
+  //   - Der Motor wendet Vorwaerts-Fine-PWM bis er 1 Count ueberschiesst.
+  //   - effectiveInPosTolDeg01_() = ceil(1 Count) = 9deg01 (4096 CPR) stellt sicher,
+  //     dass ein 1-Count-Overshoot (max 8.79deg01) in das Toleranzfenster faellt.
+  //   - Vorherige symmetrische Loesung liess Motor ZU KURZ stoppen (errDeg01=5=tol →
+  //     kein Forward-PWM → bleibt 0.05deg unter Ziel).
+  const int32_t inPosTolDeg01 = effectiveInPosTolDeg01_();
+  const bool inPosTol = (errDeg01 <= 0 && errDeg01 >= -inPosTolDeg01);
 
   if (brakingNow) {
     // Waehrend der Bremsfahrt keine normale Arrival-Logik.
@@ -1406,7 +1611,11 @@ const float errDeg = (float)errDeg01 / 100.0f;
   // Loesung: Wenn wir in der Grobphase sind und fuer eine gewisse Zeit KEINE
   // eindeutige Encoder-Bewegung sehen, reaktivieren wir KICK automatisch.
   // Dadurch wird PWM wieder schnell angehoben, bis echte Counts kommen.
-  if (!brakingNow && !_kickActive) {
+  //
+  // SSI (4096 CPR): Position springt in ~0,09deg-Schritten, langsames Rampen
+  // kann <1 Count / 250ms sein -> Re-KICK wuerde staendig _rampStartDeg01
+  // zuruecksetzen und PWM pulsiert (Hoch/Runter waehrend der ganzen Fahrt).
+  if (!brakingNow && !_kickActive && !isAbsoluteSsiMotion_()) {
     const uint32_t coarseNoMoveKickMs = 250; // nach 250ms ohne Bewegung -> KICK
     const float minErrDeg = 0.30f;           // nur wenn wirklich eine Strecke zu fahren ist
 
@@ -1457,7 +1666,7 @@ const float errDeg = (float)errDeg01 / 100.0f;
       //
       // Darum: KICK erst dann "beenden", wenn wir NACH dem echten Anfahrimpuls
       // (KICK-Drive-Phase gestartet) eine eindeutige Bewegung in KICK-Richtung sehen.
-      const long detectCounts = 20;
+      const long detectCounts = kickDetectCounts_();
       const uint32_t minDriveMsForDetect = 40;
 
       bool endKickNow = false;
@@ -1480,7 +1689,22 @@ const float errDeg = (float)errDeg01 / 100.0f;
         _kickDriveStartMs = 0;
         _kickDriveStartCounts = 0;
 
-        _rampStartDeg01 = curDeg01;
+        // SSI: Weg-Zaehler fuer Hochrampe ab KICK-Ende neu, Anker = aktuelles PWM (~kickMin).
+        // KICK liefert nur Losbrechung; Hochfahren ueber rampDistDeg im Dreieckprofil.
+        if (isAbsoluteSsiMotion_()) {
+          armSsiRampStart_(cNow);
+          const float anchor = fabsf(_lastAppliedDuty);
+          float kickMin = (_cfg.pwmKickMinAbs) ? (*_cfg.pwmKickMinAbs) : 0.0f;
+          if (kickMin < 0.0f) kickMin = -kickMin;
+          if (anchor >= kickMin) {
+            _pwmRampUpAnchorAbs = anchor;
+          } else if (kickMin > 0.01f) {
+            _pwmRampUpAnchorAbs = kickMin;
+          }
+        } else {
+          _rampStartDeg01 = curDeg01;
+          armSsiRampStart_(cNow);
+        }
 
         // Speed-Messung und Regler neu initialisieren
         _haveLastCounts = false;
@@ -1514,7 +1738,7 @@ const float errDeg = (float)errDeg01 / 100.0f;
           //   -> wir starten sanfter und halten das Target erstmal bei kickMin,
           //      damit es beim Neustart keinen Ruck gibt.
           float kickTargetAbs = kickMin;
-          if (!_kickSoftMode) {
+          if (!_kickSoftMode && !isAbsoluteSsiMotion_()) {
             float kickSlew = _autoPwmSlewPerSec;
             if (!isfinite(kickSlew) || kickSlew <= 0.01f) kickSlew = 200.0f;
 
@@ -1522,18 +1746,19 @@ const float errDeg = (float)errDeg01 / 100.0f;
             kickTargetAbs = kickMin + (kickSlew * t);
             kickTargetAbs = clampFloat(kickTargetAbs, kickMin, pwmMax);
           }
+          // SSI: KICK nur Losbrechung auf kickMin — Hochrampe macht das Dreieckprofil.
 
           const float kickTarget = (float)dir * kickTargetAbs;
 
           // ------------------------------------------------------------
           // Slew / Ausgabe
           // ------------------------------------------------------------
-          // Normaler KICK: bewusst schnelle Slew (damit er sicher losbricht).
-          // Soft-KICK: nutzt normale Slew (wie Rampe), damit beim Neustart nach
-          // Bremsrampe keine PWM-Spruenge/"Ruck" entstehen.
           float dutyOut = 0.0f;
           if (_kickSoftMode) {
             dutyOut = applyPwmSlew(kickTarget, _lastAppliedDuty, dtMs);
+          } else if (isAbsoluteSsiMotion_()) {
+            // SSI: schnell kickMin, nicht darueber — Hochrampe folgt im Profil.
+            dutyOut = applyPwmSlewCustom(kickTarget, _lastAppliedDuty, dtMs, 400.0f);
           } else {
             dutyOut = applyPwmSlewCustom(kickTarget, _lastAppliedDuty, dtMs, 600.0f);
           }
@@ -1577,9 +1802,27 @@ if (brakingNow && _brakeDir != 0) {
   remainingDeg = rem;
 }
 
+// SSI: monotoner Count-Filter — verhindert PWM-Pulsieren durch quantisierte Sprünge.
+const int8_t profileMoveDir =
+    (_moveDir != 0) ? _moveDir
+                    : ((errDeg01 > 0) ? +1 : (errDeg01 < 0 ? -1 : 0));
+if (_ssiFilterActive && !brakingNow) {
+  updateSsiFilteredCounts_(countsNow, profileMoveDir);
+}
+
 // Weg seit Rampenstart (fuer Ramp-Up)
-const int32_t dStartDeg01 = computeDeltaDeg01(curDeg01, _rampStartDeg01);
-float distFromStartDeg = (float)((dStartDeg01 < 0) ? -dStartDeg01 : dStartDeg01) / 100.0f;
+float distFromStartDeg = 0.0f;
+if (_ssiFilterActive && !brakingNow) {
+  const int32_t cpr = _encoder->getCountsPerRevActual();
+  if (cpr > 0 && profileMoveDir != 0) {
+    long distCounts = _ssiFilterCounts - _ssiRampStartCounts;
+    if (distCounts < 0) distCounts = -distCounts;
+    distFromStartDeg = (float)distCounts * (360.0f / (float)cpr);
+  }
+} else {
+  const int32_t dStartDeg01 = computeDeltaDeg01(curDeg01, _rampStartDeg01);
+  distFromStartDeg = (float)((dStartDeg01 < 0) ? -dStartDeg01 : dStartDeg01) / 100.0f;
+}
 if (distFromStartDeg < 0.0f) distFromStartDeg = 0.0f;
 
 // Feinfenster (fineWinDeg01 weiter oben in update() gesetzt)
@@ -1588,7 +1831,7 @@ if (fineWinDeg01 > 0) fineWinDeg = (float)fineWinDeg01 / 100.0f;
 
 // Feinphase aktiv? (nur in normaler Fahrt)
 bool fineActive = false;
-if (!brakingNow) {
+if (!brakingNow && !_retargetDecelActive) {
   if (fineWinDeg01 > 0 && absErrDeg01 <= fineWinDeg01) {
     fineActive = true;
   } else if (fineShortHybridMove && absErrDeg01 > 0) {
@@ -1635,6 +1878,24 @@ if (!brakingNow && fineWinDeg > 0.0f) {
   remainingCoarseDeg = remainingDeg - fineWinDeg;
   if (remainingCoarseDeg < 0.0f) remainingCoarseDeg = 0.0f;
 }
+if (_ssiFilterActive && !brakingNow && profileMoveDir != 0) {
+  int32_t tgtCounts = 0;
+  if (_encoder->deg01ToCounts(_targetDeg01, tgtCounts)) {
+    const int32_t cpr = _encoder->getCountsPerRevActual();
+    if (cpr > 0) {
+      long remCounts =
+          (profileMoveDir > 0) ? ((long)tgtCounts - _ssiFilterCounts)
+                               : (_ssiFilterCounts - (long)tgtCounts);
+      if (remCounts < 0) remCounts = 0;
+      remainingDeg = (float)remCounts * (360.0f / (float)cpr);
+      remainingCoarseDeg = remainingDeg;
+      if (fineWinDeg > 0.0f) {
+        remainingCoarseDeg = remainingDeg - fineWinDeg;
+        if (remainingCoarseDeg < 0.0f) remainingCoarseDeg = 0.0f;
+      }
+    }
+  }
+}
 
 // ------------------------------------------------------------
 // Brems-Hold am Ende der Bremsfahrt (STOP / Richtungswechsel)
@@ -1642,7 +1903,10 @@ if (!brakingNow && fineWinDeg > 0.0f) {
 // Wenn wir in der Bremsfahrt am Ende sind, ziehen wir PWM per Slew auf 0 und
 // warten kurz auf Stillstand, bevor wir auf Pending-Ziel/Stop-Punkt umschalten.
 if (brakingNow) {
-  const uint32_t brakeHoldMs = 80;
+  // SSI-Encoder aendert Position nur alle ~100ms bei langsamer Drehzahl (0.088deg/Count, 4096 CPR).
+  // 80ms wuerde noMoveStable feuern waehrend der Motor noch faehrt → brakeHold zu frueh.
+  // Faustregel: mindestens 3x die maximale Count-Luecke (bei Minimalgeschwindigkeit).
+  const uint32_t brakeHoldMs = isAbsoluteSsiMotion_() ? 500u : 80u;
   const bool noMoveStable = (nowMs - _noMoveSinceMs) >= brakeHoldMs;
 
   const bool remGone = (remainingDeg <= 0.0001f);
@@ -1696,6 +1960,7 @@ if (brakingNow) {
       _brakeActive = false;
       _brakeReason = 0;
       _brakeHoldActive = false;
+      _brakeStartDutyAbs = 0.0f;
 
       // Arrival-Flags fuer die naechste Fahrt zuruecksetzen
       _inTol = false;
@@ -1729,6 +1994,7 @@ if (brakingNow) {
         _targetDeg01 = nextTgt;
         _moveDir = nextDir;
         _rampStartDeg01 = curDeg01;
+        armSsiRampStart_(_encoder->getCountsRaw());
         {
           const int32_t e0 = computeErrorDeg01(_targetDeg01, curDeg01);
           _posInitialAbsErrDeg01 = (e0 < 0) ? -e0 : e0;
@@ -1749,6 +2015,7 @@ if (brakingNow) {
         const int32_t errNext = computeErrorDeg01(_targetDeg01, curDeg01);
         _moveDir = (errNext > 0) ? +1 : (errNext < 0 ? -1 : 0);
         _rampStartDeg01 = curDeg01;
+        armSsiRampStart_(_encoder->getCountsRaw());
 
         // STOP-Punkt: normaler Neustart (Soft nur bei Pending-Ziel).
         _kickSoftMode = false;
@@ -1852,9 +2119,48 @@ const bool notCruisingAtTop = (pwmDownAbs < (pwmMax - 0.05f));
 _decelPhaseActive = (!brakingNow && downCurveIsLimiting && insideDecelDistance && notCruisingAtTop);
 
 
-// Dreieckprofil = Minimum aus Up/Down
+// Dreieckprofil:
+// - Bremsfahrt: NUR Ramp-Down (pwmMax->0 ueber rampDist). pwmUp wird ignoriert,
+//   damit eine laufende Hochrampe die Bremse nicht auf Suchgeschwindigkeit zieht.
+//   NEVER-INCREASE stellt sicher, dass wir nie ueber aktuelle Duty steigen
+//   (Motor war ggf. noch in der Hochrampe und deshalb unter pwmMax).
+// - Normalfahrt: Minimum aus Up und Down (Dreiecksform).
 float desiredAbs = pwmUpAbs;
-if (pwmDownAbs < desiredAbs) desiredAbs = pwmDownAbs;
+if (brakingNow) {
+  desiredAbs = pwmDownAbs;
+} else if (pwmDownAbs < desiredAbs) {
+  desiredAbs = pwmDownAbs;
+}
+
+// Naeheres Ziel: PWM nicht unter Ausroll-Rampe fallen lassen (Hoch-/Abbremsphase).
+if (_retargetDecelActive && !brakingNow && _retargetDecelDistDeg > 0.001f) {
+  float traveledDeg = 0.0f;
+  if (_retargetDecelMoveDir != 0) {
+    if (_ssiFilterActive && _encoder) {
+      const int32_t cpr = _encoder->getCountsPerRevActual();
+      if (cpr > 0) {
+        long dc = _ssiFilterCounts - _ssiRampStartCounts;
+        if (dc < 0) dc = -dc;
+        traveledDeg = (float)dc * (360.0f / (float)cpr);
+      }
+    } else {
+      const int32_t d01 = computeDeltaDeg01(curDeg01, _retargetDecelStartDeg01);
+      if (_retargetDecelMoveDir > 0) {
+        traveledDeg = (d01 > 0) ? ((float)d01 / 100.0f) : 0.0f;
+      } else {
+        traveledDeg = (d01 < 0) ? ((float)(-d01) / 100.0f) : 0.0f;
+      }
+    }
+  }
+  float prog = traveledDeg / _retargetDecelDistDeg;
+  if (prog < 0.0f) prog = 0.0f;
+  if (prog > 1.0f) prog = 1.0f;
+  float floorAbs = _retargetDecelStartDuty * (1.0f - prog) + endAbs * prog;
+  if (desiredAbs < floorAbs) desiredAbs = floorAbs;
+  if (prog >= 0.995f) {
+    clearRetargetDecelRamp_();
+  }
+}
 
 // Bei Bremsfahrt NIEMALS erhoehen (nur auslaufen)
 if (brakingNow) {
@@ -1895,11 +2201,21 @@ _speedCmdRampDegPerSec = 0.0f;
 
     _motorBrakeRequested = false;
 
-    // errDeg01 = target - current (wie ueberall in diesem Block)
+    // Fine-PWM — immer asymmetrisch (gleich fuer PCNT und SSI):
+    //   Vorwaerts: solange errDeg01 > 0 (Motor ist noch UNTER dem Ziel).
+    //   Rueckwaerts: nur wenn Motor das Ziel um mehr als inPosTolDeg01 ueberschossen hat.
+    //     → SSI: Rueckwaerts erst ab >1 Count Overshoot (errDeg01 < -9).
+    //       Verhindert Oszillation: normaler 1-Count-Overshoot (-8deg01) loest keinen
+    //       Ruecklauf aus; Motor haelt dort (inPosTol=true) und wartet auf noMoveStable.
+    //     → PCNT: wie bisher (< -arriveTolDeg01).
+    // Frueherer symmetrischer Deadband (+/-tol fuer SSI) wurde revertiert, weil er den
+    // Motor bei errDeg01=tol stoppte (5deg01 Kurzschluss), statt den naechsten Count
+    // anzufahren.
+    const int32_t fineBackTol = effectiveInPosTolDeg01_();
     float uCmdFine = 0.0f;
     if (errDeg01 > 0) {
       uCmdFine = finePwmAbs;
-    } else if (errDeg01 < -arriveTolDeg01) {
+    } else if (errDeg01 < -fineBackTol) {
       uCmdFine = -finePwmAbs;
     }
 

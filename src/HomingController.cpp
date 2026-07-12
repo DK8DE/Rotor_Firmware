@@ -421,7 +421,7 @@ void HomingController::update(uint32_t nowMs) {
       pwm = lerpFloat(pwmSlow, pwmCruiseRight, t);
     }
 
-    // 2) Ab expectedCounts: Abbremsrampe auf pwmSlow (g_minPwm)
+    // 2) Ab seekMaxDecelStartCounts: Abbremsrampe auf pwmSlow (g_minPwm)
     //    Danach konstant pwmSlow bis zum Endschalter (keine weitere Rampe!)
     if (moved >= seekMaxDecelStart) {
       const long decelMoved = moved - seekMaxDecelStart;

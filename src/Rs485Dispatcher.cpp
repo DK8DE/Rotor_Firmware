@@ -40,6 +40,18 @@ static int32_t safeI32(const int32_t* p, int32_t fallback) {
   return p ? *p : fallback;
 }
 
+static bool isRotorReferencedLocal(const Rs485DispatcherConfig& cfg, HomingController* homing) {
+  const uint8_t ect = safeU8(cfg.encTypeU8, 1);
+  if (ect == (uint8_t)ENCTYPE_ABSOLUTE_SSI) {
+    return cfg.encoderAxis && cfg.encoderAxis->isSsiValid();
+  }
+  return homing && homing->isReferenced();
+}
+
+static bool isAbsoluteEncType(const Rs485DispatcherConfig& cfg) {
+  return safeU8(cfg.encTypeU8, 1) == (uint8_t)ENCTYPE_ABSOLUTE_SSI;
+}
+
 // ============================================================================
 // Public
 // ============================================================================
@@ -102,11 +114,12 @@ void Rs485Dispatcher::updateHomingKickRetry(uint32_t nowMs) {
 
   if (!(_cfg.homingKickTries && _cfg.homingKickNextMs && _cfg.homingKickMaxTries && _cfg.homingKickSpacingMs)) return;
   if (!_homing) return;
+  if (isAbsoluteEncType(_cfg)) return;
 
   if (*_cfg.homingKickTries == 0) return;
 
   // Sobald referenziert -> Kick aus
-  if (_homing->isReferenced()) {
+  if (isRotorReferencedLocal(_cfg, _homing)) {
     *_cfg.homingKickTries = 0;
     return;
   }
@@ -774,16 +787,19 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   // GETREF (nur Referenz-Flag; waehrend Homing bleibt 0 bis HOME_DONE)
   // ------------------------------------------------------------------------
   if (cmd == "GETREF") {
-    if (shouldReply) sendAck(f.master, "GETREF", _homing->isReferenced() ? "1" : "0");
+    const bool ref = isRotorReferencedLocal(_cfg, _homing);
+    if (shouldReply) sendAck(f.master, "GETREF", ref ? "1" : "0");
     return;
   }
 
   // ------------------------------------------------------------------------
   // GETHOMING (Homing laeuft gerade — 1 waehrend SETREF-Prozess, sonst 0)
   // ------------------------------------------------------------------------
-  // Hinweis fuer Master/Display: GETREF==0 und GETHOMING==1 => „Referenzierung laeuft“,
-  // nicht mit „nicht referenziert/Idle“ verwechseln.
   if (cmd == "GETHOMING") {
+    if (isAbsoluteEncType(_cfg)) {
+      if (shouldReply) sendAck(f.master, "GETHOMING", "0");
+      return;
+    }
     if (shouldReply) sendAck(f.master, "GETHOMING", _homing->isActive() ? "1" : "0");
     return;
   }
@@ -1315,12 +1331,20 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   //   Preferences Key: "wen" (bool)
   // ------------------------------------------------------------------------
   if (cmd == "GETWINDENABLE") {
+    if (isAbsoluteEncType(_cfg)) {
+      if (shouldReply) sendAck(f.master, "GETWINDENABLE", "0");
+      return;
+    }
     const bool v = (_board) ? _board->getWindEnable() : ((_cfg.windEnable) ? *_cfg.windEnable : true);
     if (shouldReply) sendAck(f.master, "GETWINDENABLE", v ? "1" : "0");
     return;
   }
 
   if (cmd == "SETWINDENABLE") {
+    if (isAbsoluteEncType(_cfg)) {
+      if (shouldReply) sendNak(f.master, "SETWINDENABLE", "NOHW");
+      return;
+    }
     const bool v = parseBoolParam(f.params);
 
     // Persistenter Wert aktualisieren
@@ -1552,7 +1576,7 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
       return;
     }
 
-    if (!_homing || !_homing->isReferenced()) {
+    if (!_homing || !isRotorReferencedLocal(_cfg, _homing)) {
       if (shouldReply) sendNak(f.master, "SETCAL", "NOREF");
       return;
     }
@@ -1938,11 +1962,10 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     const uint32_t mode = parseU32Param(f.params);
     const bool startHoming = (mode >= 1);
 
-    if (startHoming) {
-      // Homing starten (Legacy)
+    if (startHoming && !isAbsoluteEncType(_cfg)) {
+      // Homing starten (Legacy) — nicht bei ENCTYPE=3 (SSI absolut)
       _homing->start();
 
-      // "Kick" state setzen, damit ggf. nochmal gestartet wird
       requestHomingKick(nowMs, "SETREF");
       serialEventState("SETREF_HOME");
     } else {
@@ -1967,7 +1990,7 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   // SETPOSDG (Positionsfahrt in Grad)
   // ------------------------------------------------------------------------
   if (cmd == "SETPOSDG") {
-    if (!_homing->isReferenced()) {
+    if (!isRotorReferencedLocal(_cfg, _homing)) {
       if (shouldReply) sendNak(f.master, "SETPOSDG", "NOREF");
       serialEventState("SETPOSDG_NOREF");
       return;
@@ -2510,16 +2533,17 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   // Werte:
   // - 1 = ENCTYPE_MOTOR_AXIS
   // - 2 = ENCTYPE_RING_OUTPUT
+  // - 3 = ENCTYPE_ABSOLUTE_SSI
   if (cmd == "GETENCTYPE") {
     uint8_t v = safeU8(_cfg.encTypeU8, 1);
-    if (v != 1 && v != 2) v = 1;
+    if (v != 1 && v != 2 && v != 3) v = 1;
     if (shouldReply) sendAck(f.master, "GETENCTYPE", String((int)v));
     return;
   }
 
   if (cmd == "SETENCTYPE") {
     const uint8_t nv = parseU8Param(f.params);
-    if (nv != 1 && nv != 2) {
+    if (nv != 1 && nv != 2 && nv != 3) {
       if (shouldReply) sendNak(f.master, "SETENCTYPE", "BADVAL");
       return;
     }

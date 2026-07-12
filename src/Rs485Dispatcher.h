@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 
+#include "EncoderAxis.h"
 #include "Rs485Proto.h"
 
 // Vorwaertsdeklarationen, damit wir die Header nicht unnoetig ueberall ziehen.
@@ -97,10 +98,11 @@ struct Rs485DispatcherConfig {
   int32_t*  homeExpectedCountsRing  = nullptr;
   int32_t*  homeExpectedCountsMotor = nullptr;
 
-  // EncoderType (1=MOTOR_AXIS, 2=RING_OUTPUT).
-  // Wir nutzen hier absichtlich uint8_t*, damit die .ino ihre Enum intern
-  // beibehalten kann (Enum basiert auf uint8_t).
+  // EncoderType (1=MOTOR_AXIS, 2=RING_OUTPUT, 3=ABSOLUTE_SSI).
   uint8_t*  encTypeU8 = nullptr;
+
+  // EncoderAxis (fuer SSI-Referenzpruefung bei ENCTYPE=3)
+  EncoderAxis* encoderAxis = nullptr;
 
   // Neustart-Anforderung (z.B. nach Aenderung EncoderType/EncoderCounts).
   // Wird von Rs485Dispatcher gesetzt, der eigentliche ESP.restart() erfolgt in loop().

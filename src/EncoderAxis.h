@@ -6,27 +6,29 @@
 /*
   EncoderAxis
   ----------
-  Kapselt UltraEncoderPCNT und stellt folgende Dinge bereit:
+  Kapselt UltraEncoderPCNT (Typ 1/2) oder TWK_KBE58_SSI (Typ 3) und stellt bereit:
   - Raw Counts (Steps) und korrigierte Counts (Steps) (bei Z-Korrektur)
   - Grad-Umrechnung (0..360) auf Basis countsPerRevActual
   - Z-Statistik (Pulse count, dz_steps, dz_us, z_error, offset)
-  - Konfiguration fuer Ringencoder (OUTPUT) und Motorencoder (MOTOR)
+  - Konfiguration fuer Ringencoder (OUTPUT), Motorencoder (MOTOR), SSI-Absolut (SSI)
 */
 
 // WICHTIG (RS485-Protokoll):
 // - ENCTYPE_MOTOR_AXIS  = 1
 // - ENCTYPE_RING_OUTPUT = 2
+// - ENCTYPE_ABSOLUTE_SSI = 3
 // Hintergrund:
 // - Der EncoderType ist per RS485/EEPROM konfigurierbar.
 // - Die Mapping-Werte sind absichtlich NICHT 0/1, damit ein alter/ungesetzter
 //   Wert (0) im EEPROM/NVS eindeutig erkannt werden kann.
 enum EncoderType : uint8_t {
-  ENCTYPE_MOTOR_AXIS  = 1,  // Encoder auf Motorachse
-  ENCTYPE_RING_OUTPUT = 2   // Encoder auf Abtrieb/Ring
+  ENCTYPE_MOTOR_AXIS   = 1,  // Encoder auf Motorachse
+  ENCTYPE_RING_OUTPUT  = 2,  // Encoder auf Abtrieb/Ring
+  ENCTYPE_ABSOLUTE_SSI = 3   // TWK KBE58 SSI-Absolutencoder (kein A/B/Z)
 };
 
 struct EncoderAxisConfig {
-  // Pins A/B
+  // Pins A/B (nur PCNT Typ 1/2)
   int pinA = -1;
   int pinB = -1;
 
@@ -38,7 +40,7 @@ struct EncoderAxisConfig {
   uint32_t serviceIntervalUs = 1000;
   uint32_t glitchNs = 200;
 
-  // Z (optional)
+  // Z (optional, nur Typ 2)
   bool zEnabled = false;
   uint8_t zPin = 255;
   bool zActiveHigh = true;
@@ -53,34 +55,21 @@ struct EncoderAxisConfig {
   long zMaxAbsErrorSteps = 20;
   float zCorrGain = 1.0f;
 
-  // Umrechnung (wird durch Homing gelernt)
-  // countsPerRevActual = Counts fuer 360deg
-  // Default = 0 -> noch unbekannt
+  // SSI (nur Typ 3) — Defaults RD130-Verdrahtung
+  int ssiClockPin = 8;
+  int ssiDataPin = 9;
+  int ssiZeroPin = 4;
+  uint32_t ssiSpiFreqHz = 100000;
+  uint32_t ssiBgIntervalMs = 10;
+  uint32_t ssiZeroPulseMs = 200;
+  bool ssiInvertDirection = true;  // Raw-SSI spiegeln (RD130: log. Winkel steigt = CW)
+
+  // Umrechnung (wird durch Homing gelernt bei Typ 1/2; bei Typ 3 fest 4096)
   int32_t countsPerRevActual = 0;
 
-  // Bereichs-Offset (Deg01) fuer mechanische Abweichungen am rechten Endschalter.
-  // Beispiel: rechter Endschalter kommt 2,50deg zu spaet -> rangeDegOffsetDeg01 = 250.
-  // Wirkung:
-  // - countsPerRevActual wird weiterhin aus der Endschalterstrecke gelernt.
-  // - Die gemessene Endschalterstrecke kann groesser als 360deg sein (z.B. +2,5deg).
-  // - Wir bilden daraus einen logischen Bereich 0..360,00deg, der BEIDSEITIG Abstand
-  //   zu den Endschaltern hat (damit "0" nicht in den linken Endschalter faehrt).
-  //   Dazu verteilen wir den Offset symmetrisch:
-  //     halfOff = rangeDegOffsetDeg01 / 2
-  //     total   = 36000 + rangeDegOffsetDeg01
-  //     physDeg01 = counts * total / cprActual
-  //     logDeg01  = physDeg01 - halfOff
-  //     counts    = (logDeg01 + halfOff) * cprActual / total
-  // - Die Grad-Skalierung (deg pro Count) bleibt dabei konsistent zur bisherigen
-  //   CPR_effektiv-Definition:
-  //     cprEff = cprActual * 36000 / (36000 + rangeDegOffsetDeg01)
-  // Hinweis:
-  // - Der Offset wird NICHT fuer Homing selbst benoetigt (Homing arbeitet in Counts).
-  // - Er beeinflusst aber die Grad-Skalierung und damit alle Positionsfahrten.
+  // Bereichs-Offset (Deg01) — nur Typ 1/2 (Endschalter-Versatz)
   int32_t rangeDegOffsetDeg01 = 0;
 
-  // Encoder-Typ
-  // Default: Motorachse (1)
   EncoderType encType = ENCTYPE_MOTOR_AXIS;
 };
 
@@ -101,13 +90,15 @@ public:
   bool begin(const EncoderAxisConfig& cfg);
   void stop();
 
-  // Konfig abfragen/aendern (RAM, spaeter EEPROM/NVS)
+  void update();
+
+  bool isAbsoluteSsi() const { return _cfg.encType == ENCTYPE_ABSOLUTE_SSI; }
+  bool isSsiValid() const { return _ssiValid; }
+
   EncoderAxisConfig getConfig() const { return _cfg; }
   void setCountsPerRevActual(int32_t cpr);
   int32_t getCountsPerRevActual() const { return _cfg.countsPerRevActual; }
 
-  // Effektive Counts pro 360deg (nach Range-Offset).
-  // 0 wenn unbekannt.
   int32_t getCountsPerRevEffective() const;
 
   void setRangeDegOffsetDeg01(int32_t offDeg01);
@@ -116,26 +107,26 @@ public:
   void setEncoderType(EncoderType t);
   EncoderType getEncoderType() const { return _cfg.encType; }
 
-  // Position/Counts
   long getCountsRaw() const;
   long getCountsCorrected() const;
-  long getCountsDefault() const;   // je nach "use corrected"
+  long getCountsDefault() const;
 
-  void setCountsZero();            // setzt Steps=0 (RAW) und reset Z-History
+  void setCountsZero();
   void setCounts(long newCounts);
 
-  // Grad (0..360) aus Counts
-  // liefert false, wenn countsPerRevActual noch unbekannt
   bool getPositionDeg01(int32_t& outDeg01) const;
-
-  // Sollwert in Grad -> Ziel-Counts
-  // liefert false, wenn countsPerRevActual unbekannt
   bool deg01ToCounts(int32_t deg01, int32_t& outCounts) const;
 
-  // Z-Stats
   EncoderZStats getZStats() const;
 
 private:
+  bool beginPcnt();
+  bool beginSsi();
+
   EncoderAxisConfig _cfg;
   UltraEncoderPCNT* _enc = nullptr;
+  class TWK_KBE58_SSI* _ssi = nullptr;
+  bool _ssiValid = false;
+  uint32_t _ssiPosition = 0;
+  uint32_t _ssiLastReadCounter = 0;
 };

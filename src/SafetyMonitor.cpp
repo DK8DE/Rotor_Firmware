@@ -7,6 +7,16 @@ static float clampFloat(float v, float lo, float hi) {
   return v;
 }
 
+static long absEncoderCountDelta(long from, long to, int32_t cpr) {
+  long d = to - from;
+  if (cpr > 0) {
+    const long half = cpr / 2;
+    if (d > half) d -= cpr;
+    else if (d < -half) d += cpr;
+  }
+  return (d < 0) ? -d : d;
+}
+
 // ------------------------------------------------------------
 // Text-Mapping (fuer Serial-Ausgabe)
 // ------------------------------------------------------------
@@ -510,8 +520,10 @@ void SafetyMonitor::updateStallProtection(uint32_t nowMs, float desiredDutySigne
       _stallMicroStartMs = nowMs;
       _stallMicroStartCounts = encoderCounts;
     } else {
-      long d = encoderCounts - _stallMicroStartCounts;
-      if (d < 0) d = -d;
+      long d = (_cfg.stallAbsoluteEncoder)
+                   ? absEncoderCountDelta(_stallMicroStartCounts, encoderCounts, _cfg.stallCountsPerRev)
+                   : (encoderCounts - _stallMicroStartCounts);
+      if (!_cfg.stallAbsoluteEncoder && d < 0) d = -d;
 
       // Jede reale Bewegung (>= 1 Count) zaehlt als "nicht blockiert" und setzt die Micro-Uhr zurueck
       if (d >= 1) {
@@ -591,7 +603,11 @@ void SafetyMonitor::updateStallProtection(uint32_t nowMs, float desiredDutySigne
     if (signChanged) {
       _stallStartCounts = encoderCounts;
       _stallPrevSign = signNow;
-      // _stallStartMs bleibt unveraendert!
+      // Absolutencoder: Richtungswechsel ist normal (Feinphase/Bremse) -> Timer neu.
+      // Inkremental: Timer behalten (Homing-Fix, siehe Kommentar oben).
+      if (_cfg.stallAbsoluteEncoder) {
+        _stallStartMs = nowMs;
+      }
       if (!_stallArmed) {
         _stallArmed = true;
         _stallStartMs = nowMs;
@@ -600,11 +616,16 @@ void SafetyMonitor::updateStallProtection(uint32_t nowMs, float desiredDutySigne
   }
 
   if (_stallArmed) {
-    // Fortschritt nur in der gewollten Richtung zaehlen.
-    // -> Bewegung in Gegenrichtung ignorieren (EMV/Elastizitaet).
-    long prog = (signNow > 0) ? (encoderCounts - _stallStartCounts)
-                              : (_stallStartCounts - encoderCounts);
-    if (prog < 0) prog = 0;
+    long prog = 0;
+    if (_cfg.stallAbsoluteEncoder) {
+      // Jede echte Winkelbewegung zaehlt, unabhaengig von PWM-Vorzeichen.
+      prog = absEncoderCountDelta(_stallStartCounts, encoderCounts, _cfg.stallCountsPerRev);
+    } else {
+      // Fortschritt nur in der gewollten Richtung zaehlen (EMV/Elastizitaet).
+      prog = (signNow > 0) ? (encoderCounts - _stallStartCounts)
+                           : (_stallStartCounts - encoderCounts);
+      if (prog < 0) prog = 0;
+    }
     const uint32_t dC = (uint32_t)prog;
 
     const uint32_t minC = _cfg.stallMinCounts;

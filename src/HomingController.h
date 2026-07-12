@@ -150,6 +150,7 @@ public:
 
   bool isActive() const;
   bool isReferenced() const { return _referenced; }
+  void setReferenced(bool v) { _referenced = v; }
   HomingState getState() const { return _state; }
 
   int32_t getCountsPerRevLearned() const { return _countsPerRevLearned; }
