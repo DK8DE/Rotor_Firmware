@@ -30,8 +30,18 @@ int32_t MotionController::encoderDeg01PerCount_() const {
   if (!_encoder) return 1;
   const int32_t cpr = _encoder->getCountsPerRevActual();
   if (cpr <= 0) return 1;
-  const int32_t d = (int32_t)(36000LL / (int64_t)cpr);
+  int32_t d = (int32_t)(36000LL / (int64_t)cpr);
+  if (d > 0 && isAbsoluteSsiMotion_()) {
+    const EncoderAxisConfig ecfg = _encoder->getConfig();
+    const uint16_t scNum = (ecfg.ssiAngleScaleNum > 0) ? ecfg.ssiAngleScaleNum : 1;
+    const uint16_t scDen = (ecfg.ssiAngleScaleDen > 0) ? ecfg.ssiAngleScaleDen : 1;
+    d = (int32_t)(((int64_t)d * (int64_t)scNum) / (int64_t)scDen);
+  }
   return (d > 0) ? d : 1;
+}
+
+float MotionController::outputDegPerCount_() const {
+  return (float)encoderDeg01PerCount_() / 100.0f;
 }
 
 int32_t MotionController::effectiveArriveTolDeg01_() const {
@@ -1238,8 +1248,15 @@ _brakeHoldStartMs = 0;
         }
       }
     } else if (_posActive && desiredDirNew != 0 && desiredDirNew == curDir) {
-      // Hochlauf-Fall-through (Case A/B returnieren frueher): Anker = |Duty|,
-      // damit ein naeheres Ziel mit grossem Restweg die Rampe nicht von pwmMin neu startet.
+      // Hochlauf-Verlaengerung: Rampe von aktuellem Duty (Anker) neu starten.
+      // Ohne _rampStartDeg01-Reset wuerde upAlpha durch groessere rampUpDistDegEff
+      // sinken → PWM-Dip kurz runter, dann wieder hoch.
+      if (!isAbsoluteSsiMotion_()) {
+        _rampStartDeg01 = curDeg01;
+      }
+      if (_encoder) {
+        armSsiRampStart_(_encoder->getCountsRaw());
+      }
       float anchor = fabsf(_lastAppliedDuty);
       if (anchor < kickM) anchor = kickM;
       if (anchor > pwmMaxCfg) anchor = pwmMaxCfg;
@@ -1389,7 +1406,7 @@ float MotionController::update(uint32_t nowMs, uint32_t dtMs) {
         const long dCounts = countsNow - _lastCounts;
         _lastCounts = countsNow;
 
-        const float degPerCount = 360.0f / (float)cpr;
+        const float degPerCount = isAbsoluteSsiMotion_() ? outputDegPerCount_() : (360.0f / (float)cpr);
         const float dDeg = (float)dCounts * degPerCount;
         _speedMeasDegPerSec = dDeg / dtSpeed;
       }
@@ -1817,7 +1834,7 @@ if (_ssiFilterActive && !brakingNow) {
   if (cpr > 0 && profileMoveDir != 0) {
     long distCounts = _ssiFilterCounts - _ssiRampStartCounts;
     if (distCounts < 0) distCounts = -distCounts;
-    distFromStartDeg = (float)distCounts * (360.0f / (float)cpr);
+    distFromStartDeg = (float)distCounts * outputDegPerCount_();
   }
 } else {
   const int32_t dStartDeg01 = computeDeltaDeg01(curDeg01, _rampStartDeg01);
@@ -1887,7 +1904,7 @@ if (_ssiFilterActive && !brakingNow && profileMoveDir != 0) {
           (profileMoveDir > 0) ? ((long)tgtCounts - _ssiFilterCounts)
                                : (_ssiFilterCounts - (long)tgtCounts);
       if (remCounts < 0) remCounts = 0;
-      remainingDeg = (float)remCounts * (360.0f / (float)cpr);
+      remainingDeg = (float)remCounts * outputDegPerCount_();
       remainingCoarseDeg = remainingDeg;
       if (fineWinDeg > 0.0f) {
         remainingCoarseDeg = remainingDeg - fineWinDeg;
@@ -2141,7 +2158,7 @@ if (_retargetDecelActive && !brakingNow && _retargetDecelDistDeg > 0.001f) {
       if (cpr > 0) {
         long dc = _ssiFilterCounts - _ssiRampStartCounts;
         if (dc < 0) dc = -dc;
-        traveledDeg = (float)dc * (360.0f / (float)cpr);
+        traveledDeg = (float)dc * outputDegPerCount_();
       }
     } else {
       const int32_t d01 = computeDeltaDeg01(curDeg01, _retargetDecelStartDeg01);

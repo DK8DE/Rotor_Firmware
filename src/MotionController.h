@@ -171,6 +171,7 @@ private:
 
   // SSI (4096 CPR): Groessen in deg01 / Counts an Encoder-Aufloesung anpassen.
   int32_t encoderDeg01PerCount_() const;
+  float outputDegPerCount_() const;
   int32_t effectiveArriveTolDeg01_() const;
   int32_t effectiveInPosTolDeg01_() const;
   int32_t effectiveFineWindowDeg01_() const;

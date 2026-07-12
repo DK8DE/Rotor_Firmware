@@ -64,6 +64,12 @@ struct EncoderAxisConfig {
   uint32_t ssiZeroPulseMs = 200;
   bool ssiInvertDirection = true;  // Raw-SSI spiegeln (RD130: log. Winkel steigt = CW)
 
+  // SSI: logischer Abtriebswinkel = Encoder-Winkel * num / den.
+  // RD130: Encoder-Welle dreht 1:2 zur Abtriebsachse (Getriebe) — ohne Skalierung
+  // faehrt der Motor doppelt so weit wie GETPOSDG anzeigt.
+  uint16_t ssiAngleScaleNum = 2;
+  uint16_t ssiAngleScaleDen = 1;
+
   // Umrechnung (wird durch Homing gelernt bei Typ 1/2; bei Typ 3 fest 4096)
   int32_t countsPerRevActual = 0;
 

@@ -230,7 +230,10 @@ bool EncoderAxis::getPositionDeg01(int32_t& outDeg01) const {
   if (_cfg.encType == ENCTYPE_ABSOLUTE_SSI) {
     if (!_ssiValid) return false;
     const int64_t num = (int64_t)_ssiPosition * 36000LL;
-    int32_t deg01 = (int32_t)(num / (int64_t)cprActual);
+    int32_t shaftDeg01 = (int32_t)(num / (int64_t)cprActual);
+    const uint16_t scNum = (_cfg.ssiAngleScaleNum > 0) ? _cfg.ssiAngleScaleNum : 1;
+    const uint16_t scDen = (_cfg.ssiAngleScaleDen > 0) ? _cfg.ssiAngleScaleDen : 1;
+    int32_t deg01 = (int32_t)(((int64_t)shaftDeg01 * (int64_t)scNum) / (int64_t)scDen);
     deg01 = clampI32(deg01, 0, 36000);
     outDeg01 = deg01;
     return true;
@@ -261,7 +264,12 @@ bool EncoderAxis::deg01ToCounts(int32_t deg01, int32_t& outCounts) const {
   deg01 = clampI32(deg01, 0, 36000);
 
   if (_cfg.encType == ENCTYPE_ABSOLUTE_SSI) {
-    int64_t num = (int64_t)deg01 * (int64_t)cprActual;
+    const uint16_t scNum = (_cfg.ssiAngleScaleNum > 0) ? _cfg.ssiAngleScaleNum : 1;
+    const uint16_t scDen = (_cfg.ssiAngleScaleDen > 0) ? _cfg.ssiAngleScaleDen : 1;
+    int64_t shaftNum = (int64_t)deg01 * (int64_t)scDen;
+    int32_t shaftDeg01 = (int32_t)(shaftNum / (int64_t)scNum);
+    shaftDeg01 = clampI32(shaftDeg01, 0, 36000);
+    int64_t num = (int64_t)shaftDeg01 * (int64_t)cprActual;
     int32_t counts = (int32_t)(num / 36000LL);
     if (counts >= cprActual) counts = cprActual - 1;
     if (counts < 0) counts = 0;
