@@ -2,6 +2,11 @@
 
 #include <TWK_KBE58_SSI.h>
 
+// Sicherheitskritisch: Turn muss möglichst sofort in NVS, sonst zeigt ein
+// Neustart im Überdrehbereich (z.B. 382°) nur den Rohwinkel (22°).
+// Kurze Entprellung nur gegen Wrap-Flattern an der 0/360-Grenze.
+static const uint32_t kSsiTurnPersistDebounceMs = 50;
+
 static int32_t clampI32(int32_t v, int32_t lo, int32_t hi) {
   if (v < lo) return lo;
   if (v > hi) return hi;
@@ -26,9 +31,16 @@ EncoderAxis::~EncoderAxis() {
 bool EncoderAxis::begin(const EncoderAxisConfig& cfg) {
   stop();
   _cfg = cfg;
+  if (_cfg.axisMaxDeg01 < 0) _cfg.axisMaxDeg01 = 0;
   _ssiValid = false;
   _ssiPosition = 0;
   _ssiLastReadCounter = 0;
+  _ssiHavePrevPos = false;
+  // _ssiTurn bleibt unverändert, wenn setSsiTurn() nach begin() aufgerufen wird;
+  // hier auf 0 zurücksetzen und Caller lädt ggf. aus NVS.
+  _ssiTurn = 0;
+  _ssiTurnDirty = false;
+  _ssiTurnChangedMs = 0;
 
   if (_cfg.encType == ENCTYPE_ABSOLUTE_SSI) {
     return beginSsi();
@@ -126,6 +138,69 @@ void EncoderAxis::stop() {
   _ssiValid = false;
   _ssiPosition = 0;
   _ssiLastReadCounter = 0;
+  _ssiHavePrevPos = false;
+}
+
+int32_t EncoderAxis::ssiOverlapDeg01_() const {
+  const int32_t amax = (_cfg.axisMaxDeg01 > 0) ? _cfg.axisMaxDeg01 : 36000;
+  int32_t overlap = amax - 36000;
+  if (overlap < 0) overlap = 0;
+  return overlap;
+}
+
+int32_t EncoderAxis::ssiRawDeg01FromCounts_(uint32_t counts) const {
+  const int32_t cpr = _cfg.countsPerRevActual;
+  if (cpr <= 0) return 0;
+  const int64_t num = (int64_t)counts * 36000LL;
+  int32_t shaftDeg01 = (int32_t)(num / (int64_t)cpr);
+  const uint16_t scNum = (_cfg.ssiAngleScaleNum > 0) ? _cfg.ssiAngleScaleNum : 1;
+  const uint16_t scDen = (_cfg.ssiAngleScaleDen > 0) ? _cfg.ssiAngleScaleDen : 1;
+  return (int32_t)(((int64_t)shaftDeg01 * (int64_t)scNum) / (int64_t)scDen);
+}
+
+void EncoderAxis::markSsiTurnDirty_() {
+  _ssiTurnDirty = true;
+  _ssiTurnChangedMs = millis();
+}
+
+void EncoderAxis::applySsiPosition_(uint32_t newPos) {
+  const int32_t cpr = _cfg.countsPerRevActual;
+  if (cpr <= 0) {
+    _ssiPosition = newPos;
+    _ssiHavePrevPos = true;
+    return;
+  }
+
+  if (_ssiHavePrevPos) {
+    const long d = (long)newPos - (long)_ssiPosition;
+    const long half = (long)cpr / 2L;
+    uint8_t newTurn = _ssiTurn;
+    if (d < -half) {
+      // Vorwärts über Wrap (z.B. 4090 -> 10)
+      newTurn = 1;
+    } else if (d > half) {
+      // Rückwärts über Wrap (z.B. 10 -> 4090)
+      newTurn = 0;
+    }
+    if (newTurn != _ssiTurn) {
+      _ssiTurn = newTurn;
+      markSsiTurnDirty_();
+    }
+  }
+
+  _ssiPosition = newPos;
+  _ssiHavePrevPos = true;
+
+  // Selbstheilung: turn=1 und Rohwert außerhalb Überlappungszone
+  // (logisch wäre > axisMax) → unmöglich, Turn zurücksetzen.
+  if (_ssiTurn != 0) {
+    const int32_t overlap = ssiOverlapDeg01_();
+    const int32_t rohDeg01 = ssiRawDeg01FromCounts_(_ssiPosition);
+    if (rohDeg01 > overlap) {
+      _ssiTurn = 0;
+      markSsiTurnDirty_();
+    }
+  }
 }
 
 void EncoderAxis::update() {
@@ -140,13 +215,15 @@ void EncoderAxis::update() {
     const TWK_KBE58_SSI::Reading r = _ssi->getLastReading();
     if (r.valid) {
       _ssiValid = true;
-      _ssiPosition = mapSsiPositionLogical(r.position, _cfg.countsPerRevActual, _cfg.ssiInvertDirection);
+      const uint32_t mapped = mapSsiPositionLogical(r.position, _cfg.countsPerRevActual, _cfg.ssiInvertDirection);
+      applySsiPosition_(mapped);
     }
   } else if (_ssi->hasNewReading()) {
     const TWK_KBE58_SSI::Reading r = _ssi->getLastReading();
     if (r.valid) {
       _ssiValid = true;
-      _ssiPosition = mapSsiPositionLogical(r.position, _cfg.countsPerRevActual, _cfg.ssiInvertDirection);
+      const uint32_t mapped = mapSsiPositionLogical(r.position, _cfg.countsPerRevActual, _cfg.ssiInvertDirection);
+      applySsiPosition_(mapped);
     }
   }
 #endif
@@ -182,6 +259,11 @@ void EncoderAxis::setRangeDegOffsetDeg01(int32_t offDeg01) {
   _cfg.rangeDegOffsetDeg01 = offDeg01;
 }
 
+void EncoderAxis::setAxisMaxDeg01(int32_t maxDeg01) {
+  if (maxDeg01 < 0) maxDeg01 = 0;
+  _cfg.axisMaxDeg01 = maxDeg01;
+}
+
 void EncoderAxis::setEncoderType(EncoderType t) {
   _cfg.encType = t;
 }
@@ -204,6 +286,15 @@ long EncoderAxis::getCountsDefault() const {
   return _enc->getPositionSteps();
 }
 
+long EncoderAxis::getCountsExtended() const {
+  if (!_ssi) {
+    return getCountsDefault();
+  }
+  const int32_t cpr = _cfg.countsPerRevActual;
+  if (cpr <= 0) return (long)_ssiPosition;
+  return (long)_ssiTurn * (long)cpr + (long)_ssiPosition;
+}
+
 void EncoderAxis::setCountsZero() {
   if (_ssi) return;
   if (!_enc) return;
@@ -217,10 +308,39 @@ bool EncoderAxis::setEncZero() {
   }
 #if defined(ESP32)
   _ssi->setZero();
+  if (_ssiTurn != 0) {
+    _ssiTurn = 0;
+    markSsiTurnDirty_();
+  }
   return true;
 #else
   return false;
 #endif
+}
+
+void EncoderAxis::setSsiTurn(uint8_t turn) {
+  const uint8_t t = (turn != 0) ? 1 : 0;
+  if (_ssiTurn == t) return;
+  _ssiTurn = t;
+  markSsiTurnDirty_();
+}
+
+void EncoderAxis::loadSsiTurn(uint8_t turn) {
+  _ssiTurn = (turn != 0) ? 1 : 0;
+  _ssiTurnDirty = false;
+  _ssiTurnChangedMs = 0;
+}
+
+bool EncoderAxis::consumeSsiTurnDirty(uint32_t nowMs, bool /*standstill*/) {
+  // standstill wird absichtlich ignoriert: Abschalten während der Fahrt
+  // darf den Turn nicht verlieren (Kabelbruch-Risiko).
+  if (!_ssiTurnDirty) return false;
+  if ((uint32_t)(nowMs - _ssiTurnChangedMs) < kSsiTurnPersistDebounceMs) return false;
+  return true;
+}
+
+void EncoderAxis::clearSsiTurnDirty() {
+  _ssiTurnDirty = false;
 }
 
 void EncoderAxis::setCounts(long newCounts) {
@@ -229,6 +349,7 @@ void EncoderAxis::setCounts(long newCounts) {
     const int32_t cpr = _cfg.countsPerRevActual;
     if (cpr > 0 && newCounts >= cpr) newCounts = cpr - 1;
     _ssiPosition = (uint32_t)newCounts;
+    _ssiHavePrevPos = true;
     return;
   }
   if (!_enc) return;
@@ -242,12 +363,12 @@ bool EncoderAxis::getPositionDeg01(int32_t& outDeg01) const {
 
   if (_cfg.encType == ENCTYPE_ABSOLUTE_SSI) {
     if (!_ssiValid) return false;
-    const int64_t num = (int64_t)_ssiPosition * 36000LL;
-    int32_t shaftDeg01 = (int32_t)(num / (int64_t)cprActual);
-    const uint16_t scNum = (_cfg.ssiAngleScaleNum > 0) ? _cfg.ssiAngleScaleNum : 1;
-    const uint16_t scDen = (_cfg.ssiAngleScaleDen > 0) ? _cfg.ssiAngleScaleDen : 1;
-    int32_t deg01 = (int32_t)(((int64_t)shaftDeg01 * (int64_t)scNum) / (int64_t)scDen);
-    deg01 = clampI32(deg01, 0, 36000);
+    int32_t deg01 = ssiRawDeg01FromCounts_(_ssiPosition);
+    if (_ssiTurn != 0) {
+      deg01 += 36000;
+    }
+    const int32_t amax = (_cfg.axisMaxDeg01 > 0) ? _cfg.axisMaxDeg01 : 36000;
+    deg01 = clampI32(deg01, 0, amax);
     outDeg01 = deg01;
     return true;
   }
@@ -274,12 +395,17 @@ bool EncoderAxis::deg01ToCounts(int32_t deg01, int32_t& outCounts) const {
   const int32_t cprActual = _cfg.countsPerRevActual;
   if (cprActual <= 0) return false;
 
-  deg01 = clampI32(deg01, 0, 36000);
-
   if (_cfg.encType == ENCTYPE_ABSOLUTE_SSI) {
+    const int32_t amax = (_cfg.axisMaxDeg01 > 0) ? _cfg.axisMaxDeg01 : 36000;
+    deg01 = clampI32(deg01, 0, amax);
+    // Eine Encoder-Umdrehung = 360°; Ziel >360° mappt auf denselben Roh-Count.
+    int32_t shaftLogDeg01 = deg01;
+    if (shaftLogDeg01 >= 36000) {
+      shaftLogDeg01 -= 36000;
+    }
     const uint16_t scNum = (_cfg.ssiAngleScaleNum > 0) ? _cfg.ssiAngleScaleNum : 1;
     const uint16_t scDen = (_cfg.ssiAngleScaleDen > 0) ? _cfg.ssiAngleScaleDen : 1;
-    int64_t shaftNum = (int64_t)deg01 * (int64_t)scDen;
+    int64_t shaftNum = (int64_t)shaftLogDeg01 * (int64_t)scDen;
     int32_t shaftDeg01 = (int32_t)(shaftNum / (int64_t)scNum);
     shaftDeg01 = clampI32(shaftDeg01, 0, 36000);
     int64_t num = (int64_t)shaftDeg01 * (int64_t)cprActual;
@@ -289,6 +415,8 @@ bool EncoderAxis::deg01ToCounts(int32_t deg01, int32_t& outCounts) const {
     outCounts = counts;
     return true;
   }
+
+  deg01 = clampI32(deg01, 0, 36000);
 
   int32_t off = _cfg.rangeDegOffsetDeg01;
   if (off < 0) off = -off;
@@ -301,6 +429,37 @@ bool EncoderAxis::deg01ToCounts(int32_t deg01, int32_t& outCounts) const {
   int64_t num = (int64_t)physDeg01 * (int64_t)cprActual;
   int32_t counts = (int32_t)(num / (int64_t)totalDeg01);
   outCounts = counts;
+  return true;
+}
+
+bool EncoderAxis::deg01ToCountsExtended(int32_t deg01, int32_t& outCounts) const {
+  const int32_t cprActual = _cfg.countsPerRevActual;
+  if (cprActual <= 0) return false;
+
+  if (_cfg.encType != ENCTYPE_ABSOLUTE_SSI) {
+    return deg01ToCounts(deg01, outCounts);
+  }
+
+  const int32_t amax = (_cfg.axisMaxDeg01 > 0) ? _cfg.axisMaxDeg01 : 36000;
+  deg01 = clampI32(deg01, 0, amax);
+
+  const int32_t turn = (deg01 >= 36000) ? 1 : 0;
+  int32_t inRevDeg01 = deg01;
+  if (turn != 0) {
+    inRevDeg01 -= 36000;
+  }
+
+  const uint16_t scNum = (_cfg.ssiAngleScaleNum > 0) ? _cfg.ssiAngleScaleNum : 1;
+  const uint16_t scDen = (_cfg.ssiAngleScaleDen > 0) ? _cfg.ssiAngleScaleDen : 1;
+  int64_t shaftNum = (int64_t)inRevDeg01 * (int64_t)scDen;
+  int32_t shaftDeg01 = (int32_t)(shaftNum / (int64_t)scNum);
+  shaftDeg01 = clampI32(shaftDeg01, 0, 36000);
+  int64_t num = (int64_t)shaftDeg01 * (int64_t)cprActual;
+  int32_t countsInRev = (int32_t)(num / 36000LL);
+  if (countsInRev >= cprActual) countsInRev = cprActual - 1;
+  if (countsInRev < 0) countsInRev = 0;
+
+  outCounts = turn * cprActual + countsInRev;
   return true;
 }
 

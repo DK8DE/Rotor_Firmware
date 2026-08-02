@@ -109,6 +109,12 @@ bool MotionController::isAbsoluteSsiMotion_() const {
   return _encoder && (_encoder->getEncoderType() == ENCTYPE_ABSOLUTE_SSI);
 }
 
+long MotionController::motionCountsNow_() const {
+  if (!_encoder) return 0;
+  if (isAbsoluteSsiMotion_()) return _encoder->getCountsExtended();
+  return _encoder->getCountsRaw();
+}
+
 void MotionController::armSsiRampStart_(long countsNow) {
   if (!isAbsoluteSsiMotion_()) {
     _ssiFilterActive = false;
@@ -193,7 +199,7 @@ bool MotionController::applyCloserTargetRamp_(int32_t tgtOutDeg01, int32_t curDe
   // Rampe immer ueber rampDistDeg (wenn Platz reicht), sonst absNewDeg.
   float decelDist = absNewDeg;
   if (decelDist < 0.05f) decelDist = 0.05f;
-  armRetargetDecelRamp_(dutyAbs, decelDist, moveDirOut, curDeg01, _encoder->getCountsRaw());
+  armRetargetDecelRamp_(dutyAbs, decelDist, moveDirOut, curDeg01, motionCountsNow_());
   _posStartMs = nowMs;
   return true;
 }
@@ -510,7 +516,7 @@ void MotionController::startKickIfNeeded(uint32_t nowMs, int32_t curDeg01) {
   // Startpunkt fuer Anfahr-Rampe sicher auf die aktuelle Position legen.
   _rampStartDeg01 = curDeg01;
   if (_encoder) {
-    armSsiRampStart_(_encoder->getCountsRaw());
+    armSsiRampStart_(motionCountsNow_());
   }
 
   // Arrival-Flags zuruecksetzen
@@ -537,7 +543,7 @@ void MotionController::startKickIfNeeded(uint32_t nowMs, int32_t curDeg01) {
 
   // Stillstands-Erkennung reset
   _haveMoveBaseline = false;
-  _lastMoveCounts = (_encoder) ? _encoder->getCountsRaw() : 0;
+  _lastMoveCounts = (_encoder) ? motionCountsNow_() : 0;
   _noMoveSinceMs = nowMs;
 
   // Optional: KICK aktivieren, bis Encoder-Counts Bewegung zeigen.
@@ -558,7 +564,7 @@ void MotionController::startKickIfNeeded(uint32_t nowMs, int32_t curDeg01) {
   if (_encoder && kickMin > 0.0f) {
     _kickActive = true;
     _kickStartMs = nowMs;
-    _kickStartCounts = _encoder->getCountsRaw();
+    _kickStartCounts = motionCountsNow_();
     // Richtung anhand des Ziel-Fehlers bestimmen (robust auch wenn _moveDir==0).
     const int32_t errDeg01 = computeErrorDeg01(_targetDeg01, curDeg01);
     _kickDir = (errDeg01 > 0) ? +1 : (errDeg01 < 0 ? -1 : 0);
@@ -1002,14 +1008,14 @@ bool MotionController::commandSetPosDeg01(int32_t tgtDeg01, uint32_t nowMs) {
     // Startpunkt fuer Anfahr-Rampe setzen
     _rampStartDeg01 = curDeg01;
     _moveDir = desiredDirNew;
-    armSsiRampStart_(_encoder->getCountsRaw());
+    armSsiRampStart_(motionCountsNow_());
 
     // KICK-Phase aktivieren: PWM wird angehoben, bis Encoder-Counts eine Bewegung zeigen.
     _pendingSoftStart = false;
     _kickSoftMode = false;
     _kickActive = true;
     _kickStartMs = nowMs;
-    _kickStartCounts = _encoder->getCountsRaw();
+    _kickStartCounts = motionCountsNow_();
     _kickDir = desiredDirNew;
 
     // Counts/Jitter vor dem echten "Ziehen" ignorieren.
@@ -1034,7 +1040,7 @@ bool MotionController::commandSetPosDeg01(int32_t tgtDeg01, uint32_t nowMs) {
 
     // Stillstands-Erkennung reset
     _haveMoveBaseline = false;
-    _lastMoveCounts = _encoder->getCountsRaw();
+    _lastMoveCounts = motionCountsNow_();
     _noMoveSinceMs = nowMs;
 
     // ------------------------------------------------------------
@@ -1158,7 +1164,7 @@ _brakeHoldStartMs = 0;
 
       _moveDir = desiredDirNew;
       _rampStartDeg01 = curDeg01;
-      armSsiRampStart_(_encoder->getCountsRaw());
+      armSsiRampStart_(motionCountsNow_());
       _pwmRampUpAnchorAbs = -1.0f;
       _kickActive = false;
       _posStartMs = nowMs;
@@ -1268,7 +1274,7 @@ _brakeHoldStartMs = 0;
         _rampStartDeg01 = curDeg01;
       }
       if (_encoder) {
-        armSsiRampStart_(_encoder->getCountsRaw());
+        armSsiRampStart_(motionCountsNow_());
       }
       float anchor = fabsf(_lastAppliedDuty);
       if (anchor < kickM) anchor = kickM;
@@ -1364,7 +1370,7 @@ float MotionController::update(uint32_t nowMs, uint32_t dtMs) {
 
   advanceOutMapFlank_(curDeg01);
 
-  const long countsNow = _encoder->getCountsRaw();
+  const long countsNow = motionCountsNow_();
   // Fuer Stillstand/KICK benutzen wir bewusst RAW-Counts.
   // Grund: Z-Korrektur / Offset-Korrektur kann die "korrigierten" Counts auch im Stillstand springen lassen
   // (z.B. +/- wenige Counts oder in groesseren Korrekturschritten). Das wuerde _noMoveSinceMs dauernd resetten
@@ -1510,7 +1516,7 @@ float MotionController::update(uint32_t nowMs, uint32_t dtMs) {
     if (_brakeStartDutyAbs < kickMinBrake) _brakeStartDutyAbs = kickMinBrake;
 
     if (isAbsoluteSsiMotion_()) {
-      armSsiRampStart_(_encoder->getCountsRaw());
+      armSsiRampStart_(motionCountsNow_());
     }
 
     // noMoveSinceMs frisch starten: SSI-Encoder aendert Position nur alle ~100ms
@@ -1691,7 +1697,7 @@ const float errDeg = (float)errDeg01 / 100.0f;
       _kickActive = false;
       _kickSoftMode = false;
     } else {
-      const long cNow = _encoder->getCountsRaw();
+      const long cNow = motionCountsNow_();
       // Sehr kleine Count-Aenderungen koennen bei manchen Encodern auch
       // ohne echte Bewegung auftreten (Rauschen/Flattern). Beim Umschalten
       // nach STOP/Richtungswechsel kann es ausserdem einen kleinen Nachlauf geben.
@@ -1912,7 +1918,7 @@ if (!brakingNow && fineWinDeg > 0.0f) {
 }
 if (_ssiFilterActive && !brakingNow && profileMoveDir != 0) {
   int32_t tgtCounts = 0;
-  if (_encoder->deg01ToCounts(_targetDeg01, tgtCounts)) {
+  if (_encoder->deg01ToCountsExtended(_targetDeg01, tgtCounts)) {
     const int32_t cpr = _encoder->getCountsPerRevActual();
     if (cpr > 0) {
       long remCounts =
@@ -2026,7 +2032,7 @@ if (brakingNow) {
         _targetDeg01 = nextTgt;
         _moveDir = nextDir;
         _rampStartDeg01 = curDeg01;
-        armSsiRampStart_(_encoder->getCountsRaw());
+        armSsiRampStart_(motionCountsNow_());
         {
           const int32_t e0 = computeErrorDeg01(_targetDeg01, curDeg01);
           _posInitialAbsErrDeg01 = (e0 < 0) ? -e0 : e0;
@@ -2047,7 +2053,7 @@ if (brakingNow) {
         const int32_t errNext = computeErrorDeg01(_targetDeg01, curDeg01);
         _moveDir = (errNext > 0) ? +1 : (errNext < 0 ? -1 : 0);
         _rampStartDeg01 = curDeg01;
-        armSsiRampStart_(_encoder->getCountsRaw());
+        armSsiRampStart_(motionCountsNow_());
 
         // STOP-Punkt: normaler Neustart (Soft nur bei Pending-Ziel).
         _kickSoftMode = false;

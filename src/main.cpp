@@ -144,6 +144,12 @@ static int32_t g_axisMaxDeg01 = 36000;
 // - GETDGOFFSET -> aktuellen Wert
 static int32_t g_dgOffsetDeg01 = 250;
 
+// Feinjustage-Offset (Deg01) fuer RS485-Winkel (GETPOSDG/SETPOSDG).
+// Anzeige = physisch + dgCal; SETPOSDG-Ziel wird intern um dgCal zurueckgerechnet.
+// Bereich: -360,00 .. +360,00. NVS-Key: "dgcal".
+// - SETDGCAL:<wert> / GETDGCAL
+static int32_t g_dgCalDeg01 = 0;
+
 // Umkehrspiel/Backlash (in Deg01).
 // Wird nach erfolgreichem Homing automatisch gemessen und hier gespeichert.
 // Wird bei jedem Richtungswechsel als Offset auf das Ziel addiert, damit die Position nach dem Umkehren stimmt.
@@ -768,6 +774,11 @@ static void loadPreferencesIntoGlobals() {
   // Bereichs-Offset fuer rechte-Endschalter-Versatz
   g_dgOffsetDeg01    = g_prefs.getInt("dgo",     g_dgOffsetDeg01);
 
+  // Feinjustage-Offset (RS485-Winkel)
+  g_dgCalDeg01       = g_prefs.getInt("dgcal",   g_dgCalDeg01);
+  if (g_dgCalDeg01 < -36000) g_dgCalDeg01 = -36000;
+  if (g_dgCalDeg01 > 36000) g_dgCalDeg01 = 36000;
+
   g_homeFastPwmPercent = g_prefs.getFloat("hfp", g_homeFastPwmPercent);
   g_homeBackoff        = g_prefs.getFloat("hbo", g_homeBackoff);
 
@@ -842,6 +853,19 @@ static void loadPreferencesIntoGlobals() {
     } else {
       g_encType = ENCTYPE_RING_OUTPUT;
     }
+  }
+
+  // Achsmaximum: Typ 3 default 360° wenn amax noch nie gespeichert wurde.
+  // Obergrenze per SETMAXDG bis 720° (Turn 0/1 = zwei Encoder-Umdrehungen).
+  // Typ 1/2: hart auf 360° begrenzen (auch falls alter NVS-Wert groesser war).
+  if (g_encType == ENCTYPE_ABSOLUTE_SSI) {
+    if (!g_prefs.isKey("amax")) {
+      g_axisMaxDeg01 = 36000;
+    }
+    if (g_axisMaxDeg01 > 72000) g_axisMaxDeg01 = 72000;
+    if (g_axisMaxDeg01 < g_axisMinDeg01) g_axisMaxDeg01 = g_axisMinDeg01;
+  } else {
+    if (g_axisMaxDeg01 > 36000) g_axisMaxDeg01 = 36000;
   }
 
 
@@ -1038,8 +1062,8 @@ void setup() {
   safetyCfg.stallTimeoutMs = g_stallTimeoutMs;
   safetyCfg.stallMinCounts = g_stallMinCounts;
   if (g_encType == ENCTYPE_ABSOLUTE_SSI) {
-    safetyCfg.stallAbsoluteEncoder = true;
-    safetyCfg.stallCountsPerRev = 4096;
+    safetyCfg.stallAbsoluteEncoder = false; // Counts sind fortlaufend (getCountsExtended)
+    safetyCfg.stallCountsPerRev = 0;
     // 4096 CPR: 10 Counts ~0,88deg — beim langsamen Anlauf zu streng.
     if (safetyCfg.stallMinCounts > 3u) {
       safetyCfg.stallMinCounts = 3u;
@@ -1070,8 +1094,10 @@ void setup() {
     ecfg.ssiDataPin = ENC_SSI_DATA_PIN;
     ecfg.ssiZeroPin = ENC_SSI_ZERO_PIN;
     ecfg.rangeDegOffsetDeg01 = 0;
+    ecfg.axisMaxDeg01 = g_axisMaxDeg01;
   } else {
     ecfg.rangeDegOffsetDeg01 = g_dgOffsetDeg01;
+    ecfg.axisMaxDeg01 = 36000;
 
     if (g_encType == ENCTYPE_RING_OUTPUT) {
       ecfg.zEnabled = true;
@@ -1094,6 +1120,13 @@ void setup() {
 
   if (!encoder.begin(ecfg)) {
     if (g_debug) Serial.println("FEHLER: Encoder begin() fehlgeschlagen!");
+  }
+
+  // SSI-Turn aus NVS laden (nach begin, weil begin den Turn auf 0 setzt).
+  // Zusätzlich letzte logische Position (sldeg) als Fallback, falls sturn fehlt/veraltet.
+  if (g_encType == ENCTYPE_ABSOLUTE_SSI && g_prefsOk) {
+    const uint8_t st = g_prefs.getUChar("sturn", 0);
+    encoder.loadSsiTurn(st);
   }
 
   // -------------------------
@@ -1218,6 +1251,7 @@ void setup() {
 
   lcfg.windPeakPct = &g_windPeakPct;
   lcfg.windCoherenceMin = &g_windCoherenceMin;
+  lcfg.axisMaxDeg01 = &g_axisMaxDeg01;
 
   // Preferences sind optional (falls begin() fehlschlaegt):
   // Ohne Preferences laeuft LoadMonitor trotzdem, speichert aber nichts persistent.
@@ -1254,6 +1288,9 @@ void setup() {
 
   // DGOFFSET (rechter Endschalter-Versatz)
   dcfg.dgOffsetDeg01 = &g_dgOffsetDeg01;
+
+  // DGCAL (Feinjustage GETPOSDG/SETPOSDG)
+  dcfg.dgCalDeg01 = &g_dgCalDeg01;
 
 
 // Persistente Parameter (RS485 SET/GET -> Preferences)
@@ -1491,6 +1528,15 @@ static void updateEncoderRangeOffsetApplied() {
   }
 }
 
+// Achsmaximum (amax) kann per SETMAXDG zur Laufzeit geaendert werden.
+// EncoderAxis braucht den Wert fuer SSI-Umrechnung / Selbstheilung.
+static void updateEncoderAxisMaxApplied() {
+  static int32_t s_lastAmax = INT32_MIN;
+  if (s_lastAmax == g_axisMaxDeg01) return;
+  s_lastAmax = g_axisMaxDeg01;
+  encoder.setAxisMaxDeg01(g_axisMaxDeg01);
+}
+
 // Loop
 // ============================================================================
 void loop() {
@@ -1521,10 +1567,65 @@ void loop() {
   rs485Dispatcher.update(nowMs);
   updatePwmMaxApplied(dtMs);
   updateEncoderRangeOffsetApplied();
+  updateEncoderAxisMaxApplied();
 
   encoder.update();
   if (g_encType == ENCTYPE_ABSOLUTE_SSI) {
     homing.setReferenced(encoder.isSsiValid());
+
+    // Einmalig nach erstem gültigen SSI-Wert: Turn aus letzter logischer Position heilen,
+    // falls NVS-sturn=0 aber wir eindeutig im Überdrehbereich standen (z.B. 382° → Roh 22°).
+    if (g_prefsOk && encoder.isSsiValid()) {
+      static bool s_ssiTurnBootReconcileDone = false;
+      if (!s_ssiTurnBootReconcileDone) {
+        s_ssiTurnBootReconcileDone = true;
+        if (encoder.getSsiTurn() == 0) {
+          const int32_t lastDeg01 = g_prefs.getInt("sldeg", -1);
+          const int32_t amax = (g_axisMaxDeg01 > 0) ? g_axisMaxDeg01 : 36000;
+          if (lastDeg01 >= 36000 && lastDeg01 <= amax) {
+            int32_t curDeg01 = 0;
+            if (encoder.getPositionDeg01(curDeg01)) {
+              const int32_t expectRaw = lastDeg01 - 36000;
+              int32_t d = curDeg01 - expectRaw;
+              if (d < 0) d = -d;
+              // Rohwinkel muss zur gespeicherten Überdreh-Lage passen (±3°).
+              if (d <= 300) {
+                encoder.loadSsiTurn(1);
+                g_prefs.putUChar("sturn", 1);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Turn sofort persistieren (auch während Fahrt) — Kabelbruch-Schutz bei Stromausfall.
+    if (encoder.consumeSsiTurnDirty(nowMs) && g_prefsOk) {
+      const uint8_t turn = encoder.getSsiTurn();
+      size_t n = g_prefs.putUChar("sturn", turn);
+      int32_t deg01 = 0;
+      if (encoder.getPositionDeg01(deg01)) {
+        (void)g_prefs.putInt("sldeg", deg01);
+      }
+      if (n > 0) {
+        encoder.clearSsiTurnDirty();
+      }
+    }
+
+    // Nach Ende einer Positionsfahrt Turn + logische Lage nochmals sichern
+    // (auch wenn Turn sich nicht geändert hat — sldeg-Fallback für Reboot).
+    {
+      static bool s_wasPosActive = false;
+      const bool posActive = motion.isPosActive();
+      if (s_wasPosActive && !posActive && g_prefsOk && encoder.isSsiValid()) {
+        int32_t deg01 = 0;
+        if (encoder.getPositionDeg01(deg01)) {
+          (void)g_prefs.putUChar("sturn", encoder.getSsiTurn());
+          (void)g_prefs.putInt("sldeg", deg01);
+        }
+      }
+      s_wasPosActive = posActive;
+    }
   }
 
   if (g_encType != ENCTYPE_ABSOLUTE_SSI) {
@@ -1686,7 +1787,12 @@ void loop() {
   if (calActive) lastMotionCmdMs = nowMs;
 
   // Safety (Strom + Stall + Endstops + Deadman)
-  const long safetyEncCounts = encoder.getCountsRaw(); // Stall-Check bewusst RAW, damit Z-Korrektur/Offsets keinen Fake-Fortschritt erzeugen
+  // SSI: fortlaufende Counts (inkl. Turn) — Ring-Delta auf 0..4095 wuerde bei Fahrten
+  // >180° Fortschritt unterzaehlen und nahe der Wrap-Grenze falsch stallen.
+  // Typ 1/2: RAW-Counts, damit Z-Korrektur keinen Fake-Fortschritt erzeugt.
+  const long safetyEncCounts = (g_encType == ENCTYPE_ABSOLUTE_SSI)
+                                   ? encoder.getCountsExtended()
+                                   : encoder.getCountsRaw();
   // Stall-Erkennung darf waehrend STOP-/Richtungswechsel-Bremssequenzen nicht ausloesen.
   // Sonst kann es passieren, dass bei auslaufender PWM noch > Stall-Schwelle ist,
   // aber nur wenige Counts kommen (gewollt), und trotzdem SE_STALL gelatcht wird.

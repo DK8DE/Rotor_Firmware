@@ -302,8 +302,8 @@ int32_t Rs485Proto::extractValueScaled100(const String& params) const {
   int32_t vScaled = 0;
   if (!parseDecimalScaled100(token, vScaled)) return 0;
 
-  // Fuer die Checksumme benutzen wir den Betrag (damit z.B. "-12" nicht komisch wird)
-  if (vScaled < 0) vScaled = -vScaled;
+  // Vorzeichen behalten: Master-Checksummen mit negativen Params (z.B. SETDGCAL:-30,6)
+  // nutzen chk = (src+dst)*100 + wert_signed (nicht Betrag).
   return vScaled;
 }
 
@@ -382,10 +382,9 @@ Rs485Frame Rs485Proto::parseFrame(const String& raw) {
 
   if (cmd.length() == 0) return f;
 
-  // Checksumme (skalierte Zahl) parsen
+  // Checksumme (skalierte Zahl) parsen — Vorzeichen behalten (wie beim Senden)
   int32_t chkRxScaled = 0;
   if (!parseDecimalScaled100(sChk, chkRxScaled)) return f;
-  if (chkRxScaled < 0) chkRxScaled = -chkRxScaled;
 
   // Felder setzen (auch bei invalid, damit Logging klappt)
   f.master = m;

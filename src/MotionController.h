@@ -211,6 +211,9 @@ private:
   void startKickIfNeeded(uint32_t nowMs, int32_t curDeg01);
 
 private:
+  // SSI: fortlaufende Counts (inkl. Turn); PCNT: raw Counts
+  long motionCountsNow_() const;
+
   HalBoard* _board = nullptr;
   MotorMcpwm* _motor = nullptr;
   EncoderAxis* _encoder = nullptr;

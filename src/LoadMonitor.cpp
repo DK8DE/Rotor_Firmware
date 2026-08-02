@@ -16,6 +16,7 @@ static const char* KEY_CAL_CW    = "calcw";  // bytes: LOAD_BINS * uint16
 static const char* KEY_CAL_CCW   = "calcc";  // bytes: LOAD_BINS * uint16
 static const char* KEY_CAL_TAMB  = "ctA";    // float (Umgebungstemp bei Kalibrierung)
 static const char* KEY_CAL_TMOT  = "ctM";    // float (Motortemp bei Kalibrierung)
+static const char* KEY_CAL_AMAX  = "cama";   // int32: Achsmaximum (Deg01) bei Kalibrierung
 
 // Live-Stat (optional persistent erweiterbar)
 // Aktuell: nur im RAM (damit keine Flash-Abnutzung entsteht)
@@ -83,6 +84,17 @@ void LoadMonitor::begin(Preferences* prefs,
       _prefs->getBytes(KEY_CAL_CW,  _calCw,  lenCw);
       _prefs->getBytes(KEY_CAL_CCW, _calCcw, lenCcw);
       _calValid = true;
+
+      // Baseline gehoert zu einer bestimmten Load-Spannweite (max. 360°).
+      // Wenn sich die Spannweite aendert, passen die Bins nicht mehr.
+      const int32_t storedAmax = _prefs->getInt(KEY_CAL_AMAX, 36000);
+      if (storedAmax != loadSpanDeg01()) {
+        _calValid = false;
+        for (uint8_t i = 0; i < LOAD_BINS; i++) {
+          _calCw[i] = 0;
+          _calCcw[i] = 0;
+        }
+      }
     }
   }
 
@@ -130,21 +142,41 @@ float LoadMonitor::effectiveIgnoreDeg() const {
   return ig;
 }
 
+int32_t LoadMonitor::loadSpanDeg01() const {
+  // Eine Getriebe-Umdrehung (360°) reicht fuer Baseline/Bins.
+  // Achsen >360° (SSI) aendern nichts an der Getriebeanalyse.
+  int32_t v = (_cfg.axisMaxDeg01) ? *_cfg.axisMaxDeg01 : 36000;
+  if (v <= 0) v = 36000;
+  if (v > 36000) v = 36000;
+  return v;
+}
+
 uint8_t LoadMonitor::calcBinIndex(int32_t deg01) const {
   if (deg01 < 0) deg01 = 0;
-  if (deg01 > 36000) deg01 = 36000;
+  // SSI-Überdrehen (>360°): gleiche Getriebestellung wie deg % 360°
+  if (deg01 >= 36000) deg01 = deg01 % 36000;
 
-  // 5deg = 500 Deg01
-  int32_t idx = deg01 / 500;
+  const int32_t span = loadSpanDeg01();
+  if (deg01 > span) deg01 = span;
+
+  int32_t idx = 0;
+  if (span > 0) {
+    idx = (int32_t)(((int64_t)deg01 * (int64_t)LOAD_BINS) / (int64_t)span);
+  }
   if (idx < 0) idx = 0;
   if (idx > (int32_t)(LOAD_BINS - 1)) idx = LOAD_BINS - 1;
   return (uint8_t)idx;
 }
 
 uint16_t LoadMonitor::binCenterDeg(uint8_t idx) const {
-  // Center: 2deg in 5deg Bin (0..4 -> 2)
   if (idx >= LOAD_BINS) idx = LOAD_BINS - 1;
-  return (uint16_t)(idx * 5 + 2);
+  const int32_t span = loadSpanDeg01();
+  // Bin-Mitte in Grad (ganzzahlig)
+  const int32_t centerDeg01 = (int32_t)((((int64_t)idx * 2 + 1) * (int64_t)span) / (int64_t)(LOAD_BINS * 2));
+  int32_t deg = centerDeg01 / 100;
+  if (deg < 0) deg = 0;
+  if (deg > 359) deg = deg % 360;
+  return (uint16_t)deg;
 }
 
 void LoadMonitor::update(uint32_t nowMs) {
@@ -191,14 +223,15 @@ void LoadMonitor::update(uint32_t nowMs) {
     if (_stage == ST_RUN_CW || _stage == ST_RUN_CCW) {
       const float igDeg = effectiveIgnoreDeg();
       const int32_t igDeg01 = (int32_t)(igDeg * 100.0f + 0.5f);
+      const int32_t amax = loadSpanDeg01();
 
       bool inWindow = false;
       if (_stage == ST_RUN_CW) {
-        // 0 -> 360
-        inWindow = (curDeg01 >= igDeg01) && (curDeg01 <= (36000 - igDeg01));
+        // 0 -> loadSpan (max. 360°)
+        inWindow = (curDeg01 >= igDeg01) && (curDeg01 <= (amax - igDeg01));
       } else {
-        // 360 -> 0
-        inWindow = (curDeg01 <= (36000 - igDeg01)) && (curDeg01 >= igDeg01);
+        // loadSpan -> 0
+        inWindow = (curDeg01 <= (amax - igDeg01)) && (curDeg01 >= igDeg01);
       }
 
       if (inWindow && mvCalOrLive > 0) {
@@ -295,11 +328,13 @@ void LoadMonitor::update(uint32_t nowMs) {
     if (_motion) (void)_motion->getCurrentPositionDeg01(curDeg01);
 
     if (_stage == ST_RUN_CW) {
-      uint32_t p = (uint32_t)((curDeg01 * 50L) / 36000L);
+      const int32_t amax = loadSpanDeg01();
+      uint32_t p = (amax > 0) ? (uint32_t)((curDeg01 * 50L) / amax) : 0;
       if (p > 50) p = 50;
       _calProgress = (uint8_t)p;
     } else if (_stage == ST_RUN_CCW) {
-      uint32_t p = (uint32_t)(((36000L - curDeg01) * 50L) / 36000L);
+      const int32_t amax = loadSpanDeg01();
+      uint32_t p = (amax > 0) ? (uint32_t)(((amax - curDeg01) * 50L) / amax) : 0;
       if (p > 50) p = 50;
       _calProgress = (uint8_t)(50 + p);
     } else {
@@ -311,8 +346,8 @@ void LoadMonitor::update(uint32_t nowMs) {
 
     if (!posActive) {
       if (_stage == ST_MOVE_TO_ZERO) {
-        // jetzt CW starten
-        if (_motion && _motion->commandSetPosDeg01(36000, nowMs)) {
+        // jetzt CW starten (max. eine Getriebe-Umdrehung)
+        if (_motion && _motion->commandSetPosDeg01(loadSpanDeg01(), nowMs)) {
           _stage = ST_RUN_CW;
         } else {
           _calState = LC_STATE_ERROR;
@@ -428,6 +463,7 @@ bool LoadMonitor::deleteCalibration() {
   _prefs->remove(KEY_CAL_CCW);
   _prefs->remove(KEY_CAL_TAMB);
   _prefs->remove(KEY_CAL_TMOT);
+  _prefs->remove(KEY_CAL_AMAX);
 
   _calValid = false;
   for (uint8_t i = 0; i < LOAD_BINS; i++) {
@@ -596,6 +632,7 @@ void LoadMonitor::calFinalizeAndStore() {
     _prefs->putBytes(KEY_CAL_CCW, _calCcw, LOAD_BINS * sizeof(uint16_t));
     _prefs->putFloat(KEY_CAL_TAMB, tA);
     _prefs->putFloat(KEY_CAL_TMOT, tM);
+    _prefs->putInt(KEY_CAL_AMAX, loadSpanDeg01());
   }
 
   // Akkus zuruecksetzen

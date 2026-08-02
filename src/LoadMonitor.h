@@ -7,8 +7,8 @@ class SafetyMonitor;
 class MotionController;
 class TempSensors;
 
-// Anzahl Bins ueber 0..360deg
-static const uint8_t LOAD_BINS = 72; // 360/5 = 72
+// Anzahl Bins ueber eine Getriebe-Umdrehung (max. 360°, Breite = loadSpan / LOAD_BINS)
+static const uint8_t LOAD_BINS = 72;
 
 // Kalibrier-Status (fuer GETCALSTATE)
 enum LoadCalPublicState : uint8_t {
@@ -49,8 +49,12 @@ struct LoadMonitorConfigPointers {
   // Wind
   float* windPeakPct = nullptr;        // Peak-Schwellwert in Prozent
   float* windCoherenceMin = nullptr;   // Mindest-Kohaerenz in Prozent (0..100)
-};
 
+  // Achsenmaximum (Deg01) der Motion-Achse.
+  // LoadMonitor nutzt davon hoechstens 36000 (eine Getriebe-Umdrehung).
+  // nullptr / <=0 -> 36000.
+  const int32_t* axisMaxDeg01 = nullptr;
+};
 class LoadMonitor {
 public:
   LoadMonitor() = default;
@@ -68,7 +72,8 @@ public:
   // ----------------------------------------------------------
   // Kalibrierung
   // ----------------------------------------------------------
-  // Startet die Kalibrierfahrt (0 -> 360 -> 0).
+  // Startet die Kalibrierfahrt (0 -> min(axisMax,360°) -> 0).
+  // Eine Getriebe-Umdrehung reicht fuer die Baseline-Analyse.
   // Voraussetzungen:
   // - Achse muss referenziert sein (wird im Dispatcher geprueft)
   // - Es darf keine andere Positionsfahrt laufen
@@ -139,6 +144,8 @@ private:
 
   uint8_t calcBinIndex(int32_t deg01) const;
   uint16_t binCenterDeg(uint8_t idx) const;
+  // Kalibrier-/Bin-Spannweite: min(axisMax, 36000) — eine Umdrehung reicht.
+  int32_t loadSpanDeg01() const;
 
   float effectiveIgnoreDeg() const;
 

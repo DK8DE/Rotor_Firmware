@@ -42,6 +42,9 @@ struct Rs485DispatcherConfig {
   // Bereichs-Offset (Deg01) fuer rechten Endschalter-Versatz (DGOFFSET)
   int32_t* dgOffsetDeg01 = nullptr;
 
+  // Feinjustage-Offset (Deg01) fuer RS485-Winkel (DGCAL): Anzeige = phys + cal
+  int32_t* dgCalDeg01 = nullptr;
+
   // Homing-Kick-Retry (optional)
   // - tries/nextMs werden vom Dispatcher gesetzt, die Loop-Logik bleibt in der .ino.
   uint8_t*  homingKickTries = nullptr;

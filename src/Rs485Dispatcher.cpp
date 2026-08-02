@@ -40,6 +40,17 @@ static int32_t safeI32(const int32_t* p, int32_t fallback) {
   return p ? *p : fallback;
 }
 
+// Feinjustage-Offset (DGCAL): RS485-Winkel = physisch + cal
+static int32_t dgCalNow(const Rs485DispatcherConfig& cfg) {
+  return safeI32(cfg.dgCalDeg01, 0);
+}
+static int32_t toCalDeg01(const Rs485DispatcherConfig& cfg, int32_t physDeg01) {
+  return physDeg01 + dgCalNow(cfg);
+}
+static int32_t toPhysDeg01(const Rs485DispatcherConfig& cfg, int32_t calDeg01) {
+  return calDeg01 - dgCalNow(cfg);
+}
+
 static bool isRotorReferencedLocal(const Rs485DispatcherConfig& cfg, HomingController* homing) {
   const uint8_t ect = safeU8(cfg.encTypeU8, 1);
   if (ect == (uint8_t)ENCTYPE_ABSOLUTE_SSI) {
@@ -50,6 +61,11 @@ static bool isRotorReferencedLocal(const Rs485DispatcherConfig& cfg, HomingContr
 
 static bool isAbsoluteEncType(const Rs485DispatcherConfig& cfg) {
   return safeU8(cfg.encTypeU8, 1) == (uint8_t)ENCTYPE_ABSOLUTE_SSI;
+}
+
+static int32_t encTypeAxisMaxLimitDeg01(const Rs485DispatcherConfig& cfg) {
+  // Typ 3: Turn 0/1 → logisch bis 2 Umdrehungen (720°).
+  return isAbsoluteEncType(cfg) ? 72000 : 36000;
 }
 
 // ============================================================================
@@ -406,7 +422,7 @@ static String formatFloatComma(float v, uint8_t decimals) {
 // Das Protokoll erwartet als "chk" eine Dezimalzahl mit optional 2 Nachkommastellen.
 // Intern wird sie als "scaled100" (Wert * 100) behandelt.
 // Die Checksumme ist kompatibel zu Rs485Proto::computeChecksumScaled100():
-//   chk_scaled = (src + dst) * 100 + abs(value_scaled)
+//   chk_scaled = (src + dst) * 100 + value_scaled   (value vorzeichenbehaftet)
 // value_scaled kommt aus dem letzten Token in params nach ':' (z.B. "X:50" -> 50).
 //
 // Vorteil: Wenn der Master eine falsche chk sendet, koennen wir ein NAK mit der
@@ -494,7 +510,7 @@ static int32_t extractValueScaled100Local(const String& params) {
   int32_t vScaled = 0;
   if (!parseDecimalScaled100Local(token, vScaled)) return 0;
 
-  if (vScaled < 0) vScaled = -vScaled;
+  // Vorzeichen behalten (wie Rs485Proto::extractValueScaled100)
   return vScaled;
 }
 
@@ -506,16 +522,20 @@ static int32_t computeChecksumScaled100Local(uint8_t src, uint8_t dst, const Str
 
 static String formatScaled100Local(int32_t scaled) {
   // Ausgabe: ohne Nachkommastellen wenn .00, sonst mit 2 Nachkommastellen (Komma)
-  if (scaled < 0) scaled = -scaled;
+  bool neg = false;
+  if (scaled < 0) {
+    neg = true;
+    scaled = -scaled;
+  }
   int32_t ip = scaled / 100;
   int32_t fr = scaled % 100;
 
   if (fr == 0) {
-    return String(ip);
+    return neg ? (String("-") + String(ip)) : String(ip);
   }
 
   char buf[32];
-  snprintf(buf, sizeof(buf), "%ld,%02ld", (long)ip, (long)fr);
+  snprintf(buf, sizeof(buf), "%s%ld,%02ld", neg ? "-" : "", (long)ip, (long)fr);
   return String(buf);
 }
 
@@ -557,20 +577,23 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   cmd.trim();
   cmd.toUpperCase();
 
-  // SETPOSCC: wird von diesem Rotor nicht unterstuetzt (Fremd-/Legacy-Master).
-  // Stillschweigend verwerfen — kein ACK, kein NAK, keine Seiteneffekte (auch kein Deadman).
-  if (f.slave == ownId && cmd == "SETPOSCC") {
-    return;
-  }
-
   // Deadman/Keepalive:
   // - Es soll NUR dann als Lebenszeichen zaehlen, wenn ein Frame an UNSERE
   //   eigene ID adressiert ist.
   // - Broadcast (255) soll den Deadman NICHT "am Leben halten", weil sonst
   //   auch fremde/unsaubere Bus-Telegramme oder allgemeine Broadcasts eine
   //   Bewegung unbegrenzt lauffaehig halten koennten.
+  // - Auch Legacy-SETPOSCC zaehlt als Keepalive (Master sendet das oft waehrend
+  //   der Fahrt), auch wenn der Befehl selbst ignoriert wird.
   if (f.slave == ownId) {
     _lastGetPosCmdMs = nowMs;
+  }
+
+  // SETPOSCC: wird von diesem Rotor nicht unterstuetzt (Fremd-/Legacy-Master).
+  // Stillschweigend verwerfen — kein ACK, kein NAK, keine Motion-Seiteneffekte.
+  // Deadman wurde oben bereits aktualisiert.
+  if (f.slave == ownId && cmd == "SETPOSCC") {
+    return;
   }
 
 
@@ -815,7 +838,8 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
       return;
     }
 
-    if (shouldReply) sendAck(f.master, "GETPOSDG", formatDeg01ToString(curDeg01));
+    // Feinjustage: Master sieht physisch + DGCAL
+    if (shouldReply) sendAck(f.master, "GETPOSDG", formatDeg01ToString(toCalDeg01(_cfg, curDeg01)));
     return;
   }
 
@@ -1788,13 +1812,13 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     }
 
     if (start < 0) start = 0;
-    if (start > 71) start = 71;
+    if (start > (int32_t)(LOAD_BINS - 1)) start = (int32_t)(LOAD_BINS - 1);
 
     if (count < 1) count = 1;
     if (count > 12) count = 12;
 
-    // Clamping auf 72 Bins
-    int32_t maxCount = 72 - start;
+    // Clamping auf LOAD_BINS
+    int32_t maxCount = (int32_t)LOAD_BINS - start;
     if (count > maxCount) count = maxCount;
 
     // Schritt 7.3: += mit Integer statt String(v) pro Bin (weniger Heap/CPU, schnelleres ACK).
@@ -2000,7 +2024,13 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     // ERR nur ueber SETREF, WARN nur ueber DELWARN.
     _safety->notifyMotionEdge(nowMs);
 
-    int32_t deg01 = parseDeg01FromParam(f.params);
+    // Master sendet in Kalibrier-Koordinaten; intern physisch = cal - DGCAL.
+    const int32_t calZielDeg01 = parseDeg01NoClamp(f.params);
+    int32_t deg01 = toPhysDeg01(_cfg, calZielDeg01);
+    const int32_t amin = safeI32(_cfg.axisMinDeg01, 0);
+    const int32_t amax = safeI32(_cfg.axisMaxDeg01, 36000);
+    if (deg01 < amin) deg01 = amin;
+    if (deg01 > amax) deg01 = amax;
 
     int32_t startDeg01 = 0;
     if (_motion) (void)_motion->getCurrentPositionDeg01(startDeg01);
@@ -2016,7 +2046,8 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
       _loadMon->notifyMoveStarted(startDeg01, deg01, nowMs);
     }
 
-    if (shouldReply) sendAck(f.master, "SETPOSDG", "1");
+    // ACK: akzeptiertes Ziel in Kalibrier-Koordinaten (nach amin/amax-Clamp physisch).
+    if (shouldReply) sendAck(f.master, "SETPOSDG", formatDeg01ToString(toCalDeg01(_cfg, deg01)));
     serialEventState("SETPOSDG");
     return;
   }
@@ -2101,13 +2132,20 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
 
   if (cmd == "SETBEGINDG") {
     int32_t newMin = parseDeg01NoClamp(f.params);
+    const int32_t lim = encTypeAxisMaxLimitDeg01(_cfg);
+    if (newMin < 0) newMin = 0;
+    if (newMin > lim) newMin = lim;
 
     // Konsistenz: min <= max
     int32_t curMax = safeI32(_cfg.axisMaxDeg01, newMin);
+    if (curMax > lim) curMax = lim;
     if (newMin > curMax) curMax = newMin;
 
     persistPutI32("amin", _cfg.axisMinDeg01, newMin);
     persistPutI32("amax", _cfg.axisMaxDeg01, curMax);
+    if (_cfg.encoderAxis) {
+      _cfg.encoderAxis->setAxisMaxDeg01(curMax);
+    }
 
     if (shouldReply) sendAck(f.master, "SETBEGINDG", "1");
     serialEventState("SETBEGINDG");
@@ -2122,13 +2160,20 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
 
   if (cmd == "SETMAXDG") {
     int32_t newMax = parseDeg01NoClamp(f.params);
+    const int32_t lim = encTypeAxisMaxLimitDeg01(_cfg);
+    if (newMax < 0) newMax = 0;
+    if (newMax > lim) newMax = lim;
 
     // Konsistenz: min <= max
     int32_t curMin = safeI32(_cfg.axisMinDeg01, newMax);
+    if (curMin < 0) curMin = 0;
     if (newMax < curMin) curMin = newMax;
 
     persistPutI32("amin", _cfg.axisMinDeg01, curMin);
     persistPutI32("amax", _cfg.axisMaxDeg01, newMax);
+    if (_cfg.encoderAxis) {
+      _cfg.encoderAxis->setAxisMaxDeg01(newMax);
+    }
 
     if (shouldReply) sendAck(f.master, "SETMAXDG", "1");
     serialEventState("SETMAXDG");
@@ -2138,10 +2183,11 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   // ------------------------------------------------------------------------
   // DGOFFSET (rechter Endschalter-Versatz in Deg01)
   //
-  // Ziel:
+  // Ziel (nur Typ 1/2):
   // - Rechter Endschalter kann mechanisch zu spaet ausloesen (z.B. erst bei 362,50deg).
   // - Logischer Arbeitsbereich bleibt 0..360,00deg.
   // - Offset wird SYMMETRISCH verteilt, damit "0" nicht in den linken Endschalter faehrt.
+  // Typ 3 (SSI): DGOFFSET wird ignoriert (kein Endschalter-Offset).
   //
   // Umsetzung:
   // - Offset wird als Deg01 gespeichert und in EncoderAxis als Skalierungs-Korrektur genutzt.
@@ -2163,6 +2209,26 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
 
     if (shouldReply) sendAck(f.master, "SETDGOFFSET", "1");
     serialEventState("SETDGOFFSET");
+    return;
+  }
+
+  // ------------------------------------------------------------------------
+  // DGCAL (Feinjustage-Offset fuer RS485-Winkel, -360..+360)
+  // GETPOSDG = physisch + DGCAL; SETPOSDG-Ziel = cal - DGCAL (intern physisch).
+  // ------------------------------------------------------------------------
+  if (cmd == "GETDGCAL") {
+    const int32_t v = dgCalNow(_cfg);
+    if (shouldReply) sendAck(f.master, "GETDGCAL", formatDeg01ToString(v));
+    return;
+  }
+
+  if (cmd == "SETDGCAL") {
+    int32_t nv = parseDeg01NoClamp(f.params);
+    if (nv < -36000) nv = -36000;
+    if (nv > 36000) nv = 36000;
+    persistPutI32("dgcal", _cfg.dgCalDeg01, nv);
+    if (shouldReply) sendAck(f.master, "SETDGCAL", "1");
+    serialEventState("SETDGCAL");
     return;
   }
 
@@ -2617,8 +2683,52 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
       if (shouldReply) sendNak(f.master, "SETENCZERO", "NOHW");
       return;
     }
+    // Turn-Zähler mit zurücksetzen und persistieren (kein erneutes Dirty)
+    _cfg.encoderAxis->loadSsiTurn(0);
+    if (_cfg.prefs) {
+      _cfg.prefs->putUChar("sturn", 0);
+      int32_t deg01 = 0;
+      if (_cfg.encoderAxis->getPositionDeg01(deg01)) {
+        _cfg.prefs->putInt("sldeg", deg01);
+      } else {
+        _cfg.prefs->putInt("sldeg", 0);
+      }
+    }
     if (shouldReply) sendAck(f.master, "SETENCZERO", "1");
     serialEventState("SETENCZERO");
+    return;
+  }
+
+  // GETENCTURN / SETENCTURN — SSI-Umdrehungszähler (0/1) für Bereich >360°
+  if (cmd == "GETENCTURN") {
+    if (!isAbsoluteEncType(_cfg) || !_cfg.encoderAxis) {
+      if (shouldReply) sendNak(f.master, "GETENCTURN", "NOTSSI");
+      return;
+    }
+    if (shouldReply) sendAck(f.master, "GETENCTURN", String((int)_cfg.encoderAxis->getSsiTurn()));
+    return;
+  }
+
+  if (cmd == "SETENCTURN") {
+    if (!isAbsoluteEncType(_cfg) || !_cfg.encoderAxis) {
+      if (shouldReply) sendNak(f.master, "SETENCTURN", "NOTSSI");
+      return;
+    }
+    const uint32_t v = parseU32Param(f.params);
+    if (v > 1) {
+      if (shouldReply) sendNak(f.master, "SETENCTURN", "BADVAL");
+      return;
+    }
+    _cfg.encoderAxis->loadSsiTurn((uint8_t)v);
+    if (_cfg.prefs) {
+      _cfg.prefs->putUChar("sturn", (uint8_t)v);
+      int32_t deg01 = 0;
+      if (_cfg.encoderAxis->getPositionDeg01(deg01)) {
+        _cfg.prefs->putInt("sldeg", deg01);
+      }
+    }
+    if (shouldReply) sendAck(f.master, "SETENCTURN", "1");
+    serialEventState("SETENCTURN");
     return;
   }
 
