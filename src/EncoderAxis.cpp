@@ -211,6 +211,18 @@ void EncoderAxis::setCountsZero() {
   _enc->resetZHistory();
 }
 
+bool EncoderAxis::setEncZero() {
+  if (_cfg.encType != ENCTYPE_ABSOLUTE_SSI || !_ssi || _cfg.ssiZeroPin < 0) {
+    return false;
+  }
+#if defined(ESP32)
+  _ssi->setZero();
+  return true;
+#else
+  return false;
+#endif
+}
+
 void EncoderAxis::setCounts(long newCounts) {
   if (_ssi) {
     if (newCounts < 0) newCounts = 0;

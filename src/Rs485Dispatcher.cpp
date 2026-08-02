@@ -2607,6 +2607,21 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     return;
   }
 
+  // SETENCZERO — SSI-Hardware-Zero (nur ENCTYPE=3)
+  if (cmd == "SETENCZERO") {
+    if (!isAbsoluteEncType(_cfg)) {
+      if (shouldReply) sendNak(f.master, "SETENCZERO", "NOTSSI");
+      return;
+    }
+    if (!_cfg.encoderAxis || !_cfg.encoderAxis->setEncZero()) {
+      if (shouldReply) sendNak(f.master, "SETENCZERO", "NOHW");
+      return;
+    }
+    if (shouldReply) sendAck(f.master, "SETENCZERO", "1");
+    serialEventState("SETENCZERO");
+    return;
+  }
+
   // ------------------------------------------------------------------------
   // PWM-Max persistent + runtime
   // ------------------------------------------------------------------------

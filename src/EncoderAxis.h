@@ -119,6 +119,9 @@ public:
   void setCountsZero();
   void setCounts(long newCounts);
 
+  // SSI-Hardware-Zero (SET0-Pin); nur ENCTYPE_ABSOLUTE_SSI
+  bool setEncZero();
+
   bool getPositionDeg01(int32_t& outDeg01) const;
   bool deg01ToCounts(int32_t deg01, int32_t& outCounts) const;
 
