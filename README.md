@@ -1,5 +1,7 @@
 # Rotor_Firmware
 
+**Version: 1.3.0**
+
 Firmware für einen motorisierten Antennenrotor auf Basis des ESP32-S3 (PlatformIO/Arduino).
 
 Dieses Projekt steuert den Antennenrotor, verarbeitet Endschalter und Encoder, regelt die Bewegung mit Rampenprofilen und stellt die Kommunikation über RS485 bereit.
@@ -22,6 +24,16 @@ Die Firmware läuft auf der Steuerhardware und bietet unter anderem:
 - **Last-/Baseline-Analyse** (LoadMonitor, Kalibrierfahrt über eine Getriebe-Umdrehung)
 - **Sicherheitsfunktionen**: Stall-Erkennung, Endschalter, Deadman/Keepalive
 - **Persistente Parameter** über NVS/Preferences
+
+## Versionierung
+
+Die Firmware-Versionsnummer (Semantic Versioning: `MAJOR.MINOR.PATCH`) wird an **einer** zentralen Stelle gepflegt: [`src/Version.h`](src/Version.h).
+
+- Wird beim Boot unabhängig von `g_debug` einmal über USB-Serial ausgegeben (`Rotor_Firmware v1.3.0`).
+- Über RS485 per **`GETVERSION`** abfragbar (`ACK_GETVERSION:1.3.0`).
+- `build.ps1` liest die Version aus `src/Version.h` und übernimmt sie (zusammen mit dem Build-Zeitstempel) in `IMGs/manifest.json` (Feld `version`).
+
+Beim Ändern der Firmware sollte die Version in `src/Version.h` entsprechend erhöht werden (`PATCH` für Bugfixes, `MINOR` für neue Features, `MAJOR` für inkompatible Änderungen an RS485-Protokoll oder NVS-Layout).
 
 ## Zusammenspiel mit PC und Controller
 
@@ -149,6 +161,7 @@ Winkelangaben typisch als Grad mit Komma (`12,50` = 12,50°). Intern: Deg01 (= G
 
 | Kommando | Beschreibung |
 |----------|--------------|
+| `GETVERSION` | Firmware-Version (z. B. `1.3.0`), siehe [Versionierung](#versionierung) |
 | `GETID` / `SETID` | Slave-ID |
 | `SETROTORID` | ID nur per Broadcast `255` setzen |
 | `GETTEMPA` / `GETTEMPM` | Umgebungs- / Motortemperatur |

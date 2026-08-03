@@ -1,4 +1,5 @@
 #include "Rs485Dispatcher.h"
+#include "Version.h"
 
 #include <math.h>
 #include <cstring>
@@ -812,6 +813,14 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   if (cmd == "GETREF") {
     const bool ref = isRotorReferencedLocal(_cfg, _homing);
     if (shouldReply) sendAck(f.master, "GETREF", ref ? "1" : "0");
+    return;
+  }
+
+  // ------------------------------------------------------------------------
+  // GETVERSION (Firmware-Version, z.B. "1.3.0" — siehe Version.h)
+  // ------------------------------------------------------------------------
+  if (cmd == "GETVERSION") {
+    if (shouldReply) sendAck(f.master, "GETVERSION", FW_VERSION_STRING);
     return;
   }
 

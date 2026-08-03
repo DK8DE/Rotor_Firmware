@@ -49,6 +49,24 @@ function Invoke-Step {
     }
 }
 
+function Get-FirmwareVersion {
+    $versionFile = Join-Path $PSScriptRoot 'src\Version.h'
+    if (-not (Test-Path -LiteralPath $versionFile)) {
+        return $null
+    }
+
+    $content = Get-Content -LiteralPath $versionFile -Raw
+    $major = [regex]::Match($content, '#define\s+FW_VERSION_MAJOR\s+(\d+)').Groups[1].Value
+    $minor = [regex]::Match($content, '#define\s+FW_VERSION_MINOR\s+(\d+)').Groups[1].Value
+    $patch = [regex]::Match($content, '#define\s+FW_VERSION_PATCH\s+(\d+)').Groups[1].Value
+
+    if ([string]::IsNullOrEmpty($major) -or [string]::IsNullOrEmpty($minor) -or [string]::IsNullOrEmpty($patch)) {
+        return $null
+    }
+
+    return "$major.$minor.$patch"
+}
+
 function Find-BootApp0 {
     $candidates = @(
         (Join-Path $env:USERPROFILE '.platformio\packages\framework-arduinoespressif32\tools\partitions\boot_app0.bin'),
@@ -95,7 +113,9 @@ function Update-ImgsFolder {
     Copy-Item -LiteralPath $bootApp0Src -Destination (Join-Path $ImgsDir 'boot_app0.bin') -Force
     Copy-Item -LiteralPath $required['firmware.bin'] -Destination (Join-Path $ImgsDir 'firmware.bin') -Force
 
-    $version = (Get-Date -Format 'yyyy-MM-dd HH:mm')
+    $fwVersion = Get-FirmwareVersion
+    $buildStamp = (Get-Date -Format 'yyyy-MM-dd HH:mm')
+    $version = if ($fwVersion) { "$fwVersion ($buildStamp)" } else { $buildStamp }
     $manifest = [ordered]@{
         name                        = 'Rotor Firmware'
         version                     = $version
@@ -118,7 +138,7 @@ function Update-ImgsFolder {
     # UTF-8 ohne BOM (Web-Flasher / Browser)
     [System.IO.File]::WriteAllText($manifestPath, $json)
 
-    Write-Host "IMGs aktualisiert:" -ForegroundColor Green
+    Write-Host "IMGs aktualisiert (Firmware-Version: $version):" -ForegroundColor Green
     Get-ChildItem -LiteralPath $ImgsDir | ForEach-Object {
         Write-Host ("  {0,-18} {1,10:N0} Bytes" -f $_.Name, $_.Length)
     }

@@ -7,6 +7,7 @@
 #include "MotorMcpwm.h"
 #include "Rs485Proto.h"
 #include "Rs485Dispatcher.h"
+#include "Version.h"
 
 #include "EncoderAxis.h"
 #include "TempSensors.h"
@@ -747,6 +748,40 @@ static uint32_t measureIsOffsetMv(bool is1) {
 }
 
 // ============================================================================
+// SSI-Turn Persistenz: turn + letzte logische Position in EINEM Flash-Write
+// ============================================================================
+// Hintergrund:
+// - Jedes Ueberschreiten der 0/360-Grenze (also ca. einmal pro voller Umdrehung)
+//   muss "sturn" + "sldeg" sofort persistiert werden (Kabelbruch-Schutz).
+// - Ein NVS-Schreibzugriff auf internen Flash blockiert kurz BEIDE Kerne des ESP32
+//   (Flash kann waehrend Erase/Write nicht gleichzeitig fuer Instruktions-Fetch
+//   genutzt werden). Das ist die Ursache fuer den kurzen "Aussetzer" beim Drehen.
+// - Frueher wurden "sturn" und "sldeg" als zwei einzelne Preferences-Keys
+//   geschrieben (=2 Flash-Operationen). Hier fassen wir beide in EINEM Blob
+//   zusammen, um die Aussetzer-Dauer zu halbieren.
+struct SsiTurnPersist {
+  uint8_t turn;
+  int32_t sldeg;
+};
+
+static bool loadSsiTurnState(uint8_t& turnOut, int32_t& sldegOut) {
+  if (!g_prefsOk) return false;
+  SsiTurnPersist p{};
+  size_t n = g_prefs.getBytes("sst", &p, sizeof(p));
+  if (n != sizeof(p)) return false;
+  turnOut = p.turn;
+  sldegOut = p.sldeg;
+  return true;
+}
+
+static bool saveSsiTurnState(uint8_t turn, int32_t sldeg) {
+  if (!g_prefsOk) return false;
+  SsiTurnPersist p{ (uint8_t)(turn ? 1 : 0), sldeg };
+  size_t n = g_prefs.putBytes("sst", &p, sizeof(p));
+  return n == sizeof(p);
+}
+
+// ============================================================================
 // Setup
 // ============================================================================
 
@@ -944,6 +979,11 @@ void setup() {
   Serial.begin(115200);
   delay(200);
 
+  // Firmware-Version immer ausgeben (unabhaengig von g_debug), damit sie beim
+  // Anschluss ueber USB-Serial sofort sichtbar ist. Ueber RS485 per GETVERSION abfragbar.
+  Serial.print("Rotor_Firmware v");
+  Serial.println(FW_VERSION_STRING);
+
   // ------------------------------------------------------------------------
   // Board frueh initialisieren, damit wir die Service-Taster fuer einen
   // "Werksreset" (NVS auf Defaults) bereits beim Boot abfragen koennen.
@@ -1123,10 +1163,17 @@ void setup() {
   }
 
   // SSI-Turn aus NVS laden (nach begin, weil begin den Turn auf 0 setzt).
-  // Zusätzlich letzte logische Position (sldeg) als Fallback, falls sturn fehlt/veraltet.
+  // Bevorzugt aus dem kombinierten Blob ("sst"); falls dieser (noch) nicht existiert
+  // (alte Firmware-Version), Fallback auf die alten Einzel-Keys "sturn"/"sldeg".
   if (g_encType == ENCTYPE_ABSOLUTE_SSI && g_prefsOk) {
-    const uint8_t st = g_prefs.getUChar("sturn", 0);
-    encoder.loadSsiTurn(st);
+    uint8_t st = 0;
+    int32_t sld = -1;
+    if (loadSsiTurnState(st, sld)) {
+      encoder.loadSsiTurn(st);
+    } else {
+      st = g_prefs.getUChar("sturn", 0);
+      encoder.loadSsiTurn(st);
+    }
   }
 
   // -------------------------
@@ -1580,7 +1627,11 @@ void loop() {
       if (!s_ssiTurnBootReconcileDone) {
         s_ssiTurnBootReconcileDone = true;
         if (encoder.getSsiTurn() == 0) {
-          const int32_t lastDeg01 = g_prefs.getInt("sldeg", -1);
+          uint8_t stTmp = 0;
+          int32_t lastDeg01 = -1;
+          if (!loadSsiTurnState(stTmp, lastDeg01)) {
+            lastDeg01 = g_prefs.getInt("sldeg", -1);
+          }
           const int32_t amax = (g_axisMaxDeg01 > 0) ? g_axisMaxDeg01 : 36000;
           if (lastDeg01 >= 36000 && lastDeg01 <= amax) {
             int32_t curDeg01 = 0;
@@ -1591,7 +1642,7 @@ void loop() {
               // Rohwinkel muss zur gespeicherten Überdreh-Lage passen (±3°).
               if (d <= 300) {
                 encoder.loadSsiTurn(1);
-                g_prefs.putUChar("sturn", 1);
+                saveSsiTurnState(1, lastDeg01);
               }
             }
           }
@@ -1600,14 +1651,13 @@ void loop() {
     }
 
     // Turn sofort persistieren (auch während Fahrt) — Kabelbruch-Schutz bei Stromausfall.
+    // Ein einzelner kombinierter Flash-Write (statt zwei) haelt den unvermeidlichen
+    // kurzen Aussetzer (Flash-Erase/Write blockiert kurz beide CPU-Kerne) so kurz wie moeglich.
     if (encoder.consumeSsiTurnDirty(nowMs) && g_prefsOk) {
       const uint8_t turn = encoder.getSsiTurn();
-      size_t n = g_prefs.putUChar("sturn", turn);
       int32_t deg01 = 0;
-      if (encoder.getPositionDeg01(deg01)) {
-        (void)g_prefs.putInt("sldeg", deg01);
-      }
-      if (n > 0) {
+      encoder.getPositionDeg01(deg01);
+      if (saveSsiTurnState(turn, deg01)) {
         encoder.clearSsiTurnDirty();
       }
     }
@@ -1620,8 +1670,7 @@ void loop() {
       if (s_wasPosActive && !posActive && g_prefsOk && encoder.isSsiValid()) {
         int32_t deg01 = 0;
         if (encoder.getPositionDeg01(deg01)) {
-          (void)g_prefs.putUChar("sturn", encoder.getSsiTurn());
-          (void)g_prefs.putInt("sldeg", deg01);
+          saveSsiTurnState(encoder.getSsiTurn(), deg01);
         }
       }
       s_wasPosActive = posActive;
