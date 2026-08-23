@@ -357,6 +357,23 @@ int32_t MotionController::encoderDeg01ToOutputDeg01_(int32_t encDeg01) const {
     return fo;
   }
 
+  // Randfall: Encoder-Ziel dieser Fahrt wurde auf amin geklemmt.
+  // Grund: outputDeg01ToEncoderTargetDeg01_() zieht bei negativer Fahrtrichtung den
+  // Backlash vom OUT-Ziel ab (Encoderziel = OUT - backlash) und klemmt danach auf amin,
+  // wenn OUT-Ziel < amin + backlash war (z.B. OUT-Ziel 0,00deg oder 0,01deg).
+  // Der Encoder erreicht dadurch (annaehernd) amin, aber NICHT amin - backlash — das
+  // Umkehrspiel wird also nicht vollstaendig "aufgenommen".
+  // Ohne Sonderbehandlung wuerde die normale Formel (OUT = ENC + backlash) hier
+  // faelschlich ~amin + backlash anzeigen (z.B. 0,15deg statt 0,00deg), sobald der
+  // Encoder wegen Ankunftstoleranz/Reibung nicht exakt auf amin, sondern wenige
+  // Counts darueber zum Stehen kommt.
+  if (_outMapFlankDir < 0 && _targetDeg01 <= amin) {
+    const int32_t tol = effectiveArriveTolDeg01_();
+    if ((encDeg01 - amin) <= tol) {
+      return amin;
+    }
+  }
+
   return encoderDeg01ToOutCore_(encDeg01, _outMapFlankDir);
 }
 

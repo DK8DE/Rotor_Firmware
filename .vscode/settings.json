@@ -9,5 +9,6 @@
     "--query-driver=**/xtensa-esp32s3-elf-g++*",
     "--compile-commands-dir=d:/Rotor/Rotor_Firmware/.cache/clangd"
   ],
-  "clangd.fallbackFlags": []
+  "clangd.fallbackFlags": [],
+  "clangd.path": "C:\\Users\\DK8DE\\.platformio\\packages\\tool-clangd-esp\\bin\\clangd.exe"
 }

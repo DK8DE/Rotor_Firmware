@@ -20,11 +20,17 @@
 .EXAMPLE
   .\build.ps1 -Clean -SkipUpload
   Clean, bauen, IMGs aktualisieren.
+
+.EXAMPLE
+  .\build.ps1 -Version "1.3.1"
+  Setzt die Firmware-Version auf 1.3.1 (src/Version.h + README.md), baut, aktualisiert IMGs, laedt hoch.
+  Committen/Pushen dieser Aenderung nach main/master erstellt automatisch ein GitHub-Release (siehe README).
 #>
 [CmdletBinding()]
 param(
     [switch]$Clean,
-    [switch]$SkipUpload
+    [switch]$SkipUpload,
+    [string]$Version
 )
 
 $ErrorActionPreference = 'Stop'
@@ -65,6 +71,61 @@ function Get-FirmwareVersion {
     }
 
     return "$major.$minor.$patch"
+}
+
+function Set-FirmwareVersion {
+    param([Parameter(Mandatory)][string]$NewVersion)
+
+    if ($NewVersion -notmatch '^\d+\.\d+\.\d+$') {
+        throw "Ungueltiges Versionsformat '$NewVersion'. Erwartet: MAJOR.MINOR.PATCH (z.B. 1.3.1)"
+    }
+
+    $versionFile = Join-Path $PSScriptRoot 'src\Version.h'
+    if (-not (Test-Path -LiteralPath $versionFile)) {
+        throw "src\Version.h nicht gefunden."
+    }
+
+    $parts = $NewVersion.Split('.')
+    $content = Get-Content -LiteralPath $versionFile -Raw
+    $content = [regex]::Replace($content, '(#define\s+FW_VERSION_MAJOR\s+)\d+', "`${1}$($parts[0])")
+    $content = [regex]::Replace($content, '(#define\s+FW_VERSION_MINOR\s+)\d+', "`${1}$($parts[1])")
+    $content = [regex]::Replace($content, '(#define\s+FW_VERSION_PATCH\s+)\d+', "`${1}$($parts[2])")
+    [System.IO.File]::WriteAllText($versionFile, $content)
+
+    Write-Host "src\Version.h aktualisiert -> $NewVersion" -ForegroundColor Cyan
+}
+
+function Sync-ReadmeVersion {
+    param([Parameter(Mandatory)][string]$CurrentVersion)
+
+    $readmePath = Join-Path $PSScriptRoot 'README.md'
+    if (-not (Test-Path -LiteralPath $readmePath)) {
+        return
+    }
+
+    $content = Get-Content -LiteralPath $readmePath -Raw
+    $match = [regex]::Match($content, '\*\*Version:\s*([\d.]+)\*\*')
+    if (-not $match.Success) {
+        return
+    }
+
+    $readmeVersion = $match.Groups[1].Value
+    if ($readmeVersion -eq $CurrentVersion) {
+        return
+    }
+
+    # Alle "nackten" Vorkommen der alten Versionsnummer (Badge + Beispiele im
+    # Versionierungs-Abschnitt, z.B. "v1.3.0" / "ACK_GETVERSION:1.3.0") durch
+    # die neue Version ersetzen. Lookaround verhindert Treffer innerhalb
+    # anderer Zahlen (z.B. "11.3.0").
+    $escapedOld = [regex]::Escape($readmeVersion)
+    $pattern = "(?<![\d.])$escapedOld(?![\d.])"
+    $updated = [regex]::Replace($content, $pattern, $CurrentVersion)
+
+    if ($updated -ne $content) {
+        [System.IO.File]::WriteAllText($readmePath, $updated)
+        Write-Host "README.md aktualisiert: Version $readmeVersion -> $CurrentVersion" -ForegroundColor Cyan
+    }
 }
 
 function Find-BootApp0 {
@@ -146,6 +207,23 @@ function Update-ImgsFolder {
 }
 
 try {
+    if ($Version) {
+        $currentVersion = Get-FirmwareVersion
+        if ($currentVersion -ne $Version) {
+            Set-FirmwareVersion -NewVersion $Version
+        }
+        else {
+            Write-Host "Firmware-Version ist bereits $Version." -ForegroundColor Yellow
+        }
+    }
+
+    # README.md immer mit src/Version.h abgleichen (auch wenn Version.h manuell
+    # geaendert wurde, ohne -Version zu benutzen).
+    $fwVersionForReadme = Get-FirmwareVersion
+    if ($fwVersionForReadme) {
+        Sync-ReadmeVersion -CurrentVersion $fwVersionForReadme
+    }
+
     if ($Clean) {
         Invoke-Step "pio clean ($EnvName)" { pio run -t clean -e $EnvName }
     }

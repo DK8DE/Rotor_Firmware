@@ -8,19 +8,26 @@ on:
   pull_request:
     branches: [ main, master, develop ]
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    
+
+    outputs:
+      version: ${{ steps.fwver.outputs.version }}
+      tag: ${{ steps.fwver.outputs.tag }}
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-      
+
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-        
+
     - name: Cache PlatformIO
       uses: actions/cache@v4
       with:
@@ -28,15 +35,55 @@ jobs:
         key: ${{ runner.os }}-platformio-${{ hashFiles('**/platformio.ini') }}
         restore-keys: |
           ${{ runner.os }}-platformio-
-          
+
     - name: Install PlatformIO
       run: |
         pip install platformio
-        
+
     - name: Build PlatformIO Project
       run: |
         pio run --environment esp32-s3-n8r8
-        
+
+    - name: Read firmware version (src/Version.h)
+      id: fwver
+      run: |
+        MAJOR=$(grep -oP '#define\s+FW_VERSION_MAJOR\s+\K\d+' src/Version.h)
+        MINOR=$(grep -oP '#define\s+FW_VERSION_MINOR\s+\K\d+' src/Version.h)
+        PATCH=$(grep -oP '#define\s+FW_VERSION_PATCH\s+\K\d+' src/Version.h)
+        VERSION="$MAJOR.$MINOR.$PATCH"
+        echo "Firmware-Version: $VERSION"
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+        echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+    - name: Locate boot_app0.bin
+      run: |
+        BOOT_APP0=$(find ~/.platformio/packages -name 'boot_app0.bin' | head -n 1)
+        if [ -z "$BOOT_APP0" ]; then
+          echo "boot_app0.bin nicht gefunden"; exit 1
+        fi
+        cp "$BOOT_APP0" .pio/build/esp32-s3-n8r8/boot_app0.bin
+
+    - name: Build ESP Web Tools manifest.json
+      run: |
+        cat > .pio/build/esp32-s3-n8r8/manifest.json <<EOF
+        {
+          "name": "Rotor Firmware",
+          "version": "${{ steps.fwver.outputs.version }}",
+          "new_install_prompt_erase": true,
+          "builds": [
+            {
+              "chipFamily": "ESP32-S3",
+              "parts": [
+                { "path": "bootloader.bin", "offset": 0 },
+                { "path": "partitions.bin", "offset": 32768 },
+                { "path": "boot_app0.bin", "offset": 57344 },
+                { "path": "firmware.bin", "offset": 65536 }
+              ]
+            }
+          ]
+        }
+        EOF
+
     - name: Upload Build Artifacts
       uses: actions/upload-artifact@v4
       with:
@@ -46,32 +93,68 @@ jobs:
           .pio/build/esp32-s3-n8r8/firmware.elf
           .pio/build/esp32-s3-n8r8/partitions.bin
           .pio/build/esp32-s3-n8r8/bootloader.bin
+          .pio/build/esp32-s3-n8r8/boot_app0.bin
+          .pio/build/esp32-s3-n8r8/manifest.json
         if-no-files-found: warn
 
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-    
+    # Ein Release wird erstellt bei:
+    #  - manuellem Tag-Push "vX.Y.Z", ODER
+    #  - Push nach main/master (Release-Job prueft selbst, ob sich die
+    #    Version in src/Version.h seit dem letzten Release geaendert hat).
+    if: >
+      github.event_name == 'push' &&
+      (startsWith(github.ref, 'refs/tags/v') ||
+       github.ref == 'refs/heads/main' ||
+       github.ref == 'refs/heads/master')
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-      
+      with:
+        fetch-depth: 0
+
+    - name: Determine release tag
+      id: reltag
+      run: |
+        if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+          TAG="${{ github.ref_name }}"
+        else
+          TAG="${{ needs.build.outputs.tag }}"
+        fi
+        echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+    - name: Check if tag/release already exists
+      id: check
+      run: |
+        if git ls-remote --tags origin | grep -q "refs/tags/${{ steps.reltag.outputs.tag }}$"; then
+          echo "Tag ${{ steps.reltag.outputs.tag }} existiert bereits -> kein neues Release (Version unveraendert)."
+          echo "exists=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "Tag ${{ steps.reltag.outputs.tag }} existiert noch nicht -> neues Release wird erstellt."
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+        fi
+
     - name: Download Build Artifacts
+      if: steps.check.outputs.exists == 'false'
       uses: actions/download-artifact@v4
       with:
         name: firmware-bin
         path: firmware/
-        
+
     - name: Create Release Package
+      if: steps.check.outputs.exists == 'false'
       run: |
         cd firmware
-        zip -r ../Rotor_Firmware_${{ github.ref_name }}.zip .
+        zip -r ../Rotor_Firmware_${{ steps.reltag.outputs.tag }}.zip .
         cd ..
-        
+
     - name: Generate Release Notes
+      if: steps.check.outputs.exists == 'false'
       run: |
-        echo "## Rotor Firmware ${{ github.ref_name }}" > RELEASE_NOTES.md
+        echo "## Rotor Firmware ${{ steps.reltag.outputs.tag }}" > RELEASE_NOTES.md
         echo "" >> RELEASE_NOTES.md
         echo "### Hardware" >> RELEASE_NOTES.md
         echo "- MCU: ESP32-S3 (8MB Flash, 8MB PSRAM)" >> RELEASE_NOTES.md
@@ -80,6 +163,8 @@ jobs:
         echo "- \`firmware.bin\` - Hauptfirmware" >> RELEASE_NOTES.md
         echo "- \`bootloader.bin\` - Bootloader" >> RELEASE_NOTES.md
         echo "- \`partitions.bin\` - Partitionstabelle" >> RELEASE_NOTES.md
+        echo "- \`boot_app0.bin\` - OTA Boot-Selector" >> RELEASE_NOTES.md
+        echo "- \`manifest.json\` - ESP Web Tools Manifest (Browser-Flash)" >> RELEASE_NOTES.md
         echo "- \`firmware.elf\` - Debug-Symbole" >> RELEASE_NOTES.md
         echo "" >> RELEASE_NOTES.md
         echo "### Installation" >> RELEASE_NOTES.md
@@ -90,17 +175,29 @@ jobs:
         echo "# Mit esptool" >> RELEASE_NOTES.md
         echo "esptool.py --chip esp32s3 --port /dev/ttyUSB0 write_flash 0x0 firmware.bin" >> RELEASE_NOTES.md
         echo '```' >> RELEASE_NOTES.md
-        
+        echo "" >> RELEASE_NOTES.md
+        echo "Oder per Browser (ESP Web Tools) mit \`manifest.json\`." >> RELEASE_NOTES.md
+
+    - name: Tag commit (nur bei Branch-Push, nicht bei manuellem Tag-Push)
+      if: steps.check.outputs.exists == 'false' && !startsWith(github.ref, 'refs/tags/')
+      run: |
+        git tag ${{ steps.reltag.outputs.tag }}
+        git push origin ${{ steps.reltag.outputs.tag }}
+
     - name: Create GitHub Release
+      if: steps.check.outputs.exists == 'false'
       uses: softprops/action-gh-release@v2
       with:
-        name: "Rotor Firmware ${{ github.ref_name }}"
+        tag_name: ${{ steps.reltag.outputs.tag }}
+        name: "Rotor Firmware ${{ steps.reltag.outputs.tag }}"
         body_path: RELEASE_NOTES.md
         files: |
-          Rotor_Firmware_${{ github.ref_name }}.zip
+          Rotor_Firmware_${{ steps.reltag.outputs.tag }}.zip
           firmware/firmware.bin
           firmware/bootloader.bin
           firmware/partitions.bin
+          firmware/boot_app0.bin
+          firmware/manifest.json
         generate_release_notes: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
