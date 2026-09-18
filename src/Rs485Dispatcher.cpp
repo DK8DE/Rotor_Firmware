@@ -486,6 +486,35 @@ static bool parseDecimalScaled100Local(const String& sIn, int32_t& outScaled) {
   return true;
 }
 
+// Fallback fuer freie Textfelder (z.B. Antennennamen): siehe
+// Rs485Proto::extractLastEmbeddedNumberScaled100 (identische Logik, lokale Kopie
+// nur fuer die BADCHK-Anzeige bei ungueltigen Frames).
+static bool extractLastEmbeddedNumberScaled100Local(const String& s, int32_t& outScaled) {
+  const int len = s.length();
+  int end = -1;
+  for (int i = len - 1; i >= 0; i--) {
+    const char c = s.charAt(i);
+    if (c >= '0' && c <= '9') { end = i; break; }
+  }
+  if (end < 0) return false;
+
+  int start = end;
+  bool sawSep = false;
+  while (start - 1 >= 0) {
+    const char c = s.charAt(start - 1);
+    if (c >= '0' && c <= '9') { start--; continue; }
+    if ((c == ',' || c == '.') && !sawSep) { sawSep = true; start--; continue; }
+    break;
+  }
+  if (start - 1 >= 0) {
+    const char c = s.charAt(start - 1);
+    if (c == '-' || c == '+') start--;
+  }
+
+  const String numStr = s.substring(start, end + 1);
+  return parseDecimalScaled100Local(numStr, outScaled);
+}
+
 static int32_t extractValueScaled100Local(const String& params) {
   String p = params;
   p.trim();
@@ -509,7 +538,9 @@ static int32_t extractValueScaled100Local(const String& params) {
   }
 
   int32_t vScaled = 0;
-  if (!parseDecimalScaled100Local(token, vScaled)) return 0;
+  if (!parseDecimalScaled100Local(token, vScaled)) {
+    if (!extractLastEmbeddedNumberScaled100Local(token, vScaled)) return 0;
+  }
 
   // Vorzeichen behalten (wie Rs485Proto::extractValueScaled100)
   return vScaled;
@@ -643,6 +674,13 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     if (!floatChanged(*var, nv)) return;
     *var = nv;
     if (prefs) prefs->putFloat(key, nv);
+  };
+
+  auto persistPutString = [&](const char* key, String* var, const String& nv) {
+    if (!var) return;
+    if (*var == nv) return;                 // keine Aenderung -> kein Flash-Write
+    *var = nv;
+    if (prefs) prefs->putString(key, nv);
   };
 
   // SafetyConfig live aktualisieren (ohne Neustart).
@@ -1355,6 +1393,80 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   }
 
   // ------------------------------------------------------------------------
+  // Antennennamen 1..3 (max. 9 Zeichen, nur persistent speichern / bereitstellen)
+  // GETANTNAME1-3 / SETANTNAME1-3 — NVS Keys an1, an2, an3
+  // ------------------------------------------------------------------------
+  // Reine Identifikation fuer den Controller/Master (z.B. Anzeige "YAGI-20M").
+  // Der Rotor selbst wertet diese Namen nicht aus.
+  // ':' und ';' sind im RS485-Protokoll Trennzeichen und daher in Namen
+  // nicht zulaessig; laenger als 9 Zeichen -> NAK BADLEN.
+  if (cmd == "GETANTNAME1") {
+    const String v = (_cfg.antName1) ? *_cfg.antName1 : String("");
+    if (shouldReply) sendAck(f.master, "GETANTNAME1", v);
+    return;
+  }
+  if (cmd == "SETANTNAME1") {
+    String v = f.params;
+    v.trim();
+    if (v.length() > 9) {
+      if (shouldReply) sendNak(f.master, "SETANTNAME1", "BADLEN");
+      return;
+    }
+    if (v.indexOf(':') >= 0 || v.indexOf(';') >= 0) {
+      if (shouldReply) sendNak(f.master, "SETANTNAME1", "BADVAL");
+      return;
+    }
+    persistPutString("an1", _cfg.antName1, v);
+    if (shouldReply) sendAck(f.master, "SETANTNAME1", v);
+    serialEventState("SETANTNAME1");
+    return;
+  }
+
+  if (cmd == "GETANTNAME2") {
+    const String v = (_cfg.antName2) ? *_cfg.antName2 : String("");
+    if (shouldReply) sendAck(f.master, "GETANTNAME2", v);
+    return;
+  }
+  if (cmd == "SETANTNAME2") {
+    String v = f.params;
+    v.trim();
+    if (v.length() > 9) {
+      if (shouldReply) sendNak(f.master, "SETANTNAME2", "BADLEN");
+      return;
+    }
+    if (v.indexOf(':') >= 0 || v.indexOf(';') >= 0) {
+      if (shouldReply) sendNak(f.master, "SETANTNAME2", "BADVAL");
+      return;
+    }
+    persistPutString("an2", _cfg.antName2, v);
+    if (shouldReply) sendAck(f.master, "SETANTNAME2", v);
+    serialEventState("SETANTNAME2");
+    return;
+  }
+
+  if (cmd == "GETANTNAME3") {
+    const String v = (_cfg.antName3) ? *_cfg.antName3 : String("");
+    if (shouldReply) sendAck(f.master, "GETANTNAME3", v);
+    return;
+  }
+  if (cmd == "SETANTNAME3") {
+    String v = f.params;
+    v.trim();
+    if (v.length() > 9) {
+      if (shouldReply) sendNak(f.master, "SETANTNAME3", "BADLEN");
+      return;
+    }
+    if (v.indexOf(':') >= 0 || v.indexOf(';') >= 0) {
+      if (shouldReply) sendNak(f.master, "SETANTNAME3", "BADVAL");
+      return;
+    }
+    persistPutString("an3", _cfg.antName3, v);
+    if (shouldReply) sendAck(f.master, "SETANTNAME3", v);
+    serialEventState("SETANTNAME3");
+    return;
+  }
+
+  // ------------------------------------------------------------------------
   // GETWINDENABLE / SETWINDENABLE (Wind-/Richtungssensor aktivieren)
   // ------------------------------------------------------------------------
   // 1 = Sensor wird gepollt, GETANEMO/GETWINDDIR liefern echte Werte
@@ -2061,6 +2173,77 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     return;
   }
 
+  // ------------------------------------------------------------------------
+  // GETHOMEPOS / SETHOMEPOS (Home-/Parkposition)
+  // ------------------------------------------------------------------------
+  // Reine Speicherung: Die Firmware wertet diesen Wert nur beim Kommando HOME
+  // aus (Ziel der Fahrt), sonst nirgends. Koordinatensystem/Format identisch
+  // zu GETPOSDG/SETPOSDG (Kalibrier-Koordinaten, Deg01 = Grad*100), intern
+  // aber physisch persistiert (NVS "hpos") — bleibt also bei einer spaeteren
+  // DGCAL-Aenderung weiterhin dieselbe physische Stelle.
+  if (cmd == "GETHOMEPOS") {
+    const int32_t v = safeI32(_cfg.homePosDeg01, 0);
+    if (shouldReply) sendAck(f.master, "GETHOMEPOS", formatDeg01ToString(toCalDeg01(_cfg, v)));
+    return;
+  }
+
+  if (cmd == "SETHOMEPOS") {
+    const int32_t calDeg01 = parseDeg01NoClamp(f.params);
+    int32_t deg01 = toPhysDeg01(_cfg, calDeg01);
+
+    const int32_t amin = safeI32(_cfg.axisMinDeg01, 0);
+    const int32_t amax = safeI32(_cfg.axisMaxDeg01, 36000);
+    if (deg01 < amin) deg01 = amin;
+    if (deg01 > amax) deg01 = amax;
+
+    persistPutI32("hpos", _cfg.homePosDeg01, deg01);
+
+    // ACK: akzeptierter Wert in Kalibrier-Koordinaten (nach amin/amax-Clamp physisch).
+    if (shouldReply) sendAck(f.master, "SETHOMEPOS", formatDeg01ToString(toCalDeg01(_cfg, deg01)));
+    serialEventState("SETHOMEPOS");
+    return;
+  }
+
+  // ------------------------------------------------------------------------
+  // HOME (Fahrt zur gespeicherten Home-/Parkposition, siehe SETHOMEPOS)
+  // ------------------------------------------------------------------------
+  // Faehrt exakt zu der Position, die zuletzt per SETHOMEPOS gespeichert
+  // wurde (Default 0,00°, siehe g_homePosDeg01). Kein Endschalter-Homing —
+  // dafuer weiterhin SETREF verwenden. Erfordert daher wie SETPOSDG eine
+  // gueltige Referenz.
+  if (cmd == "HOME") {
+    if (!isRotorReferencedLocal(_cfg, _homing)) {
+      if (shouldReply) sendNak(f.master, "HOME", "NOREF");
+      serialEventState("HOME_NOREF");
+      return;
+    }
+
+    _safety->notifyMotionEdge(nowMs);
+
+    int32_t deg01 = safeI32(_cfg.homePosDeg01, 0);
+    const int32_t amin = safeI32(_cfg.axisMinDeg01, 0);
+    const int32_t amax = safeI32(_cfg.axisMaxDeg01, 36000);
+    if (deg01 < amin) deg01 = amin;
+    if (deg01 > amax) deg01 = amax;
+
+    int32_t startDeg01 = 0;
+    if (_motion) (void)_motion->getCurrentPositionDeg01(startDeg01);
+
+    if (!_motion->commandSetPosDeg01(deg01, nowMs)) {
+      if (shouldReply) sendNak(f.master, "HOME", "NOREF");
+      serialEventState("HOME_NOREF");
+      return;
+    }
+
+    if (_loadMon) {
+      _loadMon->notifyMoveStarted(startDeg01, deg01, nowMs);
+    }
+
+    if (shouldReply) sendAck(f.master, "HOME", formatDeg01ToString(toCalDeg01(_cfg, deg01)));
+    serialEventState("HOME");
+    return;
+  }
+
   // ============================================================================
   // Persistente Parameter (Preferences) + Laufzeitparameter
   // ============================================================================
@@ -2103,6 +2286,36 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
 
     if (shouldReply) sendAck(f.master, "SETID", "1");
     serialEventState("SETID");
+    return;
+  }
+
+  // ------------------------------------------------------------------------
+  // GETROTORTYPE / SETROTORTYPE
+  // ------------------------------------------------------------------------
+  // Reine Identifikation fuer die Steuerung (Master) — wird in dieser Firmware
+  // nicht weiter ausgewertet, nur persistent gespeichert (NVS "rty").
+  // Werte:
+  // - 1 = Rotation/Azimut (Default)
+  // - 2 = Elevation 90 Grad
+  // - 3 = Elevation 180 Grad
+  if (cmd == "GETROTORTYPE") {
+    uint8_t v = safeU8(_cfg.rotorType, 1);
+    if (v < 1 || v > 3) v = 1;
+    if (shouldReply) sendAck(f.master, "GETROTORTYPE", String((int)v));
+    return;
+  }
+
+  if (cmd == "SETROTORTYPE") {
+    const uint8_t nv = parseU8Param(f.params);
+    if (nv < 1 || nv > 3) {
+      if (shouldReply) sendNak(f.master, "SETROTORTYPE", "BADVAL");
+      return;
+    }
+
+    persistPutU8("rty", _cfg.rotorType, nv);
+
+    if (shouldReply) sendAck(f.master, "SETROTORTYPE", String((int)nv));
+    serialEventState("SETROTORTYPE");
     return;
   }
 

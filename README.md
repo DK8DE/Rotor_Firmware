@@ -2,40 +2,40 @@
 
 **Version: 1.3.1**
 
-Firmware fÃ¼r einen motorisierten Antennenrotor auf Basis des ESP32-S3 (PlatformIO/Arduino).
+Firmware für einen motorisierten Antennenrotor auf Basis des ESP32-S3 (PlatformIO/Arduino).
 
-Dieses Projekt steuert den Antennenrotor, verarbeitet Endschalter und Encoder, regelt die Bewegung mit Rampenprofilen und stellt die Kommunikation Ã¼ber RS485 bereit.
+Dieses Projekt steuert den Antennenrotor, verarbeitet Endschalter und Encoder, regelt die Bewegung mit Rampenprofilen und stellt die Kommunikation über RS485 bereit.
 
-## Ãœberblick
+## Überblick
 
-Die Firmware lÃ¤uft auf der Steuerhardware und bietet unter anderem:
+Die Firmware läuft auf der Steuerhardware und bietet unter anderem:
 
-- **PrÃ¤zise Positionsregelung** mit Encoder-RÃ¼ckfÃ¼hrung
+- **Präzise Positionsregelung** mit Encoder-Rückführung
   - Typ 1: Motorachsen-Encoder (PCNT)
   - Typ 2: Ring-/Abtriebs-Encoder (PCNT, optional Z-Index)
-  - Typ 3: TWK KBE58 SSI-Absolutencoder (kein Homing Ã¼ber Endschalter)
-- **Arbeitsbereich bis 720Â°** bei Typ 3 (Turn-ZÃ¤hler 0/1, NVS-gesichert)
-- **Feinjustage-Offset** `SETDGCAL` / `GETDGCAL` (âˆ’360â€¦+360Â°) fÃ¼r GETPOSDG/SETPOSDG
+  - Typ 3: TWK KBE58 SSI-Absolutencoder (kein Homing über Endschalter)
+- **Arbeitsbereich bis 720°** bei Typ 3 (Turn-Zähler 0/1, NVS-gesichert)
+- **Feinjustage-Offset** `SETDGCAL` / `GETDGCAL` (−360…+360°) für GETPOSDG/SETPOSDG
 - **Automatisches Homing** (Typ 1/2) mit Endschaltern und Backlash-Kompensation
-- **RS485-Kommunikation** fÃ¼r Fernsteuerung und Statusabfragen
-- **StromÃ¼berwachung** (IS-Messung) zur Blockadeerkennung
-- **TemperaturÃ¼berwachung** (DS18B20)
-- **Windmessung** Ã¼ber Anemometer / optionalen RS485-Windsensor (bei Typ 3 eingeschrÃ¤nkt, da Pins fÃ¼r SSI genutzt werden)
-- **Last-/Baseline-Analyse** (LoadMonitor, Kalibrierfahrt Ã¼ber eine Getriebe-Umdrehung)
+- **RS485-Kommunikation** für Fernsteuerung und Statusabfragen
+- **Stromüberwachung** (IS-Messung) zur Blockadeerkennung
+- **Temperaturüberwachung** (DS18B20)
+- **Windmessung** über Anemometer / optionalen RS485-Windsensor (bei Typ 3 eingeschränkt, da Pins für SSI genutzt werden)
+- **Last-/Baseline-Analyse** (LoadMonitor, Kalibrierfahrt über eine Getriebe-Umdrehung)
 - **Sicherheitsfunktionen**: Stall-Erkennung, Endschalter, Deadman/Keepalive
-- **Persistente Parameter** Ã¼ber NVS/Preferences
+- **Persistente Parameter** über NVS/Preferences
 
 ## Versionierung
 
 Die Firmware-Versionsnummer (Semantic Versioning: `MAJOR.MINOR.PATCH`) wird an **einer** zentralen Stelle gepflegt: [`src/Version.h`](src/Version.h).
 
-- Wird beim Boot unabhÃ¤ngig von `g_debug` einmal Ã¼ber USB-Serial ausgegeben (`Rotor_Firmware v1.3.1`).
-- Ãœber RS485 per **`GETVERSION`** abfragbar (`ACK_GETVERSION:1.3.1`).
-- `build.ps1` liest die Version aus `src/Version.h` und Ã¼bernimmt sie (zusammen mit dem Build-Zeitstempel) in `IMGs/manifest.json` (Feld `version`).
+- Wird beim Boot unabhängig von `g_debug` einmal über USB-Serial ausgegeben (`Rotor_Firmware v1.3.1`).
+- Über RS485 per **`GETVERSION`** abfragbar (`ACK_GETVERSION:1.3.1`).
+- `build.ps1` liest die Version aus `src/Version.h` und übernimmt sie (zusammen mit dem Build-Zeitstempel) in `IMGs/manifest.json` (Feld `version`).
 
 ### Version setzen (`build.ps1 -Version`)
 
-Die Version wird **nicht** manuell in `src/Version.h` editiert, sondern Ã¼ber den Build-Skript-Parameter `-Version` gesetzt:
+Die Version wird **nicht** manuell in `src/Version.h` editiert, sondern über den Build-Skript-Parameter `-Version` gesetzt:
 
 ```powershell
 .\build.ps1 -Version "1.3.1"
@@ -44,12 +44,12 @@ Die Version wird **nicht** manuell in `src/Version.h` editiert, sondern Ã¼ber 
 Das erledigt automatisch:
 
 1. `src/Version.h` wird auf `1.3.1` aktualisiert (`FW_VERSION_MAJOR/MINOR/PATCH`).
-2. **`README.md` wird automatisch mitaktualisiert** â€” alle Stellen, die die alte Versionsnummer enthalten (Badge oben, Beispiele im Versionierungs-Abschnitt), werden auf die neue Version umgeschrieben.
+2. **`README.md` wird automatisch mitaktualisiert** — alle Stellen, die die alte Versionsnummer enthalten (Badge oben, Beispiele im Versionierungs-Abschnitt), werden auf die neue Version umgeschrieben.
 3. Firmware wird gebaut, `IMGs/` aktualisiert und (ohne `-SkipUpload`) geflasht.
 
 Auch ohne `-Version`-Parameter gleicht `build.ps1` bei jedem Lauf die `README.md` automatisch mit dem aktuellen Stand von `src/Version.h` ab (z. B. falls die Datei direkt bearbeitet wurde).
 
-Ã„nderungen sollten committet und nach `main`/`master` gepusht werden, damit sie versioniert nachvollziehbar sind:
+Änderungen sollten committet und nach `main`/`master` gepusht werden, damit sie versioniert nachvollziehbar sind:
 
 ```powershell
 git add src/Version.h README.md
@@ -57,45 +57,45 @@ git commit -m "Version 1.3.1"
 git push
 ```
 
-### Automatisches GitHub-Release bei VersionsÃ¤nderung
+### Automatisches GitHub-Release bei Versionsänderung
 
-Der Workflow [`.github/workflows/platformio-build.yml`](.github/workflows/platformio-build.yml) baut die Firmware bei jedem Push/PR (`build`-Job) und prÃ¼ft danach (`release`-Job), ob sich die Version in `src/Version.h` seit dem letzten Release geÃ¤ndert hat:
+Der Workflow [`.github/workflows/platformio-build.yml`](.github/workflows/platformio-build.yml) baut die Firmware bei jedem Push/PR (`build`-Job) und prüft danach (`release`-Job), ob sich die Version in `src/Version.h` seit dem letzten Release geändert hat:
 
-- Bei einem Push nach `main`/`master` wird die aktuelle Version ausgelesen und geprÃ¼ft, ob dafÃ¼r bereits ein Git-Tag `vMAJOR.MINOR.PATCH` existiert.
-- **Existiert kein Tag** (= Version wurde erhÃ¶ht) â†’ es wird automatisch der Tag `vX.Y.Z` erstellt und gepusht **und** ein GitHub-Release mit `firmware.bin`, `bootloader.bin`, `partitions.bin`, `boot_app0.bin`, `manifest.json` (ESP Web Tools) sowie einem gepackten ZIP angehÃ¤ngt.
-- **Existiert der Tag bereits** (= Version unverÃ¤ndert) â†’ es passiert nichts weiter, es gibt kein doppeltes Release.
-- Alternativ kann ein Release auch klassisch per manuellem Tag-Push ausgelÃ¶st werden: `git tag v1.3.1 && git push --tags`.
+- Bei einem Push nach `main`/`master` wird die aktuelle Version ausgelesen und geprüft, ob dafür bereits ein Git-Tag `vMAJOR.MINOR.PATCH` existiert.
+- **Existiert kein Tag** (= Version wurde erhöht) → es wird automatisch der Tag `vX.Y.Z` erstellt und gepusht **und** ein GitHub-Release mit `firmware.bin`, `bootloader.bin`, `partitions.bin`, `boot_app0.bin`, `manifest.json` (ESP Web Tools) sowie einem gepackten ZIP angehängt.
+- **Existiert der Tag bereits** (= Version unverändert) → es passiert nichts weiter, es gibt kein doppeltes Release.
+- Alternativ kann ein Release auch klassisch per manuellem Tag-Push ausgelöst werden: `git tag v1.3.1 && git push --tags`.
 
-Beim Ã„ndern der Firmware sollte die Version daher immer erhÃ¶ht werden (`PATCH` fÃ¼r Bugfixes, `MINOR` fÃ¼r neue Features, `MAJOR` fÃ¼r inkompatible Ã„nderungen an RS485-Protokoll oder NVS-Layout) â€” sonst wird beim Push kein neues Release erzeugt.
+Beim Ändern der Firmware sollte die Version daher immer erhöht werden (`PATCH` für Bugfixes, `MINOR` für neue Features, `MAJOR` für inkompatible Änderungen an RS485-Protokoll oder NVS-Layout) — sonst wird beim Push kein neues Release erzeugt.
 
 ## Zusammenspiel mit PC und Controller
 
-Zum Gesamtsystem gehÃ¶ren neben dieser Firmware zwei weitere Projekte:
+Zum Gesamtsystem gehören neben dieser Firmware zwei weitere Projekte:
 
 - **PC-Software (Desktop):** [RotorTcpBridge](https://github.com/DK8DE/RotorTcpBridge)  
-  Verbindet Anwendungen am PC mit dem Rotor-System (z. B. Ã¼ber TCP/UDP/seriell, je nach Setup).
+  Verbindet Anwendungen am PC mit dem Rotor-System (z. B. über TCP/UDP/seriell, je nach Setup).
 
 - **Controller-Firmware (USB-Bridge + Bedienung):** [Rotor_Display_5](https://github.com/DK8DE/Rotor_Display_5)  
-  Stellt Ã¼ber USB eine BrÃ¼cke zu RS485 bereit und dient als lokale Bedieneinheit.
+  Stellt über USB eine Brücke zu RS485 bereit und dient als lokale Bedieneinheit.
 
-FÃ¼r reproduzierbare Ergebnisse sollten Firmware, Controller und PC-Software zueinander passen.
+Für reproduzierbare Ergebnisse sollten Firmware, Controller und PC-Software zueinander passen.
 
 ## Hardware
 
-- **MCU**: ESP32-S3 (8â€¯MB Flash, 8â€¯MB PSRAM) â€” Umgebung `esp32-s3-n8r8`
-- **Motorsteuerung**: H-BrÃ¼cke mit MCPWM
+- **MCU**: ESP32-S3 (8 MB Flash, 8 MB PSRAM) — Umgebung `esp32-s3-n8r8`
+- **Motorsteuerung**: H-Brücke mit MCPWM
 - **Encoder**:
-  - Quadratur (A/B, optional Z) â€” Typ 1/2
-  - TWK KBE58 SSI absolut â€” Typ 3
+  - Quadratur (A/B, optional Z) — Typ 1/2
+  - TWK KBE58 SSI absolut — Typ 3
 - **Kommunikation**: RS485 (Half-Duplex)
-- **Sensoren**: DS18B20 (Temperatur), Anemometer / Windrichtung (soweit Hardware/Pinbelegung es zulÃ¤sst)
+- **Sensoren**: DS18B20 (Temperatur), Anemometer / Windrichtung (soweit Hardware/Pinbelegung es zulässt)
 
 ## Bauen
 
 ### Voraussetzungen
 
 - [PlatformIO](https://platformio.org/) (VS Code Extension oder CLI)
-- USB-Kabel fÃ¼r ESP32-S3
+- USB-Kabel für ESP32-S3
 - Unter Windows: PowerShell 5.1+
 
 ### Empfohlen: `build.ps1`
@@ -104,7 +104,7 @@ FÃ¼r reproduzierbare Ergebnisse sollten Firmware, Controller und PC-Software z
 # Build, IMGs aktualisieren, Upload
 .\build.ps1
 
-# Nur Build + IMGs (kein Flash) â€” z. B. fÃ¼r ESP Web Tools
+# Nur Build + IMGs (kein Flash) — z. B. für ESP Web Tools
 .\build.ps1 -SkipUpload
 
 # Zuerst clean
@@ -117,7 +117,7 @@ FÃ¼r reproduzierbare Ergebnisse sollten Firmware, Controller und PC-Software z
 
 Details zur Versionsvergabe und zum automatischen GitHub-Release: siehe [Versionierung](#versionierung).
 
-`build.ps1` legt bzw. erneuert den Ordner **`IMGs/`** mit den aktuellen Images und einer `manifest.json` fÃ¼r [ESP Web Tools](https://esphome.github.io/esp-web-tools/):
+`build.ps1` legt bzw. erneuert den Ordner **`IMGs/`** mit den aktuellen Images und einer `manifest.json` für [ESP Web Tools](https://esphome.github.io/esp-web-tools/):
 
 | Datei | Offset (ESP32-S3) |
 |-------|-------------------|
@@ -125,7 +125,7 @@ Details zur Versionsvergabe und zum automatischen GitHub-Release: siehe [Version
 | `partitions.bin` | `0x8000` |
 | `boot_app0.bin` | `0xE000` |
 | `firmware.bin` | `0x10000` |
-| `manifest.json` | â€” |
+| `manifest.json` | — |
 
 ### PlatformIO CLI
 
@@ -149,32 +149,36 @@ Die Firmware speichert Konfigurationswerte persistent im NVS. Wichtige Parameter
 | Parameter / Key | Beschreibung | Hinweis |
 |-----------------|--------------|---------|
 | Slave-ID | RS485-Adresse | `SETID` / `SETROTORID` (Broadcast 255) |
-| `amin` / `amax` | Achsgrenzen (Deg01) | Typ 1/2: max. 360Â°; Typ 3: bis **720Â°**; ohne gespeichertes `amax` â†’ **360Â°** |
-| `dgcal` | Feinjustage-Offset | âˆ’360â€¦+360Â°; wirkt auf GETPOSDG/SETPOSDG |
+| `rty` | Rotor-Typ (Identifikation) | 1=Rotation/Azimut (Default), 2=Elevation 90°, 3=Elevation 180°; wird von dieser Firmware nicht ausgewertet |
+| `an1` / `an2` / `an3` | Antennennamen 1..3 | max. 9 Zeichen; nur Identifikation fuer Controller, keine Logik im Rotor |
+| `amin` / `amax` | Achsgrenzen (Deg01) | Typ 1/2: max. 360°; Typ 3: bis **720°**; ohne gespeichertes `amax` → **360°** |
+| `dgcal` | Feinjustage-Offset | −360…+360°; wirkt auf GETPOSDG/SETPOSDG |
 | `dgo` | DGOFFSET | Endschalter-Versatz, nur Typ 1/2 |
-| `sturn` / `sldeg` | SSI-Turn + letzte logische Lage | Sicherheitskritisch bei >360Â° |
-| `ect` | Encoder-Typ | 1 / 2 / 3 (Neustart nach Ã„nderung) |
+| `hpos` | Home-/Parkposition | Ziel des Kommandos `HOME`; Default 0,00°; GETHOMEPOS/SETHOMEPOS in Kalibrier-Koordinaten wie GETPOSDG |
+| `sturn` / `sldeg` | SSI-Turn + letzte logische Lage | Sicherheitskritisch bei >360° |
+| `ect` | Encoder-Typ | 1 / 2 / 3 (Neustart nach Änderung) |
 
 ### Werksreset
 
-Beide Handspeed-Taster beim Booten gedrÃ¼ckt halten â†’ NVS wird gelÃ¶scht und das GerÃ¤t startet mit Standardwerten neu.
+Beide Handspeed-Taster beim Booten gedrückt halten → NVS wird gelöscht und das Gerät startet mit Standardwerten neu.
 
 ## RS485-Kommandos (Auswahl)
 
 Frame-Format: `#src:dst:CMD:params:checksum$`  
-Checksumme: `(src + dst) Ã— 100 + Wert` (**vorzeichenbehaftet**, z.â€¯B. bei negativen Params).
+Checksumme: `(src + dst) × 100 + Wert` (**vorzeichenbehaftet**, z. B. bei negativen Params).
 
-Winkelangaben typisch als Grad mit Komma (`12,50` = 12,50Â°). Intern: Deg01 (= Grad Ã— 100).
+Winkelangaben typisch als Grad mit Komma (`12,50` = 12,50°). Intern: Deg01 (= Grad × 100).
 
 ### Bewegung / Status
 
 | Kommando | Beschreibung |
 |----------|--------------|
 | `GETPOSDG` | Position (inkl. DGCAL) |
-| `SETPOSDG:<grad>` | Zielposition in Kalibrier-Koordinaten; intern `phys = cal âˆ’ DGCAL`; ACK = akzeptiertes Cal-Ziel |
+| `SETPOSDG:<grad>` | Zielposition in Kalibrier-Koordinaten; intern `phys = cal − DGCAL`; ACK = akzeptiertes Cal-Ziel |
+| `GETHOMEPOS` / `SETHOMEPOS:<grad>` | Home-/Parkposition lesen/setzen (Kalibrier-Koordinaten wie GETPOSDG/SETPOSDG); NVS `hpos`, Default 0,00° |
+| `HOME` | Faehrt zur gespeicherten Home-Position (`SETHOMEPOS`); erfordert Referenz (NAK `NOREF` sonst) |
 | `STOP` | Bewegung stoppen |
-| `HOME` | Homing starten (Typ 1/2) |
-| `GETREF` / `SETREF` | Referenzstatus / Fehler quittieren |
+| `GETREF` / `SETREF` | Referenzstatus / Fehler quittieren; `SETREF:1` startet das Endschalter-Homing (Typ 1/2) |
 | `GETERR` / `GETWARN` | Fehler- / Warncodes |
 | `GETHOMING` | Homing aktiv? |
 
@@ -183,17 +187,17 @@ Winkelangaben typisch als Grad mit Komma (`12,50` = 12,50Â°). Intern: Deg01 (=
 | Kommando | Beschreibung |
 |----------|--------------|
 | `GETBEGINDG` / `SETBEGINDG` | Achsminimum |
-| `GETMAXDG` / `SETMAXDG` | Achsmaximum (Typ 3 bis 720Â°) |
+| `GETMAXDG` / `SETMAXDG` | Achsmaximum (Typ 3 bis 720°) |
 | `GETDGOFFSET` / `SETDGOFFSET` | Endschalter-Offset (Typ 1/2) |
-| `GETDGCAL` / `SETDGCAL` | Feinjustage (âˆ’360â€¦+360Â°), NVS `dgcal` |
+| `GETDGCAL` / `SETDGCAL` | Feinjustage (−360…+360°), NVS `dgcal` |
 
 ### Encoder (Typ 3 / SSI)
 
 | Kommando | Beschreibung |
 |----------|--------------|
 | `GETENCTYPE` / `SETENCTYPE` | 1=Motor, 2=Ring, 3=SSI (Neustart) |
-| `SETENCZERO` | SSI-Hardware-Null (SET0), Turn zurÃ¼cksetzen |
-| `GETENCTURN` / `SETENCTURN` | Soft-Turn 0/1 (Ãœberdrehen >360Â°) |
+| `SETENCZERO` | SSI-Hardware-Null (SET0), Turn zurücksetzen |
+| `GETENCTURN` / `SETENCTURN` | Soft-Turn 0/1 (Überdrehen >360°) |
 
 ### Identifikation / PWM / Sensorik (Auszug)
 
@@ -202,28 +206,30 @@ Winkelangaben typisch als Grad mit Komma (`12,50` = 12,50Â°). Intern: Deg01 (=
 | `GETVERSION` | Firmware-Version (z. B. `1.3.1`), siehe [Versionierung](#versionierung) |
 | `GETID` / `SETID` | Slave-ID |
 | `SETROTORID` | ID nur per Broadcast `255` setzen |
+| `GETROTORTYPE` / `SETROTORTYPE` | Rotor-Typ: 1=Rotation/Azimut, 2=Elevation 90°, 3=Elevation 180° (nur Identifikation, NVS `rty`, keine Logik in dieser Firmware) |
+| `GETANTNAME1`/`2`/`3` / `SETANTNAME1`/`2`/`3` | Antennennamen (max. 9 Zeichen, keine `:`/`;`); NVS `an1`/`an2`/`an3`, nur fuer den Controller |
 | `GETTEMPA` / `GETTEMPM` | Umgebungs- / Motortemperatur |
 | `GETIS` | Strommesswert (nach Offset) |
 | `GETWIND` / `SETWINDENABLE` | Wind (soweit Hardware) |
 
-Weitere Kommandos (Homing-PWM, Stall, Load-Bins, Antennenanzeige, â€¦) siehe Implementierung in `src/Rs485Dispatcher.cpp`.
+Weitere Kommandos (Homing-PWM, Stall, Load-Bins, Antennenanzeige, …) siehe Implementierung in `src/Rs485Dispatcher.cpp`.
 
-## Encoder Typ 3: Bereich >360Â°
+## Encoder Typ 3: Bereich >360°
 
-Der SSI-Encoder liefert nur 0â€¦360Â°. Ein Soft-Turn (0/1) erweitert den logischen Bereich bis `amax` (max. 720Â°):
+Der SSI-Encoder liefert nur 0…360°. Ein Soft-Turn (0/1) erweitert den logischen Bereich bis `amax` (max. 720°):
 
-- `GETPOSDG` = Rohwinkel + TurnÃ—360Â° (geclampt auf `amax`)
+- `GETPOSDG` = Rohwinkel + Turn×360° (geclampt auf `amax`)
 - Turn wird bei Wrap erkannt und **sofort** in NVS geschrieben (`sturn`, Fallback `sldeg`)
-- Nach Stromausfall im Ãœberdrehbereich muss wieder die logische Lage (>360Â°) erscheinen â€” sonst Kabelbruch-Risiko
+- Nach Stromausfall im Überdrehbereich muss wieder die logische Lage (>360°) erscheinen — sonst Kabelbruch-Risiko
 
 ## Firmware herunterladen
 
-Fertige Binaries kommen Ã¼ber GitHub Actions oder lokal aus `IMGs/`.
+Fertige Binaries kommen über GitHub Actions oder lokal aus `IMGs/`.
 
 ### GitHub Actions
 
-1. **[Actions â†’ PlatformIO Build & Release](https://github.com/DK8DE/Rotor_Firmware/actions/workflows/platformio-build.yml)**
-2. Neuesten erfolgreichen Run Ã¶ffnen
+1. **[Actions → PlatformIO Build & Release](https://github.com/DK8DE/Rotor_Firmware/actions/workflows/platformio-build.yml)**
+2. Neuesten erfolgreichen Run öffnen
 3. Artifact `firmware-bin` herunterladen und entpacken
 
 | Datei | Beschreibung |
@@ -247,7 +253,7 @@ esptool.py --chip esp32-s3 --port /dev/ttyUSB0 write_flash \
   0x10000 firmware.bin
 ```
 
-Unter Windows z.â€¯B. `--port COM7`. `boot_app0.bin` liegt nach dem Build in `IMGs/`.
+Unter Windows z. B. `--port COM7`. `boot_app0.bin` liegt nach dem Build in `IMGs/`.
 
 **PlatformIO:**
 
@@ -259,12 +265,12 @@ pio run -t upload -e esp32-s3-n8r8 --upload-port COM7
 
 ```
 Rotor_Firmware/
-â”œâ”€â”€ src/                      # Anwendung (main, Motion, Encoder, RS485, Safety, â€¦)
-â”œâ”€â”€ lib/                      # Lokale Bibliotheken (falls vorhanden)
-â”œâ”€â”€ IMGs/                     # Aktuelle Flash-Images + manifest.json (via build.ps1)
-â”œâ”€â”€ build.ps1                 # Build, IMGs, optional Upload
-â”œâ”€â”€ platformio.ini
-â””â”€â”€ .github/workflows/        # CI/CD
+├── src/                      # Anwendung (main, Motion, Encoder, RS485, Safety, …)
+├── lib/                      # Lokale Bibliotheken (falls vorhanden)
+├── IMGs/                     # Aktuelle Flash-Images + manifest.json (via build.ps1)
+├── build.ps1                 # Build, IMGs, optional Upload
+├── platformio.ini
+└── .github/workflows/        # CI/CD
 ```
 
 ## Lizenz
@@ -273,6 +279,6 @@ Dieses Projekt ist Open Source. Einzelheiten siehe die Lizenzdateien im Reposito
 
 ## Hinweise
 
-- Bei Verbindungsproblemen zuerst Verkabelung, RS485-Adressierung, Baudrate und Checksumme prÃ¼fen (auch bei negativen Parametern).
-- Nach `SETENCTYPE` ist ein Neustart nÃ¶tig.
+- Bei Verbindungsproblemen zuerst Verkabelung, RS485-Adressierung, Baudrate und Checksumme prüfen (auch bei negativen Parametern).
+- Nach `SETENCTYPE` ist ein Neustart nötig.
 - Bei Fragen oder Fehlern ein Issue im [GitHub-Repository](https://github.com/DK8DE/Rotor_Firmware) erstellen.

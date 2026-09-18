@@ -29,6 +29,14 @@ struct Rs485DispatcherConfig {
   // Eigene Slave-ID (Zeiger auf z.B. g_slaveId)
   uint8_t* ownSlaveId = nullptr;
 
+  // Rotor-Typ: reine Identifikation fuer die Steuerung.
+  // - 1 = Rotation/Azimut (Default)
+  // - 2 = Elevation 90 Grad
+  // - 3 = Elevation 180 Grad
+  // Wird aktuell in dieser Firmware nicht ausgewertet, nur persistiert (NVS "rty")
+  // und per GETROTORTYPE/SETROTORTYPE gelesen/geschrieben.
+  uint8_t* rotorType = nullptr;
+
   // Debug-Schalter (Zeiger auf z.B. g_debug)
   bool* debug = nullptr;
 
@@ -44,6 +52,11 @@ struct Rs485DispatcherConfig {
 
   // Feinjustage-Offset (Deg01) fuer RS485-Winkel (DGCAL): Anzeige = phys + cal
   int32_t* dgCalDeg01 = nullptr;
+
+  // Home-Position (Deg01, PHYSISCH). Ziel, das beim Kommando HOME angefahren
+  // wird. Wird per GETHOMEPOS/SETHOMEPOS in Kalibrier-Koordinaten (wie
+  // GETPOSDG/SETPOSDG) gelesen/geschrieben, NVS-Key "hpos".
+  int32_t* homePosDeg01 = nullptr;
 
   // Homing-Kick-Retry (optional)
   // - tries/nextMs werden vom Dispatcher gesetzt, die Loop-Logik bleibt in der .ino.
@@ -158,6 +171,13 @@ struct Rs485DispatcherConfig {
   uint32_t* antDis1            = nullptr;
   uint32_t* antDis2            = nullptr;
   uint32_t* antDis3            = nullptr;
+
+  // Antennennamen 1..3 (max. 9 Zeichen), NVS Keys an1, an2, an3.
+  // Reine Identifikation fuer den Controller/Master, wird vom Rotor selbst
+  // nicht ausgewertet. Abfragbar/setzbar per GETANTNAME1-3/SETANTNAME1-3.
+  String* antName1             = nullptr;
+  String* antName2             = nullptr;
+  String* antName3             = nullptr;
 
   // ----------------------------------------------------------
   // Temperatur / LoadMonitor / Kalibrierung

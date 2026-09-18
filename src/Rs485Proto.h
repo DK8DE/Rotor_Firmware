@@ -85,6 +85,10 @@ private:
   // Checksumme (Fixed-Point 0,01)
   int32_t computeChecksumScaled100(uint8_t src, uint8_t dst, const String& params) const;
   bool parseDecimalScaled100(const String& s, int32_t& outScaled) const;
+  // Fallback fuer freie Textfelder (z.B. Antennennamen): sucht die LETZTE
+  // eingebettete Zahl im String (z.B. "70cm / 2m" -> 2, "Dipol 10m" -> 10).
+  // Wird nur genutzt, wenn parseDecimalScaled100() auf dem ganzen Token fehlschlaegt.
+  bool extractLastEmbeddedNumberScaled100(const String& s, int32_t& outScaled) const;
   int32_t extractValueScaled100(const String& params) const;
 
 private:

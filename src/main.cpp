@@ -248,6 +248,22 @@ static float g_homeReturnRampDeg = 30.0f;
 //     Encoder-Welle und Abtriebsachse laufen 1:1 — ssiAngleScaleNum/Den = 1/1.
 static EncoderType g_encType = ENCTYPE_MOTOR_AXIS;
 
+// Rotor-Typ: reine Identifikation fuer die Steuerung (Master), wird aktuell
+// in dieser Firmware NICHT ausgewertet/verwendet.
+// - 1 = Rotation/Azimut (Default)
+// - 2 = Elevation 90 Grad
+// - 3 = Elevation 180 Grad
+// Persistiert in NVS (Key "rty"), abfragbar/setzbar per GETROTORTYPE/SETROTORTYPE.
+static uint8_t g_rotorType = 1;
+
+// Home-Position (Deg01, PHYSISCH — wie amin/amax/dgo).
+// Das ist die Position, die beim Befehl HOME angefahren wird (z.B. Parkposition
+// beim Abschalten). Wird per GETHOMEPOS/SETHOMEPOS in Kalibrier-Koordinaten
+// (wie GETPOSDG/SETPOSDG) gelesen/geschrieben, aber physisch persistiert, damit
+// sie bei einer spaeteren DGCAL-Aenderung weiterhin dieselbe physische Stelle meint.
+// Default: 0,00° (typischerweise amin).
+static int32_t g_homePosDeg01 = 0;
+
 // Encoder-Modus (Aufloesung / Entstoerung):
 // - ULTRA_MODE_SINGLE:
 //     zaehlt alle Pulse (maximale Aufloesung).
@@ -602,6 +618,14 @@ static uint32_t g_antDis1 = 0;
 static uint32_t g_antDis2 = 0;
 static uint32_t g_antDis3 = 0;
 
+// Antennennamen 1..3 (max. 9 Zeichen).
+// Diese drei Werte werden nur im Rotor persistent gespeichert und per RS485
+// fuer den Master/Controller bereitgestellt (GETANTNAME/SETANTNAME). Der Rotor
+// selbst nutzt sie nicht aktiv, reine Identifikation fuer den Controller.
+static String g_antName1 = "";
+static String g_antName2 = "";
+static String g_antName3 = "";
+
 // ============================================================================
 // Homing Kick Retry (optional)
 // ============================================================================
@@ -803,11 +827,19 @@ static void loadPreferencesIntoGlobals() {
 
   g_slaveId          = g_prefs.getUChar("id",    g_slaveId);
 
+  // Rotor-Typ (1=Rotation, 2=Elevation 90°, 3=Elevation 180°) — reine
+  // Identifikation, keine Logik hier.
+  g_rotorType        = g_prefs.getUChar("rty",   g_rotorType);
+  if (g_rotorType < 1 || g_rotorType > 3) g_rotorType = 1;
+
   g_axisMinDeg01     = g_prefs.getInt("amin",    g_axisMinDeg01);
   g_axisMaxDeg01     = g_prefs.getInt("amax",    g_axisMaxDeg01);
 
   // Bereichs-Offset fuer rechte-Endschalter-Versatz
   g_dgOffsetDeg01    = g_prefs.getInt("dgo",     g_dgOffsetDeg01);
+
+  // Home-Position (Deg01, physisch) — Ziel des HOME-Kommandos
+  g_homePosDeg01     = g_prefs.getInt("hpos",    g_homePosDeg01);
 
   // Feinjustage-Offset (RS485-Winkel)
   g_dgCalDeg01       = g_prefs.getInt("dgcal",   g_dgCalDeg01);
@@ -958,6 +990,14 @@ static void loadPreferencesIntoGlobals() {
   if (g_antDis1 > 99999u) g_antDis1 = 99999u;
   if (g_antDis2 > 99999u) g_antDis2 = 99999u;
   if (g_antDis3 > 99999u) g_antDis3 = 99999u;
+
+  // Antennennamen 1..3 (max. 9 Zeichen)
+  g_antName1           = g_prefs.getString("an1", g_antName1);
+  g_antName2           = g_prefs.getString("an2", g_antName2);
+  g_antName3           = g_prefs.getString("an3", g_antName3);
+  if (g_antName1.length() > 9) g_antName1 = g_antName1.substring(0, 9);
+  if (g_antName2.length() > 9) g_antName2 = g_antName2.substring(0, 9);
+  if (g_antName3.length() > 9) g_antName3 = g_antName3.substring(0, 9);
 
   // Wind- & Richtungssensor Enable (bool)
   g_windEnable         = g_prefs.getBool("wen", g_windEnable);
@@ -1327,6 +1367,7 @@ void setup() {
   dcfg = Rs485DispatcherConfig{};
 
   dcfg.ownSlaveId = &g_slaveId;
+  dcfg.rotorType = &g_rotorType;
   dcfg.debug = &g_debug;
   dcfg.logFrames = &g_logRs485Frames;
 
@@ -1338,6 +1379,9 @@ void setup() {
 
   // DGCAL (Feinjustage GETPOSDG/SETPOSDG)
   dcfg.dgCalDeg01 = &g_dgCalDeg01;
+
+  // Home-Position (Ziel des HOME-Kommandos)
+  dcfg.homePosDeg01 = &g_homePosDeg01;
 
 
 // Persistente Parameter (RS485 SET/GET -> Preferences)
@@ -1399,6 +1443,9 @@ dcfg.antDp3             = &g_antDp3;
 dcfg.antDis1            = &g_antDis1;
 dcfg.antDis2            = &g_antDis2;
 dcfg.antDis3            = &g_antDis3;
+dcfg.antName1           = &g_antName1;
+dcfg.antName2           = &g_antName2;
+dcfg.antName3           = &g_antName3;
 
 // Wind- & Richtungssensor Enable
 dcfg.windEnable         = &g_windEnable;

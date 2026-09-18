@@ -275,6 +275,40 @@ bool Rs485Proto::parseDecimalScaled100(const String& s, int32_t& outScaled) cons
   return true;
 }
 
+bool Rs485Proto::extractLastEmbeddedNumberScaled100(const String& s, int32_t& outScaled) const {
+  // Sucht die LETZTE Ziffernfolge im String (optional mit Vorzeichen und einem
+  // Dezimaltrenner), z.B.:
+  //   "70cm / 2m"  -> "2"  (letzte Zahl im Text)
+  //   "Dipol 10m"  -> "10"
+  //   "10m Yagi"   -> "10"
+  // Wird als Fallback fuer die Checksumme freier Textfelder (Antennennamen etc.)
+  // benutzt, damit der Master weiterhin (src+dst)*100+Wert bilden kann, auch
+  // wenn "Wert" mitten im Text eingebettet ist.
+  const int len = s.length();
+  int end = -1;
+  for (int i = len - 1; i >= 0; i--) {
+    const char c = s.charAt(i);
+    if (c >= '0' && c <= '9') { end = i; break; }
+  }
+  if (end < 0) return false;
+
+  int start = end;
+  bool sawSep = false;
+  while (start - 1 >= 0) {
+    const char c = s.charAt(start - 1);
+    if (c >= '0' && c <= '9') { start--; continue; }
+    if ((c == ',' || c == '.') && !sawSep) { sawSep = true; start--; continue; }
+    break;
+  }
+  if (start - 1 >= 0) {
+    const char c = s.charAt(start - 1);
+    if (c == '-' || c == '+') start--;
+  }
+
+  const String numStr = s.substring(start, end + 1);
+  return parseDecimalScaled100(numStr, outScaled);
+}
+
 int32_t Rs485Proto::extractValueScaled100(const String& params) const {
   String p = params;
   p.trim();
@@ -300,7 +334,11 @@ int32_t Rs485Proto::extractValueScaled100(const String& params) const {
   }
 
   int32_t vScaled = 0;
-  if (!parseDecimalScaled100(token, vScaled)) return 0;
+  if (!parseDecimalScaled100(token, vScaled)) {
+    // Fallback fuer freie Textfelder (z.B. Antennennamen): letzte eingebettete
+    // Zahl im Text verwenden, statt 0 (siehe extractLastEmbeddedNumberScaled100).
+    if (!extractLastEmbeddedNumberScaled100(token, vScaled)) return 0;
+  }
 
   // Vorzeichen behalten: Master-Checksummen mit negativen Params (z.B. SETDGCAL:-30,6)
   // nutzen chk = (src+dst)*100 + wert_signed (nicht Betrag).
