@@ -1444,7 +1444,10 @@ float MotionController::update(uint32_t nowMs, uint32_t dtMs) {
         const long dCounts = countsNow - _lastCounts;
         _lastCounts = countsNow;
 
-        const float degPerCount = isAbsoluteSsiMotion_() ? outputDegPerCount_() : (360.0f / (float)cpr);
+        // Typ 1/2: Spanne ist axisMaxDeg01 (SETMAXDG), nicht fest 360°
+        // (siehe EncoderAxis::getPositionDeg01/deg01ToCounts).
+        const float degPerCount = isAbsoluteSsiMotion_() ? outputDegPerCount_()
+                                                          : ((float)axisMaxDeg01() / 100.0f / (float)cpr);
         const float dDeg = (float)dCounts * degPerCount;
         _speedMeasDegPerSec = dDeg / dtSpeed;
       }

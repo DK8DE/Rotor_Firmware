@@ -187,7 +187,7 @@ Winkelangaben typisch als Grad mit Komma (`12,50` = 12,50°). Intern: Deg01 (= G
 | Kommando | Beschreibung |
 |----------|--------------|
 | `GETBEGINDG` / `SETBEGINDG` | Achsminimum |
-| `GETMAXDG` / `SETMAXDG` | Achsmaximum (Typ 3 bis 720°) |
+| `GETMAXDG` / `SETMAXDG` | Achsmaximum (Typ 3 bis 720°); bei Typ 1/2 werden die beim Homing gelernten Encoder-Counts (Endschalter zu Endschalter) auf diesen Winkel verteilt (z.B. 180° fuer einen Elevationsrotor mit 180° realem Hub), NICHT fest auf 360° |
 | `GETDGOFFSET` / `SETDGOFFSET` | Endschalter-Offset (Typ 1/2) |
 | `GETDGCAL` / `SETDGCAL` | Feinjustage (−360…+360°), NVS `dgcal` |
 

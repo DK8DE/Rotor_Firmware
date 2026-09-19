@@ -373,11 +373,19 @@ bool EncoderAxis::getPositionDeg01(int32_t& outDeg01) const {
     return true;
   }
 
+  // Typ 1/2 (PCNT, nicht-absolut): die beim Homing gelernten Counts (End-
+  // schalter zu Endschalter) werden auf axisMaxDeg01 (SETMAXDG) verteilt,
+  // NICHT fest auf 360°. Ein per SETMAXDG auf z.B. 180° begrenzter Rotor
+  // (z.B. Elevation) hat dann 1 logisches Grad = 1 reales Grad; vorher wurden
+  // die Counts immer auf 360° verteilt, wodurch die Achse effektiv nur die
+  // Haelfte ihres realen Hubs nutzen konnte.
+  const int32_t amax = (_cfg.axisMaxDeg01 > 0) ? _cfg.axisMaxDeg01 : 36000;
+
   int32_t off = _cfg.rangeDegOffsetDeg01;
   if (off < 0) off = -off;
 
   const int32_t halfOff = off / 2;
-  const int32_t totalDeg01 = 36000 + off;
+  const int32_t totalDeg01 = amax + off;
 
   const long c = getCountsDefault();
 
@@ -385,7 +393,7 @@ bool EncoderAxis::getPositionDeg01(int32_t& outDeg01) const {
   int32_t physDeg01 = (int32_t)(num / (int64_t)cprActual);
   int32_t logDeg01 = physDeg01 - halfOff;
 
-  logDeg01 = clampI32(logDeg01, 0, 36000);
+  logDeg01 = clampI32(logDeg01, 0, amax);
 
   outDeg01 = logDeg01;
   return true;
@@ -416,13 +424,16 @@ bool EncoderAxis::deg01ToCounts(int32_t deg01, int32_t& outCounts) const {
     return true;
   }
 
-  deg01 = clampI32(deg01, 0, 36000);
+  // Typ 1/2 (PCNT, nicht-absolut): siehe getPositionDeg01() — Spanne ist
+  // axisMaxDeg01 (SETMAXDG), nicht fest 360°.
+  const int32_t amax = (_cfg.axisMaxDeg01 > 0) ? _cfg.axisMaxDeg01 : 36000;
+  deg01 = clampI32(deg01, 0, amax);
 
   int32_t off = _cfg.rangeDegOffsetDeg01;
   if (off < 0) off = -off;
 
   const int32_t halfOff = off / 2;
-  const int32_t totalDeg01 = 36000 + off;
+  const int32_t totalDeg01 = amax + off;
 
   const int32_t physDeg01 = deg01 + halfOff;
 

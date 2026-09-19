@@ -9,8 +9,12 @@
   Kapselt UltraEncoderPCNT (Typ 1/2) oder TWK_KBE58_SSI (Typ 3) und stellt bereit:
   - Raw Counts (Steps) und korrigierte Counts (Steps) (bei Z-Korrektur)
   - Grad-Umrechnung auf Basis countsPerRevActual
-    - Typ 1/2: logisch 0..360°
-    - Typ 3 (SSI): logisch 0..axisMaxDeg01 (Default 360°, bis 720° mit Turn-Zähler 0/1)
+    - Typ 1/2: logisch 0..axisMaxDeg01 (Default 360°); die beim Homing gelernten
+      Counts (Endschalter zu Endschalter) werden auf axisMaxDeg01 verteilt, nicht
+      fest auf 360° — ein per SETMAXDG auf z.B. 180° begrenzter Rotor (Elevation)
+      nutzt so seinen realen mechanischen Hub vollstaendig aus.
+    - Typ 3 (SSI): logisch 0..axisMaxDeg01 (Default 360°, bis 720° mit Turn-Zähler 0/1);
+      liefert einen echten Absolutwert, axisMaxDeg01 wirkt hier nur als Clamp.
   - Z-Statistik (Pulse count, dz_steps, dz_us, z_error, offset)
   - Konfiguration fuer Ringencoder (OUTPUT), Motorencoder (MOTOR), SSI-Absolut (SSI)
 */

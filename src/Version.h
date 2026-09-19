@@ -12,8 +12,8 @@
 // mindestens PATCH erhoeht werden (MINOR fuer neue Features, MAJOR fuer
 // nicht-kompatible Aenderungen an RS485-Protokoll/NVS-Layout).
 #define FW_VERSION_MAJOR 1
-#define FW_VERSION_MINOR 3
-#define FW_VERSION_PATCH 1
+#define FW_VERSION_MINOR 4
+#define FW_VERSION_PATCH 0
 
 #define FW_VERSION_STRINGIFY_(x) #x
 #define FW_VERSION_STRINGIFY(x) FW_VERSION_STRINGIFY_(x)
