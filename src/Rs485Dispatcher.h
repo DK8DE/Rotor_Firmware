@@ -37,6 +37,12 @@ struct Rs485DispatcherConfig {
   // und per GETROTORTYPE/SETROTORTYPE gelesen/geschrieben.
   uint8_t* rotorType = nullptr;
 
+  // Antennen-Auswahl: reine Identifikation/Zustand fuer den Controller,
+  // welche der drei Antennen (SETANTNAME1-3) aktuell gewaehlt ist.
+  // Werte 1/2/3 (Default 1). Wird von dieser Firmware nicht ausgewertet,
+  // nur persistiert (NVS "asel") und per GETASELECT/SETASELECT gelesen/geschrieben.
+  uint8_t* antSelect = nullptr;
+
   // Debug-Schalter (Zeiger auf z.B. g_debug)
   bool* debug = nullptr;
 

@@ -2320,6 +2320,48 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   }
 
   // ------------------------------------------------------------------------
+  // GETASELECT / SETASELECT (Antennen-Auswahl)
+  // ------------------------------------------------------------------------
+  // Reine Identifikation/Zustand fuer den Controller (Master) — wird in dieser
+  // Firmware nicht weiter ausgewertet, nur persistent gespeichert (NVS "asel").
+  // Werte: 1, 2 oder 3 (welche der drei Antennen, siehe SETANTNAME1-3, aktuell
+  // gewaehlt ist). Default 1.
+  //
+  // Antennenauswahl gehoert konzeptionell zum AZ-Rotor (RotorType 1 = Rotation/
+  // Azimut). Ist dieser konkrete Rotor als EL-Rotor konfiguriert (RotorType
+  // 2 = Elevation 90°, 3 = Elevation 180°), macht eine eigene Antennenauswahl
+  // an diesem Geraet keinen Sinn -> deaktiviert (NAK DISABLED).
+  if (cmd == "GETASELECT" || cmd == "SETASELECT") {
+    uint8_t rty = safeU8(_cfg.rotorType, 1);
+    if (rty < 1 || rty > 3) rty = 1;
+    if (rty != 1) {
+      if (shouldReply) sendNak(f.master, cmd, "DISABLED");
+      return;
+    }
+  }
+
+  if (cmd == "GETASELECT") {
+    uint8_t v = safeU8(_cfg.antSelect, 1);
+    if (v < 1 || v > 3) v = 1;
+    if (shouldReply) sendAck(f.master, "GETASELECT", String((int)v));
+    return;
+  }
+
+  if (cmd == "SETASELECT") {
+    const uint8_t nv = parseU8Param(f.params);
+    if (nv < 1 || nv > 3) {
+      if (shouldReply) sendNak(f.master, "SETASELECT", "BADVAL");
+      return;
+    }
+
+    persistPutU8("asel", _cfg.antSelect, nv);
+
+    if (shouldReply) sendAck(f.master, "SETASELECT", String((int)nv));
+    serialEventState("SETASELECT");
+    return;
+  }
+
+  // ------------------------------------------------------------------------
   // SETROTORID (nur Broadcast 255)
   // ------------------------------------------------------------------------
   // Wenn die Slave-ID unbekannt ist: Master sendet an 255, Payload = neue ID.

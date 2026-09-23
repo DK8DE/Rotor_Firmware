@@ -264,6 +264,13 @@ static uint8_t g_rotorType = 1;
 // Default: 0,00° (typischerweise amin).
 static int32_t g_homePosDeg01 = 0;
 
+// Antennen-Auswahl: rein Identifikation/Zustand fuer den Controller/Master,
+// welche der drei Antennen (siehe SETANTNAME1-3) aktuell gewaehlt ist.
+// Wird von dieser Firmware NICHT ausgewertet, nur persistent gespeichert
+// (NVS "asel") und per GETASELECT/SETASELECT gelesen/geschrieben.
+// Werte: 1, 2 oder 3 (Default 1).
+static uint8_t g_antSelect = 1;
+
 // Encoder-Modus (Aufloesung / Entstoerung):
 // - ULTRA_MODE_SINGLE:
 //     zaehlt alle Pulse (maximale Aufloesung).
@@ -832,6 +839,10 @@ static void loadPreferencesIntoGlobals() {
   g_rotorType        = g_prefs.getUChar("rty",   g_rotorType);
   if (g_rotorType < 1 || g_rotorType > 3) g_rotorType = 1;
 
+  // Antennen-Auswahl (1/2/3) — reine Identifikation, siehe oben.
+  g_antSelect        = g_prefs.getUChar("asel",  g_antSelect);
+  if (g_antSelect < 1 || g_antSelect > 3) g_antSelect = 1;
+
   g_axisMinDeg01     = g_prefs.getInt("amin",    g_axisMinDeg01);
   g_axisMaxDeg01     = g_prefs.getInt("amax",    g_axisMaxDeg01);
 
@@ -1368,6 +1379,7 @@ void setup() {
 
   dcfg.ownSlaveId = &g_slaveId;
   dcfg.rotorType = &g_rotorType;
+  dcfg.antSelect = &g_antSelect;
   dcfg.debug = &g_debug;
   dcfg.logFrames = &g_logRs485Frames;
 
