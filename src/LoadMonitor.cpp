@@ -12,11 +12,26 @@
 // ============================================================================
 // Baseline-Profile (Kalibrierung)
 static const char* KEY_CAL_VALID = "calv";   // bool
-static const char* KEY_CAL_CW    = "calcw";  // bytes: LOAD_BINS * uint16
-static const char* KEY_CAL_CCW   = "calcc";  // bytes: LOAD_BINS * uint16
+static const char* KEY_CAL_CW    = "calcw";  // bytes: CAL_STAGES * LOAD_BINS * uint16
+static const char* KEY_CAL_CCW   = "calcc";  // bytes: CAL_STAGES * LOAD_BINS * uint16
+static const char* KEY_CAL_PWM   = "calpw";  // bytes: CAL_STAGES * float (tatsaechliche PWM je Stufe)
 static const char* KEY_CAL_TAMB  = "ctA";    // float (Umgebungstemp bei Kalibrierung)
 static const char* KEY_CAL_TMOT  = "ctM";    // float (Motortemp bei Kalibrierung)
 static const char* KEY_CAL_AMAX  = "cama";   // int32: Achsmaximum (Deg01) bei Kalibrierung
+
+// Compiled-in Fallback-Default fuer die 3 PWM-Kalibrierstufen, falls kein
+// Config-Pointer (LoadMonitorConfigPointers::calStagePwm1/2/3) gesetzt ist.
+// Zur Laufzeit per SETCALPWM1-3/GETCALPWM1-3 ueberschreibbar (siehe
+// stageTargetPwm()). Reihenfolge MUSS aufsteigend sein (Interpolation in
+// calBinInterp() setzt das voraus). Die tatsaechlich wirksame PWM je Stufe
+// (kann z.B. durch die Mindest-PWM "g_minPwm" nach oben begrenzt sein) wird
+// separat in _calStagePwm[] gemerkt und mit abgespeichert.
+static const float CAL_STAGE_PWM[CAL_STAGES] = {40.0f, 70.0f, 100.0f};
+
+// Sicherheits-Timeout fuers Warten auf das Einschwingen der PWM-Rampe
+// zwischen zwei Kalibrierstufen (Slew-Rate ist 10%/s, siehe main.cpp
+// updatePwmMaxApplied() -> max. Sprung 100% dauert ~10s).
+static const uint32_t CAL_SETTLE_TIMEOUT_MS = 12000;
 
 // Live-Stat (optional persistent erweiterbar)
 // Aktuell: nur im RAM (damit keine Flash-Abnutzung entsteht)
@@ -62,9 +77,14 @@ void LoadMonitor::begin(Preferences* prefs,
 
   // Baseline aus Preferences laden
   _calValid = false;
+  for (uint8_t s = 0; s < CAL_STAGES; s++) {
+    _calStagePwm[s] = CAL_STAGE_PWM[s];
+    for (uint8_t i = 0; i < LOAD_BINS; i++) {
+      _calCw[s][i] = 0;
+      _calCcw[s][i] = 0;
+    }
+  }
   for (uint8_t i = 0; i < LOAD_BINS; i++) {
-    _calCw[i] = 0;
-    _calCcw[i] = 0;
     _liveCw[i] = 0;
     _liveCcw[i] = 0;
     _liveCntCw[i] = 0;
@@ -77,22 +97,38 @@ void LoadMonitor::begin(Preferences* prefs,
 
   if (_prefs) {
     bool valid = _prefs->getBool(KEY_CAL_VALID, false);
-    size_t lenCw = _prefs->getBytesLength(KEY_CAL_CW);
+    size_t lenCw  = _prefs->getBytesLength(KEY_CAL_CW);
     size_t lenCcw = _prefs->getBytesLength(KEY_CAL_CCW);
+    size_t lenPwm = _prefs->getBytesLength(KEY_CAL_PWM);
 
-    if (valid && lenCw == (size_t)(LOAD_BINS * sizeof(uint16_t)) && lenCcw == (size_t)(LOAD_BINS * sizeof(uint16_t))) {
-      _prefs->getBytes(KEY_CAL_CW,  _calCw,  lenCw);
-      _prefs->getBytes(KEY_CAL_CCW, _calCcw, lenCcw);
+    const size_t expectBinsLen = sizeof(_calCw); // CAL_STAGES * LOAD_BINS * uint16
+    const size_t expectPwmLen  = sizeof(_calStagePwm);
+
+    // Hinweis: Eine aeltere, einstufige Kalibrierung (frueheres Firmware-
+    // Format, lenCw == LOAD_BINS*sizeof(uint16)) passt nicht mehr zum neuen
+    // 3-Stufen-Format und wird hier bewusst verworfen -> einmalig neu
+    // kalibrieren (SETCAL) nach einem Firmware-Update erforderlich.
+    if (valid && lenCw == expectBinsLen && lenCcw == expectBinsLen) {
+      _prefs->getBytes(KEY_CAL_CW,  _calCw,  expectBinsLen);
+      _prefs->getBytes(KEY_CAL_CCW, _calCcw, expectBinsLen);
       _calValid = true;
+
+      if (lenPwm == expectPwmLen) {
+        _prefs->getBytes(KEY_CAL_PWM, _calStagePwm, expectPwmLen);
+      } else {
+        for (uint8_t s = 0; s < CAL_STAGES; s++) _calStagePwm[s] = CAL_STAGE_PWM[s];
+      }
 
       // Baseline gehoert zu einer bestimmten Load-Spannweite (max. 360°).
       // Wenn sich die Spannweite aendert, passen die Bins nicht mehr.
       const int32_t storedAmax = _prefs->getInt(KEY_CAL_AMAX, 36000);
       if (storedAmax != loadSpanDeg01()) {
         _calValid = false;
-        for (uint8_t i = 0; i < LOAD_BINS; i++) {
-          _calCw[i] = 0;
-          _calCcw[i] = 0;
+        for (uint8_t s = 0; s < CAL_STAGES; s++) {
+          for (uint8_t i = 0; i < LOAD_BINS; i++) {
+            _calCw[s][i] = 0;
+            _calCcw[s][i] = 0;
+          }
         }
       }
     }
@@ -130,6 +166,19 @@ void LoadMonitor::begin(Preferences* prefs,
 
   _lastSampleMs = 0;
   _lastAccSampleMs = 0;
+}
+
+float LoadMonitor::stageTargetPwm(uint8_t stage) const {
+  if (stage >= CAL_STAGES) stage = CAL_STAGES - 1;
+
+  const float* p = (stage == 0) ? _cfg.calStagePwm1
+                  : (stage == 1) ? _cfg.calStagePwm2
+                                 : _cfg.calStagePwm3;
+
+  float v = (p && isfinite(*p)) ? *p : CAL_STAGE_PWM[stage];
+  if (v < 1.0f) v = 1.0f;
+  if (v > 100.0f) v = 100.0f;
+  return v;
 }
 
 float LoadMonitor::effectiveIgnoreDeg() const {
@@ -324,21 +373,28 @@ void LoadMonitor::update(uint32_t nowMs) {
     }
 
     // Progress berechnen (nur informativ)
+    // CAL_STAGES gleich grosse Abschnitte; je Stufe erste Haelfte CW, zweite Haelfte CCW.
     int32_t curDeg01 = 0;
     if (_motion) (void)_motion->getCurrentPositionDeg01(curDeg01);
 
+    const uint32_t stageBase     = ((uint32_t)_stageIdx * 100u) / (uint32_t)CAL_STAGES;
+    const uint32_t stageBaseNext = ((uint32_t)(_stageIdx + 1) * 100u) / (uint32_t)CAL_STAGES;
+    const uint32_t stageSpan     = (stageBaseNext > stageBase) ? (stageBaseNext - stageBase) : 1u;
+    const uint32_t halfSpan      = stageSpan / 2u;
+
     if (_stage == ST_RUN_CW) {
       const int32_t amax = loadSpanDeg01();
-      uint32_t p = (amax > 0) ? (uint32_t)((curDeg01 * 50L) / amax) : 0;
-      if (p > 50) p = 50;
-      _calProgress = (uint8_t)p;
+      uint32_t p = (amax > 0) ? (uint32_t)(((int64_t)curDeg01 * (int64_t)halfSpan) / amax) : 0;
+      if (p > halfSpan) p = halfSpan;
+      _calProgress = (uint8_t)(stageBase + p);
     } else if (_stage == ST_RUN_CCW) {
       const int32_t amax = loadSpanDeg01();
-      uint32_t p = (amax > 0) ? (uint32_t)(((amax - curDeg01) * 50L) / amax) : 0;
-      if (p > 50) p = 50;
-      _calProgress = (uint8_t)(50 + p);
+      const uint32_t secondSpan = stageSpan - halfSpan;
+      uint32_t p = (amax > 0) ? (uint32_t)(((int64_t)(amax - curDeg01) * (int64_t)secondSpan) / amax) : 0;
+      if (p > secondSpan) p = secondSpan;
+      _calProgress = (uint8_t)(stageBase + halfSpan + p);
     } else {
-      _calProgress = 0;
+      _calProgress = (uint8_t)stageBase;
     }
 
     // Stage-Wechsel nur, wenn Motion gerade NICHT aktiv ist
@@ -346,12 +402,24 @@ void LoadMonitor::update(uint32_t nowMs) {
 
     if (!posActive) {
       if (_stage == ST_MOVE_TO_ZERO) {
-        // jetzt CW starten (max. eine Getriebe-Umdrehung)
-        if (_motion && _motion->commandSetPosDeg01(loadSpanDeg01(), nowMs)) {
-          _stage = ST_RUN_CW;
-        } else {
-          _calState = LC_STATE_ERROR;
-          _stage = ST_IDLE;
+        // Position 0 erreicht. PWM-Sollwert fuer Stufe 0 wurde bereits in
+        // startCalibration() angefordert - jetzt auf das Einschwingen warten.
+        _settleStartMs = nowMs;
+        _stage = ST_PWM_SETTLE;
+      } else if (_stage == ST_PWM_SETTLE) {
+        const float targetPwm = stageTargetPwm(_stageIdx);
+        const float livePwm   = safeFPtr(_cfg.pwmMaxAbsLive, targetPwm);
+        const bool settled    = fabsf(livePwm - targetPwm) <= 0.5f;
+        const bool timedOut   = (nowMs - _settleStartMs) >= CAL_SETTLE_TIMEOUT_MS;
+
+        if (settled || timedOut) {
+          // jetzt CW starten (max. eine Getriebe-Umdrehung)
+          if (_motion && _motion->commandSetPosDeg01(loadSpanDeg01(), nowMs)) {
+            _stage = ST_RUN_CW;
+          } else {
+            _calState = LC_STATE_ERROR;
+            _stage = ST_IDLE;
+          }
         }
       } else if (_stage == ST_RUN_CW) {
         // jetzt CCW starten
@@ -362,11 +430,25 @@ void LoadMonitor::update(uint32_t nowMs) {
           _stage = ST_IDLE;
         }
       } else if (_stage == ST_RUN_CCW) {
-        // Fertig -> speichern
-        calFinalizeAndStore();
-        _stage = ST_FINISH;
-        _calState = LC_STATE_DONE;
-        _calProgress = 100;
+        // Diese PWM-Stufe abschliessen
+        calFinalizeStage();
+
+        if ((uint8_t)(_stageIdx + 1) < CAL_STAGES) {
+          // Wir stehen bereits bei 0 (Ziel der eben beendeten CCW-Fahrt) ->
+          // einfach die naechsthoehere PWM-Stufe anfordern und einschwingen lassen.
+          _stageIdx++;
+          calResetAccu();
+          if (_cfg.pwmMaxAbsCmd) *_cfg.pwmMaxAbsCmd = stageTargetPwm(_stageIdx);
+          _settleStartMs = nowMs;
+          _stage = ST_PWM_SETTLE;
+        } else {
+          // Alle Stufen fertig -> speichern + urspruengliche PWM wiederherstellen.
+          calFinalizeAndStore();
+          if (_cfg.pwmMaxAbsCmd) *_cfg.pwmMaxAbsCmd = _calSavedPwmCmd;
+          _stage = ST_FINISH;
+          _calState = LC_STATE_DONE;
+          _calProgress = 100;
+        }
       }
     }
   }
@@ -419,8 +501,18 @@ bool LoadMonitor::startCalibration(uint32_t nowMs) {
 
   calResetAccu();
 
+  // Aktuellen PWM-Sollwert merken, um ihn nach der (vollstaendigen oder
+  // abgebrochenen) Kalibrierfahrt wiederherzustellen.
+  _calSavedPwmCmd = safeFPtr(_cfg.pwmMaxAbsCmd, 100.0f);
+  _stageIdx = 0;
+
+  // Erste Kalibrierstufe anfordern - laeuft dank PWM-Slew-Rampe bereits
+  // parallel zur Anfahrt auf 0 ein (siehe ST_PWM_SETTLE weiter unten).
+  if (_cfg.pwmMaxAbsCmd) *_cfg.pwmMaxAbsCmd = stageTargetPwm(0);
+
   // Stage 0: erst auf 0 fahren (damit immer gleich gestartet wird)
   if (!_motion->commandSetPosDeg01(0, nowMs)) {
+    if (_cfg.pwmMaxAbsCmd) *_cfg.pwmMaxAbsCmd = _calSavedPwmCmd;
     _calState = LC_STATE_ERROR;
     _stage = ST_IDLE;
     _calProgress = 0;
@@ -439,10 +531,17 @@ void LoadMonitor::abortCalibration(uint32_t nowMs) {
     _motion->commandStopSoft();
   }
 
+  // Urspruengliche Laufzeit-PWM wiederherstellen, falls SETCAL sie bereits
+  // veraendert hatte.
+  if (_cfg.pwmMaxAbsCmd && _stage != ST_IDLE) {
+    *_cfg.pwmMaxAbsCmd = _calSavedPwmCmd;
+  }
+
   // Kalibrierung abbrechen
   _stage = ST_IDLE;
   _calState = LC_STATE_ABORT;
   _calProgress = 0;
+  _stageIdx = 0;
 
   // Akkus verwerfen
   calResetAccu();
@@ -451,9 +550,12 @@ void LoadMonitor::abortCalibration(uint32_t nowMs) {
 bool LoadMonitor::deleteCalibration() {
   if (!_prefs) {
     _calValid = false;
-    for (uint8_t i = 0; i < LOAD_BINS; i++) {
-      _calCw[i] = 0;
-      _calCcw[i] = 0;
+    for (uint8_t s = 0; s < CAL_STAGES; s++) {
+      _calStagePwm[s] = CAL_STAGE_PWM[s];
+      for (uint8_t i = 0; i < LOAD_BINS; i++) {
+        _calCw[s][i] = 0;
+        _calCcw[s][i] = 0;
+      }
     }
     return false;
   }
@@ -461,14 +563,18 @@ bool LoadMonitor::deleteCalibration() {
   _prefs->remove(KEY_CAL_VALID);
   _prefs->remove(KEY_CAL_CW);
   _prefs->remove(KEY_CAL_CCW);
+  _prefs->remove(KEY_CAL_PWM);
   _prefs->remove(KEY_CAL_TAMB);
   _prefs->remove(KEY_CAL_TMOT);
   _prefs->remove(KEY_CAL_AMAX);
 
   _calValid = false;
-  for (uint8_t i = 0; i < LOAD_BINS; i++) {
-    _calCw[i] = 0;
-    _calCcw[i] = 0;
+  for (uint8_t s = 0; s < CAL_STAGES; s++) {
+    _calStagePwm[s] = CAL_STAGE_PWM[s];
+    for (uint8_t i = 0; i < LOAD_BINS; i++) {
+      _calCw[s][i] = 0;
+      _calCcw[s][i] = 0;
+    }
   }
   return true;
 }
@@ -526,11 +632,12 @@ void LoadMonitor::abortLiveMoveTracking() {
   }
 }
 
-uint16_t LoadMonitor::getCalBin(uint8_t dir, uint8_t idx) const {
+uint16_t LoadMonitor::getCalBin(uint8_t stage, uint8_t dir, uint8_t idx) const {
   if (!_calValid) return 0;
   if (idx >= LOAD_BINS) return 0;
-  if (dir == 2) return _calCcw[idx];
-  return _calCw[idx];
+  if (stage >= CAL_STAGES) stage = CAL_STAGES - 1;
+  if (dir == 2) return _calCcw[stage][idx];
+  return _calCw[stage][idx];
 }
 
 uint16_t LoadMonitor::getLiveBin(uint8_t dir, uint8_t idx) const {
@@ -545,12 +652,47 @@ uint16_t LoadMonitor::getAccBin(uint8_t dir, uint8_t idx) const {
   return _accCw[idx];
 }
 
+// Interpoliert die Baseline (dir/idx) anhand der aktuellen Live-PWM
+// (_cfg.pwmMaxAbsLive) zwischen den CAL_STAGES gelernten PWM-Stufen.
+// Ausserhalb des kalibrierten Bereichs wird auf die naechste Randstufe
+// geclamped (keine Extrapolation, da das Verhalten dort unbekannt ist).
+uint16_t LoadMonitor::calBinInterp(uint8_t dir, uint8_t idx) const {
+  if (!_calValid) return 0;
+  if (idx >= LOAD_BINS) return 0;
+
+  const float pwmNow = safeFPtr(_cfg.pwmMaxAbsLive, _calStagePwm[CAL_STAGES - 1]);
+
+  if (pwmNow <= _calStagePwm[0]) {
+    return (dir == 2) ? _calCcw[0][idx] : _calCw[0][idx];
+  }
+  if (pwmNow >= _calStagePwm[CAL_STAGES - 1]) {
+    return (dir == 2) ? _calCcw[CAL_STAGES - 1][idx] : _calCw[CAL_STAGES - 1][idx];
+  }
+
+  for (uint8_t s = 0; s + 1 < CAL_STAGES; s++) {
+    const float lo = _calStagePwm[s];
+    const float hi = _calStagePwm[s + 1];
+    if (pwmNow >= lo && pwmNow <= hi) {
+      const uint16_t vLo = (dir == 2) ? _calCcw[s][idx]     : _calCw[s][idx];
+      const uint16_t vHi = (dir == 2) ? _calCcw[s + 1][idx] : _calCw[s + 1][idx];
+      // Eine der beiden Nachbarstufen hat an dieser Bin keinen gueltigen
+      // Wert (z.B. nie durchfahren) -> keine sinnvolle Interpolation moeglich.
+      if (vLo == 0 || vHi == 0) return 0;
+      const float span = hi - lo;
+      const float frac = (span > 0.01f) ? ((pwmNow - lo) / span) : 0.0f;
+      return (uint16_t)(vLo + frac * ((float)vHi - (float)vLo) + 0.5f);
+    }
+  }
+
+  return (dir == 2) ? _calCcw[CAL_STAGES - 1][idx] : _calCw[CAL_STAGES - 1][idx];
+}
+
 int16_t LoadMonitor::getDeltaPct(uint8_t dir, uint8_t idx) const {
   if (!_calValid) return 0;
   if (idx >= LOAD_BINS) return 0;
 
-  uint16_t base = (dir == 2) ? _calCcw[idx] : _calCw[idx];
-  uint16_t live = (dir == 2) ? _liveCcw[idx] : _liveCw[idx];
+  const uint16_t base = calBinInterp(dir, idx);
+  const uint16_t live = (dir == 2) ? _liveCcw[idx] : _liveCw[idx];
 
   if (base == 0 || live == 0) return 0;
 
@@ -598,23 +740,22 @@ void LoadMonitor::calAccumulateSample(uint8_t dir, uint8_t bin, uint16_t mv) {
   }
 }
 
-void LoadMonitor::calFinalizeAndStore() {
-  // Aus Sum/Count -> Mittelwert
+void LoadMonitor::calFinalizeStage() {
+  // Aus Sum/Count -> Mittelwert, nur fuer die aktuelle PWM-Stufe (_stageIdx)
   for (uint8_t i = 0; i < LOAD_BINS; i++) {
-    if (_cntCw[i] > 0) {
-      _calCw[i] = (uint16_t)(_sumCw[i] / (uint32_t)_cntCw[i]);
-    } else {
-      _calCw[i] = 0;
-    }
-
-    if (_cntCcw[i] > 0) {
-      _calCcw[i] = (uint16_t)(_sumCcw[i] / (uint32_t)_cntCcw[i]);
-    } else {
-      _calCcw[i] = 0;
-    }
+    _calCw[_stageIdx][i]  = (_cntCw[i]  > 0) ? (uint16_t)(_sumCw[i]  / (uint32_t)_cntCw[i])  : 0;
+    _calCcw[_stageIdx][i] = (_cntCcw[i] > 0) ? (uint16_t)(_sumCcw[i] / (uint32_t)_cntCcw[i]) : 0;
   }
 
-  // Baseline valid
+  // Tatsaechlich angewendete PWM dieser Stufe merken (kann z.B. durch die
+  // Mindest-PWM "g_minPwm" nach oben begrenzt worden sein) - wichtig fuer
+  // eine korrekte Interpolation in calBinInterp().
+  _calStagePwm[_stageIdx] = safeFPtr(_cfg.pwmMaxAbsLive, stageTargetPwm(_stageIdx));
+}
+
+void LoadMonitor::calFinalizeAndStore() {
+  // Baseline valid (alle CAL_STAGES Stufen wurden ueber calFinalizeStage()
+  // bereits in _calCw/_calCcw/_calStagePwm abgelegt)
   _calValid = true;
 
   // Temperaturen bei der Kalibrierung merken (optional fuer spaetere Interpretation)
@@ -628,8 +769,9 @@ void LoadMonitor::calFinalizeAndStore() {
   // In Preferences speichern
   if (_prefs) {
     _prefs->putBool(KEY_CAL_VALID, true);
-    _prefs->putBytes(KEY_CAL_CW,  _calCw,  LOAD_BINS * sizeof(uint16_t));
-    _prefs->putBytes(KEY_CAL_CCW, _calCcw, LOAD_BINS * sizeof(uint16_t));
+    _prefs->putBytes(KEY_CAL_CW,  _calCw,  sizeof(_calCw));
+    _prefs->putBytes(KEY_CAL_CCW, _calCcw, sizeof(_calCcw));
+    _prefs->putBytes(KEY_CAL_PWM, _calStagePwm, sizeof(_calStagePwm));
     _prefs->putFloat(KEY_CAL_TAMB, tA);
     _prefs->putFloat(KEY_CAL_TMOT, tM);
     _prefs->putInt(KEY_CAL_AMAX, loadSpanDeg01());
@@ -760,8 +902,8 @@ void LoadMonitor::liveEvaluateAndWarn() {
 
     int16_t d = getDeltaPct(dirSel, i);
 
-    // Nur dann zaehlen, wenn Baseline und Live wirklich vorhanden
-    uint16_t base = (dirSel == 2) ? _calCcw[i] : _calCw[i];
+    // Nur dann zaehlen, wenn Baseline (PWM-interpoliert) und Live wirklich vorhanden
+    uint16_t base = calBinInterp(dirSel, i);
     uint16_t live = (dirSel == 2) ? _liveCcw[i] : _liveCw[i];
     if (base == 0 || live == 0) continue;
 

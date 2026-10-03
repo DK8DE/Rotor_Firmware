@@ -10,6 +10,16 @@ class TempSensors;
 // Anzahl Bins ueber eine Getriebe-Umdrehung (max. 360°, Breite = loadSpan / LOAD_BINS)
 static const uint8_t LOAD_BINS = 72;
 
+// Anzahl PWM-Stufen fuer die automatische Kalibrierfahrt (SETCAL).
+// Hintergrund: Der gemessene Motorstrom ist nicht PWM-unabhaengig (gleiche
+// mechanische Last zieht bei kleinerer PWM weniger Strom). Eine Baseline, die
+// nur bei einer PWM (z.B. 100%) gelernt wurde, fuehrt bei abweichender
+// Betriebs-PWM (SETPWM/SETMAXPWM) zu falschen SW_DRAG_INCREASE/_DECREASE
+// Warnungen. Deshalb kalibrieren wir bei CAL_STAGES verschiedenen PWM-Stufen
+// (siehe CAL_STAGE_PWM in LoadMonitor.cpp) und interpolieren zur Laufzeit
+// anhand der aktuell angewendeten PWM zwischen den gelernten Stufen.
+static const uint8_t CAL_STAGES = 3;
+
 // Kalibrier-Status (fuer GETCALSTATE)
 enum LoadCalPublicState : uint8_t {
   LC_STATE_IDLE    = 0,
@@ -54,6 +64,30 @@ struct LoadMonitorConfigPointers {
   // LoadMonitor nutzt davon hoechstens 36000 (eine Getriebe-Umdrehung).
   // nullptr / <=0 -> 36000.
   const int32_t* axisMaxDeg01 = nullptr;
+
+  // ----------------------------------------------------------------------
+  // PWM-Kopplung fuer die automatische 3-Stufen-Kalibrierfahrt (SETCAL).
+  // ----------------------------------------------------------------------
+  // pwmMaxAbsCmd: Laufzeit-Sollwert (main.cpp "g_pwmMaxAbsCmd", SETPWM/SETMAXPWM).
+  // LoadMonitor setzt dies waehrend SETCAL selbststaendig auf die 3 Kalibrier-
+  // stufen (siehe CAL_STAGE_PWM) und stellt am Ende (bzw. bei ABORTCAL) den
+  // zuvor aktiven Wert wieder her.
+  float* pwmMaxAbsCmd = nullptr;
+
+  // pwmMaxAbsLive: geglaetteter PWM-Istwert (main.cpp "g_pwmMaxAbs"), den der
+  // MotionController tatsaechlich anwendet. Wird genutzt, um (a) waehrend
+  // SETCAL auf das Erreichen der Zielstufe zu warten (Slew-Rampe) und (b) um
+  // die Baseline zur Laufzeit PWM-abhaengig zwischen den 3 Kalibrierstufen zu
+  // interpolieren (siehe getDeltaPct()/calBinInterp()).
+  const float* pwmMaxAbsLive = nullptr;
+
+  // Konfigurierbare Ziel-PWM je Kalibrierstufe (SETCALPWM1-3/GETCALPWM1-3,
+  // main.cpp "g_calStagePwm1/2/3"). nullptr -> Default aus CAL_STAGE_PWM
+  // (LoadMonitor.cpp) wird verwendet. Muessen aufsteigend bleiben, siehe
+  // Validierung in Rs485Dispatcher.cpp (SETCALPWM1-3).
+  float* calStagePwm1 = nullptr;
+  float* calStagePwm2 = nullptr;
+  float* calStagePwm3 = nullptr;
 };
 class LoadMonitor {
 public:
@@ -98,6 +132,13 @@ public:
   // True, solange die Kalibrierfahrt laeuft (wichtig fuer Deadman/Keepalive)
   bool isCalibrationRunning() const { return _calState == LC_STATE_RUNNING; }
 
+  // Welche der CAL_STAGES PWM-Stufen aktuell laeuft (1..CAL_STAGES).
+  // 0, wenn keine Kalibrierung aktiv ist (IDLE/DONE/ABORT/ERROR).
+  uint8_t getCalStageIdx() const {
+    return (_calState == LC_STATE_RUNNING) ? (uint8_t)(_stageIdx + 1) : 0;
+  }
+  uint8_t getCalStageCount() const { return CAL_STAGES; }
+
   // Baseline vorhanden?
   bool hasCalibration() const { return _calValid; }
 
@@ -113,7 +154,8 @@ public:
   // Abfragen (fuer RS485)
   // ----------------------------------------------------------
   // dir: 1=CW/positiv (IS1), 2=CCW/negativ (IS2)
-  uint16_t getCalBin(uint8_t dir, uint8_t idx) const;
+  // stage: 0..CAL_STAGES-1 (rohe, unkalibrierte Einzelstufe fuer GETCALBINS)
+  uint16_t getCalBin(uint8_t stage, uint8_t dir, uint8_t idx) const;
   uint16_t getLiveBin(uint8_t dir, uint8_t idx) const;
   uint16_t getAccBin(uint8_t dir, uint8_t idx) const;
   int16_t  getDeltaPct(uint8_t dir, uint8_t idx) const;
@@ -137,10 +179,16 @@ private:
   enum CalStage : uint8_t {
     ST_IDLE = 0,
     ST_MOVE_TO_ZERO,
+    ST_PWM_SETTLE,  // warten, bis die PWM-Rampe die Zielstufe erreicht hat
     ST_RUN_CW,
     ST_RUN_CCW,
     ST_FINISH,
   };
+
+  // Konfigurierte Ziel-PWM der Stufe (0..CAL_STAGES-1), mit Fallback auf
+  // CAL_STAGE_PWM, falls kein Config-Pointer gesetzt ist (siehe
+  // LoadMonitorConfigPointers::calStagePwm1/2/3).
+  float stageTargetPwm(uint8_t stage) const;
 
   uint8_t calcBinIndex(int32_t deg01) const;
   uint16_t binCenterDeg(uint8_t idx) const;
@@ -153,7 +201,18 @@ private:
 
   void calResetAccu();
   void calAccumulateSample(uint8_t dir, uint8_t bin, uint16_t mv);
+  // Schliesst die aktuell laufende PWM-Stufe ab: Mittelwerte aus den
+  // Akkumulatoren in _calCw[_stageIdx]/_calCcw[_stageIdx] uebernehmen und die
+  // tatsaechlich angewendete PWM dieser Stufe merken (_calStagePwm).
+  void calFinalizeStage();
+  // Schliesst die komplette (alle CAL_STAGES) Kalibrierfahrt ab: _calValid
+  // setzen und alles persistent speichern.
   void calFinalizeAndStore();
+  // Baseline-Strom (dir/idx) interpoliert anhand der aktuellen Live-PWM
+  // (_cfg.pwmMaxAbsLive) zwischen den CAL_STAGES gelernten Stufen. Ausserhalb
+  // des kalibrierten Bereichs wird auf die naechste Randstufe geclamped
+  // (keine Extrapolation).
+  uint16_t calBinInterp(uint8_t dir, uint8_t idx) const;
 
   void liveAccumulateSample(uint8_t dir, uint8_t bin, uint16_t mv);
   void accAccumulateSample(uint8_t dir, uint8_t bin, uint16_t mv);
@@ -168,10 +227,13 @@ private:
   TempSensors* _temps = nullptr;
   LoadMonitorConfigPointers _cfg{};
 
-  // Baseline (Kalibrierung)
+  // Baseline (Kalibrierung) - je PWM-Stufe (siehe CAL_STAGES/CAL_STAGE_PWM)
   bool _calValid = false;
-  uint16_t _calCw[LOAD_BINS] = {0};
-  uint16_t _calCcw[LOAD_BINS] = {0};
+  uint16_t _calCw[CAL_STAGES][LOAD_BINS] = {};
+  uint16_t _calCcw[CAL_STAGES][LOAD_BINS] = {};
+  // Tatsaechlich angewendete PWM je Stufe (aufsteigend sortiert), fuer die
+  // Interpolation in calBinInterp(). Default = nominale CAL_STAGE_PWM-Werte.
+  float _calStagePwm[CAL_STAGES] = {40.0f, 70.0f, 100.0f};
 
   // Live-Stat (geglaettet)
   uint16_t _liveCw[LOAD_BINS] = {0};
@@ -200,6 +262,13 @@ private:
   uint8_t _calState = LC_STATE_IDLE;
   uint8_t _calProgress = 0;
   CalStage _stage = ST_IDLE;
+
+  // Welche der CAL_STAGES PWM-Stufen aktuell laeuft (0..CAL_STAGES-1).
+  uint8_t _stageIdx = 0;
+  // PWM-Sollwert, der vor SETCAL aktiv war (wird am Ende/bei ABORTCAL wiederhergestellt).
+  float _calSavedPwmCmd = 100.0f;
+  // Zeitpunkt, seit dem auf das Erreichen der naechsten PWM-Stufe gewartet wird.
+  uint32_t _settleStartMs = 0;
 
   // Kalibrier-Bewegungsparameter
   int32_t _calStartDeg01 = 0;

@@ -381,6 +381,35 @@ static bool parseSemiColon3I32Params(const String& in, int32_t& a, int32_t& b, i
   return true;
 }
 
+// Vier durch ';' getrennte int32 (GETCALBINS: STAGE;DIR;START;COUNT) — kein substring/trim-Kopieren.
+static bool parseSemiColon4I32Params(const String& in, int32_t& a, int32_t& b, int32_t& c, int32_t& d) {
+  const char* s = in.c_str();
+  const size_t len = in.length();
+  size_t lo = 0;
+  size_t hi = len;
+  while (lo < hi && (s[lo] == ' ' || s[lo] == '\t')) lo++;
+  while (hi > lo && (s[hi - 1] == ' ' || s[hi - 1] == '\t')) hi--;
+  if (lo >= hi) return false;
+
+  const char* p = s + lo;
+  const size_t n = hi - lo;
+  const char* semi1 = (const char*)memchr(p, ';', n);
+  if (!semi1) return false;
+  const size_t rest1 = (size_t)(p + n - (semi1 + 1));
+  const char* semi2 = (const char*)memchr(semi1 + 1, ';', rest1);
+  if (!semi2) return false;
+  const size_t rest2 = (size_t)(p + n - (semi2 + 1));
+  const char* semi3 = (const char*)memchr(semi2 + 1, ';', rest2);
+  if (!semi3) return false;
+
+  const char* end = p + n;
+  a = parseI32Span(p, semi1);
+  b = parseI32Span(semi1 + 1, semi2);
+  c = parseI32Span(semi2 + 1, semi3);
+  d = parseI32Span(semi3 + 1, end);
+  return true;
+}
+
 static uint8_t parseU8Param(const String& p) {
   uint32_t v = parseU32Param(p);
   if (v > 255) v = 255;
@@ -1705,10 +1734,127 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   }
 
   // ------------------------------------------------------------------------
+  // GETCALPWM1-3 / SETCALPWM1-3 (Ziel-PWM der 3 automatischen Kalibrierstufen)
+  // ------------------------------------------------------------------------
+  // Stellt die PWM-Werte ein, mit denen SETCAL seine 3 automatischen
+  // Kalibrierfahrten durchfuehrt (Default 40% / 70% / 100%, siehe SETCAL).
+  // Muessen aufsteigend bleiben (Stufe1 < Stufe2 < Stufe3, Mindestabstand
+  // 5%), sonst funktioniert die PWM-Interpolation der Baseline nicht mehr
+  // sinnvoll -> wird bei jedem SETCALPWMx gegen die jeweiligen Nachbarstufen
+  // geprueft (NAK ...:ORDER bei Verstoss).
+  // Wertebereich: 1,0 .. 100,0 %. Persistent (NVS cpw1/cpw2/cpw3).
+  // Waehrend einer laufenden Kalibrierfahrt (SETCAL) nicht aenderbar
+  // (NAK ...:BUSY_CAL), da die Firmware die Stufen dann selbst durchfaehrt.
+  // ------------------------------------------------------------------------
+  if (cmd == "GETCALPWM1") {
+    const float v = (_cfg.calStagePwm1) ? *_cfg.calStagePwm1 : 40.0f;
+    if (shouldReply) sendAck(f.master, "GETCALPWM1", formatFloatComma(v, 1));
+    return;
+  }
+
+  if (cmd == "GETCALPWM2") {
+    const float v = (_cfg.calStagePwm2) ? *_cfg.calStagePwm2 : 70.0f;
+    if (shouldReply) sendAck(f.master, "GETCALPWM2", formatFloatComma(v, 1));
+    return;
+  }
+
+  if (cmd == "GETCALPWM3") {
+    const float v = (_cfg.calStagePwm3) ? *_cfg.calStagePwm3 : 100.0f;
+    if (shouldReply) sendAck(f.master, "GETCALPWM3", formatFloatComma(v, 1));
+    return;
+  }
+
+  if (cmd == "SETCALPWM1") {
+    if (_loadMon && _loadMon->isCalibrationRunning()) {
+      if (shouldReply) sendNak(f.master, "SETCALPWM1", "BUSY_CAL");
+      return;
+    }
+
+    float v = parseFloatParam(f.params);
+    if (v < 1.0f) v = 1.0f;
+    if (v > 100.0f) v = 100.0f;
+
+    const float s2 = (_cfg.calStagePwm2) ? *_cfg.calStagePwm2 : 70.0f;
+    if (v > (s2 - 5.0f)) {
+      if (shouldReply) sendNak(f.master, "SETCALPWM1", "ORDER");
+      return;
+    }
+
+    persistPutFloat("cpw1", _cfg.calStagePwm1, v);
+    if (shouldReply) sendAck(f.master, "SETCALPWM1", formatFloatComma(v, 1));
+    serialEventState("SETCALPWM1");
+    return;
+  }
+
+  if (cmd == "SETCALPWM2") {
+    if (_loadMon && _loadMon->isCalibrationRunning()) {
+      if (shouldReply) sendNak(f.master, "SETCALPWM2", "BUSY_CAL");
+      return;
+    }
+
+    float v = parseFloatParam(f.params);
+    if (v < 1.0f) v = 1.0f;
+    if (v > 100.0f) v = 100.0f;
+
+    const float s1 = (_cfg.calStagePwm1) ? *_cfg.calStagePwm1 : 40.0f;
+    const float s3 = (_cfg.calStagePwm3) ? *_cfg.calStagePwm3 : 100.0f;
+    if (v < (s1 + 5.0f) || v > (s3 - 5.0f)) {
+      if (shouldReply) sendNak(f.master, "SETCALPWM2", "ORDER");
+      return;
+    }
+
+    persistPutFloat("cpw2", _cfg.calStagePwm2, v);
+    if (shouldReply) sendAck(f.master, "SETCALPWM2", formatFloatComma(v, 1));
+    serialEventState("SETCALPWM2");
+    return;
+  }
+
+  if (cmd == "SETCALPWM3") {
+    if (_loadMon && _loadMon->isCalibrationRunning()) {
+      if (shouldReply) sendNak(f.master, "SETCALPWM3", "BUSY_CAL");
+      return;
+    }
+
+    float v = parseFloatParam(f.params);
+    if (v < 1.0f) v = 1.0f;
+    if (v > 100.0f) v = 100.0f;
+
+    const float s2 = (_cfg.calStagePwm2) ? *_cfg.calStagePwm2 : 70.0f;
+    if (v < (s2 + 5.0f)) {
+      if (shouldReply) sendNak(f.master, "SETCALPWM3", "ORDER");
+      return;
+    }
+
+    persistPutFloat("cpw3", _cfg.calStagePwm3, v);
+    if (shouldReply) sendAck(f.master, "SETCALPWM3", formatFloatComma(v, 1));
+    serialEventState("SETCALPWM3");
+    return;
+  }
+
+  // ------------------------------------------------------------------------
   // SETCAL (Kalibrierfahrt starten)
   // ------------------------------------------------------------------------
-  // Fuehrt intern eine Kalibrierfahrt aus: 0 -> 360 -> 0
-  // Dabei werden geglaettete Stromwerte pro Winkel-Bin (72) gespeichert.
+  // Fuehrt automatisch 3 komplette Kalibrierfahrten (je 0 -> 360 -> 0) bei
+  // 3 verschiedenen PWM-Stufen durch (einstellbar per SETCALPWM1-3, Default
+  // 40% / 70% / 100%). Dabei werden je Stufe geglaettete Stromwerte
+  // pro Winkel-Bin (72) gespeichert.
+  //
+  // Hintergrund: Der gemessene Motorstrom ist nicht PWM-unabhaengig - bei
+  // gleicher mechanischer Last zieht der Motor bei kleinerer PWM (SETPWM/
+  // SETMAXPWM) weniger Strom. Mit nur einer Baseline wuerde Betrieb bei
+  // abweichender PWM faelschlich SW_DRAG_INCREASE/SW_DRAG_DECREASE ausloesen.
+  // Die 3 Stufen erlauben eine PWM-abhaengige Interpolation der Baseline zur
+  // Laufzeit (siehe GETDELTABINS/getDeltaPct()).
+  //
+  // Waehrend SETCAL steuert die Firmware die Laufzeit-PWM (SETPWM/SETMAXPWM-
+  // Sollwert) selbst - der Master sollte daher waehrend einer laufenden
+  // Kalibrierung keine SETPWM/SETMAXPWM-Befehle senden (werden mit
+  // NAK ...:BUSY_CAL abgewiesen). Nach Abschluss (oder ABORTCAL) wird der
+  // zuvor aktive PWM-Sollwert automatisch wiederhergestellt.
+  //
+  // Da der Rotor i.d.R. nur einmal (oder nach einem Lastwechsel) kalibriert
+  // werden muss, dauert SETCAL entsprechend laenger (3x Hin-/Rueckfahrt statt
+  // 1x) - Fortschritt via GETCALSTATE (STATE;PROGRESS;STAGE).
   //
   // Voraussetzungen:
   // - REFF muss bereits gemacht sein.
@@ -1807,11 +1953,13 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   // GETCALSTATE (Kalibrierstatus)
   // ------------------------------------------------------------------------
   // Antwort:
-  //   #<DEV>:<MASTER>:ACK_GETCALSTATE:<STATE>;<PROGRESS>:<CS>$
+  //   #<DEV>:<MASTER>:ACK_GETCALSTATE:<STATE>;<PROGRESS>;<STAGE>:<CS>$
   //
   // STATE:
   //   0=IDLE, 1=RUNNING, 2=DONE, 3=ABORT, 4=ERROR
-  // PROGRESS: 0..100
+  // PROGRESS: 0..100 (ueber alle 3 PWM-Stufen hinweg)
+  // STAGE: 0 = keine Stufe aktiv (IDLE/DONE/ABORT/ERROR)
+  //        1..3 = aktuell laufende PWM-Kalibrierstufe (siehe SETCAL)
   // ------------------------------------------------------------------------
   if (cmd == "GETCALSTATE") {
     if (!_loadMon) {
@@ -1820,10 +1968,12 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     }
 
     String payload;
-    payload.reserve(24);
+    payload.reserve(32);
     payload += String(_loadMon->getCalState());
     payload += ";";
     payload += String(_loadMon->getCalProgress());
+    payload += ";";
+    payload += String(_loadMon->getCalStageIdx());
 
     if (shouldReply) sendAck(f.master, "GETCALSTATE", payload);
     return;
@@ -1896,24 +2046,95 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   }
 
   // ------------------------------------------------------------------------
-  // GETCALBINS / GETLIVEBINS / GETACCBINS / GETDELTABINS (Paging, 12 Werte pro Page)
+  // GETCALBINS (Paging, 12 Werte pro Page, je PWM-Kalibrierstufe)
+  // ------------------------------------------------------------------------
+  // Request Params:
+  //   <STAGE>;<DIR>;<START>;<COUNT>
+  //     STAGE: 1..3 (siehe SETCAL / GETCALSTATE, Default 40%/70%/100% PWM)
+  //     DIR: 1=CW(positiv/IS1)  2=CCW(negativ/IS2)
+  //
+  // Antwort:
+  //   #<DEV>:<MASTER>:ACK_GETCALBINS:<STAGE>;<DIR>;<START>;<COUNT>;<V0>;...;<Vn>:<CS>$
+  //
+  // Werte: Strom in mV (unkalibrierte Rohwerte dieser einzelnen Stufe).
+  // Hinweis: Die tatsaechlich fuer die Drag-Warnung verwendete, PWM-
+  // interpolierte Baseline liefert GETDELTABINS (dort nicht stufenbezogen).
+  // ------------------------------------------------------------------------
+  if (cmd == "GETCALBINS") {
+    if (!_loadMon) {
+      if (shouldReply) sendNak(f.master, "GETCALBINS", "NOLOAD");
+      return;
+    }
+
+    int32_t stage = 0;
+    int32_t dir = 0;
+    int32_t start = 0;
+    int32_t count = 0;
+    if (!parseSemiColon4I32Params(f.params, stage, dir, start, count)) {
+      if (shouldReply) sendNak(f.master, "GETCALBINS", "PARAM");
+      return;
+    }
+
+    if (!(stage == 1 || stage == 2 || stage == 3)) {
+      if (shouldReply) sendNak(f.master, "GETCALBINS", "STAGE");
+      return;
+    }
+
+    if (!(dir == 1 || dir == 2)) {
+      if (shouldReply) sendNak(f.master, "GETCALBINS", "DIR");
+      return;
+    }
+
+    if (start < 0) start = 0;
+    if (start > (int32_t)(LOAD_BINS - 1)) start = (int32_t)(LOAD_BINS - 1);
+
+    if (count < 1) count = 1;
+    if (count > 12) count = 12;
+
+    int32_t maxCount = (int32_t)LOAD_BINS - start;
+    if (count > maxCount) count = maxCount;
+
+    String payload;
+    payload.reserve(24 + (uint32_t)count * 7);
+    payload += (int)stage;
+    payload += ";";
+    payload += (int)dir;
+    payload += ";";
+    payload += (int)start;
+    payload += ";";
+    payload += (int)count;
+
+    for (int32_t i = 0; i < count; i++) {
+      payload += ";";
+      const uint8_t idx = (uint8_t)(start + i);
+      const uint16_t v = _loadMon->getCalBin((uint8_t)(stage - 1), (uint8_t)dir, idx);
+      payload += (unsigned int)v;
+    }
+
+    if (shouldReply) sendAck(f.master, "GETCALBINS", payload);
+    return;
+  }
+
+  // ------------------------------------------------------------------------
+  // GETLIVEBINS / GETACCBINS / GETDELTABINS (Paging, 12 Werte pro Page)
   // ------------------------------------------------------------------------
   // Request Params:
   //   <DIR>;<START>;<COUNT>
   //     DIR: 1=CW(positiv/IS1)  2=CCW(negativ/IS2)
   //
   // Antwort:
-  //   #<DEV>:<MASTER>:ACK_GETCALBINS:<DIR>;<START>;<COUNT>;<V0>;...;<Vn>:<CS>$
   //   #<DEV>:<MASTER>:ACK_GETLIVEBINS:<DIR>;<START>;<COUNT>;<V0>;...;<Vn>:<CS>$
   //   #<DEV>:<MASTER>:ACK_GETACCBINS:<DIR>;<START>;<COUNT>;<V0>;...;<Vn>:<CS>$
   //   #<DEV>:<MASTER>:ACK_GETDELTABINS:<DIR>;<START>;<COUNT>;<V0>;...;<Vn>:<CS>$
   //
   // Werte:
-  //   - CAL/LIVE: Strom in mV
-  //   - DELTA: Prozent (int), kann negativ sein
+  //   - LIVE: Strom in mV
+  //   - DELTA: Prozent (int, kann negativ sein) - live vs. PWM-interpolierte
+  //     Baseline (siehe LoadMonitor::calBinInterp/getDeltaPct). Das ist genau
+  //     der Wert, der auch fuer SW_DRAG_INCREASE/SW_DRAG_DECREASE verwendet wird.
   // ------------------------------------------------------------------------
   auto handleBins = [&](const char* cmdName, uint8_t which) {
-    // which: 0=cal, 1=live, 2=acc, 3=delta
+    // which: 1=live, 2=acc, 3=delta
     if (!_loadMon) {
       if (shouldReply) sendNak(f.master, cmdName, "NOLOAD");
       return;
@@ -1955,10 +2176,7 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
       payload += ";";
       const uint8_t idx = (uint8_t)(start + i);
 
-      if (which == 0) {
-        const uint16_t v = _loadMon->getCalBin((uint8_t)dir, idx);
-        payload += (unsigned int)v;
-      } else if (which == 1) {
+      if (which == 1) {
         const uint16_t v = _loadMon->getLiveBin((uint8_t)dir, idx);
         payload += (unsigned int)v;
       } else if (which == 2) {
@@ -1972,11 +2190,6 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
 
     if (shouldReply) sendAck(f.master, cmdName, payload);
   };
-
-  if (cmd == "GETCALBINS") {
-    handleBins("GETCALBINS", 0);
-    return;
-  }
 
   if (cmd == "GETLIVEBINS") {
     handleBins("GETLIVEBINS", 1);
@@ -3006,6 +3219,13 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   }
 
   if (cmd == "SETMAXPWM") {
+    // Waehrend einer laufenden SETCAL-Kalibrierfahrt steuert die Firmware die
+    // Laufzeit-PWM selbst (3 Stufen) - ein SETMAXPWM wuerde das stoeren.
+    if (_loadMon && _loadMon->isCalibrationRunning()) {
+      if (shouldReply) sendNak(f.master, "SETMAXPWM", "BUSY_CAL");
+      return;
+    }
+
     const float v = clampPercent(parseFloatParam(f.params));
 
     // persistent speichern
@@ -3039,6 +3259,13 @@ if (cmd == "GETPWM") {
 
 // SETPWM: setzt nur den Laufzeitwert (ohne Speichern).
 if (cmd == "SETPWM") {
+  // Waehrend einer laufenden SETCAL-Kalibrierfahrt steuert die Firmware die
+  // Laufzeit-PWM selbst (3 Stufen) - ein SETPWM wuerde das stoeren.
+  if (_loadMon && _loadMon->isCalibrationRunning()) {
+    if (shouldReply) sendNak(f.master, "SETPWM", "BUSY_CAL");
+    return;
+  }
+
   const float v = clampPercent(parseFloatParam(f.params));
 
   if (!_cfg.pwmMaxAbsRuntime) {

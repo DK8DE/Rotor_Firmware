@@ -579,6 +579,13 @@ static uint8_t g_dragPersistMoves = 3;     // wie viele grosse Fahrten hinterein
 static float g_windPeakPct      = 60.0f; // Peak-Schwellwert (%)
 static float g_windCoherenceMin = 55.0f; // Kohaerenz-Minimum (%)
 
+// Ziel-PWM der 3 automatischen Kalibrierstufen (SETCAL), per SETCALPWM1-3/
+// GETCALPWM1-3 einstellbar (NVS cpw1/cpw2/cpw3). Muessen aufsteigend bleiben
+// (Mindestabstand 5%, wird beim SETCALPWMx geprueft) - siehe LoadMonitor.cpp.
+static float g_calStagePwm1 = 40.0f;
+static float g_calStagePwm2 = 70.0f;
+static float g_calStagePwm3 = 100.0f;
+
 // Wind- & Richtungssensor (RS485) aktivieren/deaktivieren
 // 1 = aktiv (Sensor wird abgefragt)
 // 0 = aus   (keine Abfragen, Rueckgabe immer 0)
@@ -975,6 +982,11 @@ static void loadPreferencesIntoGlobals() {
   g_windPeakPct        = g_prefs.getFloat("wpk", g_windPeakPct);
   g_windCoherenceMin   = g_prefs.getFloat("wco", g_windCoherenceMin);
 
+  // Ziel-PWM der 3 automatischen Kalibrierstufen (SETCAL)
+  g_calStagePwm1       = g_prefs.getFloat("cpw1", g_calStagePwm1);
+  g_calStagePwm2       = g_prefs.getFloat("cpw2", g_calStagePwm2);
+  g_calStagePwm3       = g_prefs.getFloat("cpw3", g_calStagePwm3);
+
   // Anemometer-Offset (km/h)
   g_anemoOffsetKmh     = g_prefs.getFloat("ano", g_anemoOffsetKmh);
 
@@ -1351,6 +1363,19 @@ void setup() {
   lcfg.windCoherenceMin = &g_windCoherenceMin;
   lcfg.axisMaxDeg01 = &g_axisMaxDeg01;
 
+  // PWM-Kopplung fuer die automatische 3-Stufen-Kalibrierfahrt (SETCAL):
+  // LoadMonitor steuert waehrend SETCAL den Laufzeit-Sollwert selbst und
+  // liest den geglaetteten Istwert, um auf das Einschwingen zu warten bzw.
+  // die Baseline PWM-abhaengig zu interpolieren.
+  lcfg.pwmMaxAbsCmd = &g_pwmMaxAbsCmd;
+  lcfg.pwmMaxAbsLive = &g_pwmMaxAbs;
+
+  // Ziel-PWM der 3 Kalibrierstufen (SETCALPWM1-3), ersetzt die compiled-in
+  // Default-Werte in LoadMonitor.cpp (CAL_STAGE_PWM) zur Laufzeit.
+  lcfg.calStagePwm1 = &g_calStagePwm1;
+  lcfg.calStagePwm2 = &g_calStagePwm2;
+  lcfg.calStagePwm3 = &g_calStagePwm3;
+
   // Preferences sind optional (falls begin() fehlschlaegt):
   // Ohne Preferences laeuft LoadMonitor trotzdem, speichert aber nichts persistent.
   loadMon.begin(g_prefsOk ? &g_prefs : nullptr, &safety, &motion, &temps, lcfg);
@@ -1494,6 +1519,11 @@ dcfg.restartAtMs      = &g_restartAtMs;
 
   dcfg.windPeakPct      = &g_windPeakPct;
   dcfg.windCoherenceMin = &g_windCoherenceMin;
+
+  dcfg.calStagePwm1     = &g_calStagePwm1;
+  dcfg.calStagePwm2     = &g_calStagePwm2;
+  dcfg.calStagePwm3     = &g_calStagePwm3;
+
   dcfg.homingKickTries = &g_homingKickTries;
   dcfg.homingKickNextMs = &g_homingKickNextMs;
   dcfg.homingKickSpacingMs = &g_homingKickSpacingMs;

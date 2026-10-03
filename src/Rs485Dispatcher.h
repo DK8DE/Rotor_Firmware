@@ -210,6 +210,14 @@ struct Rs485DispatcherConfig {
 
   float*   windPeakPct        = nullptr;
   float*   windCoherenceMin   = nullptr;
+
+  // Ziel-PWM der 3 automatischen Kalibrierstufen (SETCAL), einstellbar per
+  // SETCALPWM1-3/GETCALPWM1-3. NVS Keys cpw1/cpw2/cpw3. Default 40/70/100.
+  // Muessen aufsteigend bleiben (Mindestabstand 5%), siehe SETCALPWM1-3 in
+  // Rs485Dispatcher.cpp.
+  float*   calStagePwm1       = nullptr;
+  float*   calStagePwm2       = nullptr;
+  float*   calStagePwm3       = nullptr;
 };
 
 // ============================================================================
