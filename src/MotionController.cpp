@@ -423,11 +423,25 @@ void MotionController::begin(HalBoard* board, MotorMcpwm* motor, EncoderAxis* en
   resetControllerState(millis());
 }
 
+void MotionController::clearJogState_() {
+  _jogActive = false;
+  _jogDecel = false;
+  _jogDir = 0;
+  _jogPendingDir = 0;
+  _jogRampStartDeg01 = 0;
+  _jogDecelStartDuty = 0.0f;
+  _jogDecelStartDeg01 = 0;
+  _jogDecelDistDeg = 0.0f;
+  _jogPendingPos = false;
+  _jogPendingPosDeg01 = 0;
+}
+
 void MotionController::resetControllerState(uint32_t nowMs) {
   _posActive = false;
   _targetDeg01 = 0;
   _posStartMs = 0;
   _posTimeoutEvent = false;
+  clearJogState_();
 
   _rampStartDeg01 = 0;
   _pwmRampUpAnchorAbs = -1.0f;
@@ -731,6 +745,405 @@ void MotionController::commandStopSoft() {
   resetControllerState(millis());
 }
 
+float MotionController::jogBrakeDistDeg_(float dutyAbs, float pwmMax, float rampDistDeg) const {
+  // JOG-Bremsweg = rampDist * (aktuellePWM / pwmMax) * Scale
+  // Scale < 1: gleiche Relationen 60%/100%, aber kuerzer als die Positions-Rampe.
+  static const float kJogBrakeScale = 0.5f;
+
+  if (!isfinite(rampDistDeg) || rampDistDeg < 0.5f) rampDistDeg = 0.5f;
+  if (!isfinite(pwmMax) || pwmMax < 1.0f) pwmMax = 100.0f;
+  if (!isfinite(dutyAbs) || dutyAbs < 0.0f) dutyAbs = 0.0f;
+
+  float frac = dutyAbs / pwmMax;
+  if (frac > 1.0f) frac = 1.0f;
+  if (frac < 0.0f) frac = 0.0f;
+
+  float dist = rampDistDeg * frac * kJogBrakeScale;
+  const float maxDist = rampDistDeg * kJogBrakeScale;
+  if (dist > maxDist) dist = maxDist;
+  return dist;
+}
+
+void MotionController::startJogDecel_(uint32_t nowMs, int32_t curOutDeg01, float dutyAbs,
+                                      float pwmMax, float rampDistDeg) {
+  (void)nowMs;
+  if (dutyAbs < 2.0f) {
+    // Praktisch schon Stillstand
+    if (_jogPendingDir != 0) {
+      const int8_t next = _jogPendingDir;
+      _jogPendingDir = 0;
+      _jogDir = next;
+      _jogDecel = false;
+      _jogRampStartDeg01 = curOutDeg01;
+      _lastAppliedDuty = 0.0f;
+      return;
+    }
+    // Pending SETPOSDG trotzdem noch anfahren
+    if (_jogPendingPos) {
+      const int32_t tgt = _jogPendingPosDeg01;
+      clearJogState_();
+      _lastAppliedDuty = 0.0f;
+      commandSetPosDeg01(tgt, nowMs);
+      return;
+    }
+    clearJogState_();
+    _lastAppliedDuty = 0.0f;
+    return;
+  }
+
+  // Bremsweg = ramp * (PWM/max) — gleichmaessige Rampe aktuell->0
+  float brakeDist = jogBrakeDistDeg_(dutyAbs, pwmMax, rampDistDeg);
+
+  // Tip-Budget NUR bei echtem Antippen (wenig Weg + niedrige PWM).
+  // Nie bei SETPOSDG-Handoff und nie bei spuerbarer PWM — sonst wird die
+  // gleichmaessige Rampe auf ~1° zusammengestaucht (= hart abwerfen + Ausrollen).
+  int32_t already01 = (_jogDir > 0) ? (curOutDeg01 - _jogRampStartDeg01)
+                                    : (_jogRampStartDeg01 - curOutDeg01);
+  if (already01 < 0) already01 = 0;
+  const float alreadyDeg = (float)already01 / 100.0f;
+  static const float kJogTipBudgetDeg = 1.0f;
+  const float tipDutyLimit = pwmMax * 0.35f; // darueber: volle PWM-Rampe
+  const bool tipLike = (!_jogPendingPos) && (alreadyDeg < kJogTipBudgetDeg) &&
+                       (dutyAbs <= tipDutyLimit);
+  if (tipLike) {
+    const float remainBudget = kJogTipBudgetDeg - alreadyDeg;
+    if (remainBudget <= 0.12f || brakeDist <= 0.05f) {
+      if (_jogPendingDir != 0) {
+        const int8_t next = _jogPendingDir;
+        _jogPendingDir = 0;
+        _jogDir = next;
+        _jogDecel = false;
+        _jogRampStartDeg01 = curOutDeg01;
+        _lastAppliedDuty = 0.0f;
+        return;
+      }
+      clearJogState_();
+      _lastAppliedDuty = 0.0f;
+      return;
+    }
+    if (brakeDist > remainBudget) brakeDist = remainBudget;
+  }
+
+  // Nicht ueber Achsgrenze hinaus ausrollen
+  const int32_t amin = axisMinDeg01();
+  const int32_t amax = axisMaxDeg01();
+  float remainDeg = 0.0f;
+  if (_jogDir > 0) {
+    remainDeg = (float)(amax - curOutDeg01) / 100.0f;
+  } else if (_jogDir < 0) {
+    remainDeg = (float)(curOutDeg01 - amin) / 100.0f;
+  }
+  if (remainDeg < 0.0f) remainDeg = 0.0f;
+  if (brakeDist > remainDeg) brakeDist = remainDeg;
+  if (brakeDist < 0.05f) {
+    if (_jogPendingPos) {
+      const int32_t tgt = _jogPendingPosDeg01;
+      clearJogState_();
+      _lastAppliedDuty = 0.0f;
+      commandSetPosDeg01(tgt, nowMs);
+      return;
+    }
+    if (_jogPendingDir != 0) {
+      const int8_t next = _jogPendingDir;
+      _jogPendingDir = 0;
+      _jogDir = next;
+      _jogDecel = false;
+      _jogRampStartDeg01 = curOutDeg01;
+      _lastAppliedDuty = 0.0f;
+      return;
+    }
+    clearJogState_();
+    _lastAppliedDuty = 0.0f;
+    return;
+  }
+
+  _jogActive = true;
+  _jogDecel = true;
+  _jogDecelStartDuty = dutyAbs;
+  _jogDecelStartDeg01 = curOutDeg01;
+  _jogDecelDistDeg = brakeDist;
+}
+
+void MotionController::resumeJogAccelFromDuty_(int32_t curOutDeg01, float dutyAbs, float pwmMax,
+                                               float rampDistDeg, float pwmMin) {
+  _jogDecel = false;
+  _jogPendingDir = 0;
+  float span = pwmMax - pwmMin;
+  float alpha = 0.0f;
+  if (span > 0.1f) {
+    alpha = (dutyAbs - pwmMin) / span;
+  }
+  if (alpha < 0.0f) alpha = 0.0f;
+  if (alpha > 1.0f) alpha = 1.0f;
+  const float traveledDeg = alpha * rampDistDeg;
+  _jogRampStartDeg01 = curOutDeg01 - (int32_t)_jogDir * (int32_t)lroundf(traveledDeg * 100.0f);
+}
+
+bool MotionController::commandJog(uint8_t dir, uint32_t nowMs) {
+  if (!_encoder) return false;
+  bool referenced = (_homing && _homing->isReferenced());
+  if (_encoder->getEncoderType() == ENCTYPE_ABSOLUTE_SSI) {
+    referenced = _encoder->isSsiValid();
+  }
+  if (!referenced) return false;
+  if (!(dir == 1 || dir == 2)) return false;
+
+  // JOG und Positionsfahrt schliessen sich aus
+  if (_posActive) {
+    resetControllerState(nowMs);
+  }
+
+  const int8_t signedDir = (dir == 1) ? -1 : +1; // 1=amin, 2=amax
+
+  float rampDistDeg = (_cfg.rampDistDeg) ? (*_cfg.rampDistDeg) : 30.0f;
+  if (!isfinite(rampDistDeg) || rampDistDeg < 0.5f) rampDistDeg = 0.5f;
+  float pwmMax = (_cfg.pwmMaxAbs) ? fabsf(*_cfg.pwmMaxAbs) : 100.0f;
+  if (!isfinite(pwmMax) || pwmMax < 5.0f) pwmMax = 100.0f;
+  float pwmMin = (_cfg.pwmKickMinAbs) ? fabsf(*_cfg.pwmKickMinAbs) : 8.0f;
+  if (pwmMin < 1.0f) pwmMin = 1.0f;
+  if (pwmMin > pwmMax) pwmMin = pwmMax;
+
+  int32_t curEnc = 0;
+  _encoder->getPositionDeg01(curEnc);
+  const int32_t curOut = encoderDeg01ToOutputDeg01_(curEnc);
+  const float dutyAbs = fabsf(_lastAppliedDuty);
+
+  if (!_jogActive) {
+    _jogActive = true;
+    _jogDir = signedDir;
+    _jogPendingDir = 0;
+    _jogDecel = false;
+    _jogRampStartDeg01 = curOut;
+    _posStartMs = nowMs; // Timeout-Schutz analog Positionsfahrt
+    _lastAppliedDuty = 0.0f;
+    // Speed-Messung fuer Abbremsweg neu aufsetzen
+    _haveLastCounts = false;
+    _speedMeasDegPerSec = 0.0f;
+    _lastSpeedSampleMs = nowMs;
+    return true;
+  }
+
+  // Gleiche Richtung: ggf. Abbremsen abbrechen und weiterfahren
+  if (signedDir == _jogDir) {
+    if (_jogDecel) {
+      resumeJogAccelFromDuty_(curOut, dutyAbs, pwmMax, rampDistDeg, pwmMin);
+    }
+    _jogPendingDir = 0;
+    _posStartMs = nowMs;
+    return true;
+  }
+
+  // Richtungswechsel: erst proportional abbremsen, dann umkehren
+  _jogPendingDir = signedDir;
+  if (!_jogDecel) {
+    startJogDecel_(nowMs, curOut, dutyAbs, pwmMax, rampDistDeg);
+  }
+  _posStartMs = nowMs;
+  return true;
+}
+
+void MotionController::commandJogStop(uint32_t nowMs) {
+  if (!_jogActive) {
+    return;
+  }
+
+  float rampDistDeg = (_cfg.rampDistDeg) ? (*_cfg.rampDistDeg) : 30.0f;
+  if (!isfinite(rampDistDeg) || rampDistDeg < 0.5f) rampDistDeg = 0.5f;
+  float pwmMax = (_cfg.pwmMaxAbs) ? fabsf(*_cfg.pwmMaxAbs) : 100.0f;
+  if (!isfinite(pwmMax) || pwmMax < 5.0f) pwmMax = 100.0f;
+
+  int32_t curEnc = 0;
+  if (_encoder) _encoder->getPositionDeg01(curEnc);
+  const int32_t curOut = encoderDeg01ToOutputDeg01_(curEnc);
+  const float dutyAbs = fabsf(_lastAppliedDuty);
+
+  _jogPendingDir = 0; // Stopp hat Vorrang vor Umkehr
+  if (_jogDecel) {
+    // Bereits am Abbremsen: Bremsweg auf aktuelle Rest-PWM neu skalieren
+    startJogDecel_(nowMs, curOut, dutyAbs, pwmMax, rampDistDeg);
+    return;
+  }
+  startJogDecel_(nowMs, curOut, dutyAbs, pwmMax, rampDistDeg);
+}
+
+float MotionController::updateJog_(uint32_t nowMs, uint32_t dtMs) {
+  if (!_jogActive || !_encoder) {
+    clearJogState_();
+    _lastAppliedDuty = 0.0f;
+    return 0.0f;
+  }
+
+  if (dtMs == 0) dtMs = 1;
+  if (dtMs > 50) dtMs = 50;
+
+  const float pwmMax = updatePwmMaxAbsEffective(dtMs);
+  float pwmMin = (_cfg.pwmKickMinAbs) ? fabsf(*_cfg.pwmKickMinAbs) : 8.0f;
+  if (pwmMin < 1.0f) pwmMin = 1.0f;
+  if (pwmMin > pwmMax) pwmMin = pwmMax;
+
+  float rampDistDeg = (_cfg.rampDistDeg) ? (*_cfg.rampDistDeg) : 30.0f;
+  if (!isfinite(rampDistDeg) || rampDistDeg < 0.5f) rampDistDeg = 0.5f;
+
+  // Timeout analog Positionsfahrt
+  const uint32_t posTimeout = (_cfg.posTimeoutMs) ? (*_cfg.posTimeoutMs) : 60000;
+  if ((nowMs - _posStartMs) > posTimeout) {
+    clearJogState_();
+    _posTimeoutEvent = true;
+    _lastAppliedDuty = 0.0f;
+    return 0.0f;
+  }
+
+  int32_t curEnc = 0;
+  _encoder->getPositionDeg01(curEnc);
+  const int32_t curOut = encoderDeg01ToOutputDeg01_(curEnc);
+  const int32_t amin = axisMinDeg01();
+  const int32_t amax = axisMaxDeg01();
+  const long countsNow = motionCountsNow_();
+
+  // Speed waehrend JOG immer messen (sonst bleibt _speedMeasDegPerSec=0 und
+  // die Abbremsung denkt "langsam" -> harter Stopp bei 100% PWM).
+  {
+    const uint32_t speedIntervalMs = (_cfg.speedMeasIntervalMs) ? (*_cfg.speedMeasIntervalMs) : 25;
+    uint32_t dtSpeedMs = nowMs - _lastSpeedSampleMs;
+    if (dtSpeedMs >= speedIntervalMs) {
+      if (dtSpeedMs == 0) dtSpeedMs = 1;
+      _lastSpeedSampleMs = nowMs;
+      const float dtSpeed = (float)dtSpeedMs / 1000.0f;
+      const int32_t cpr = _encoder->getCountsPerRevActual();
+      if (!_haveLastCounts || cpr <= 0) {
+        _haveLastCounts = true;
+        _lastCounts = countsNow;
+      } else {
+        const long dCounts = countsNow - _lastCounts;
+        _lastCounts = countsNow;
+        const float degPerCount = isAbsoluteSsiMotion_() ? outputDegPerCount_()
+                                                          : ((float)axisMaxDeg01() / 100.0f / (float)cpr);
+        _speedMeasDegPerSec = ((float)dCounts * degPerCount) / dtSpeed;
+      }
+    }
+  }
+
+  // Am harten Limit: sofort aus
+  if (_jogDir > 0 && curOut >= amax) {
+    if (_jogPendingDir != 0) {
+      const int8_t next = _jogPendingDir;
+      _jogPendingDir = 0;
+      _jogDir = next;
+      _jogDecel = false;
+      _jogRampStartDeg01 = curOut;
+      _lastAppliedDuty = 0.0f;
+    } else {
+      clearJogState_();
+      _lastAppliedDuty = 0.0f;
+    }
+    return 0.0f;
+  }
+  if (_jogDir < 0 && curOut <= amin) {
+    if (_jogPendingDir != 0) {
+      const int8_t next = _jogPendingDir;
+      _jogPendingDir = 0;
+      _jogDir = next;
+      _jogDecel = false;
+      _jogRampStartDeg01 = curOut;
+      _lastAppliedDuty = 0.0f;
+    } else {
+      clearJogState_();
+      _lastAppliedDuty = 0.0f;
+    }
+    return 0.0f;
+  }
+
+  if (!_jogDecel) {
+    // Hochrampe mit Soft-Start:
+    // Nicht sofort minPwm (~35%) — sonst ist ein Tip schon mehrere Grad weg.
+    // Erste ~1,5°: sanft von niedriger Creep-PWM auf pwmMin, danach pwmMin->pwmMax.
+    int32_t traveled01 = (_jogDir > 0) ? (curOut - _jogRampStartDeg01)
+                                       : (_jogRampStartDeg01 - curOut);
+    if (traveled01 < 0) traveled01 = 0;
+    float traveledDeg = (float)traveled01 / 100.0f;
+
+    const float softDistDeg = 1.5f;
+    float dutyAbs = 0.0f;
+    float creepPwm = pwmMin * 0.25f;
+    if (creepPwm < 5.0f) creepPwm = 5.0f;
+    if (creepPwm > pwmMin) creepPwm = pwmMin;
+
+    if (traveledDeg < softDistDeg) {
+      float a = traveledDeg / softDistDeg;
+      if (a < 0.0f) a = 0.0f;
+      if (a > 1.0f) a = 1.0f;
+      // Beim allerersten Tick etwas PWM, sonst kommt er nie los
+      if (a < 0.05f) a = 0.05f;
+      dutyAbs = creepPwm + a * (pwmMin - creepPwm);
+    } else {
+      float denom = rampDistDeg - softDistDeg;
+      if (denom < 0.5f) denom = 0.5f;
+      float a = (traveledDeg - softDistDeg) / denom;
+      if (a > 1.0f) a = 1.0f;
+      if (a < 0.0f) a = 0.0f;
+      dutyAbs = pwmMin + a * (pwmMax - pwmMin);
+    }
+
+    // Vor Achsgrenze rechtzeitig abbremsen
+    float remainDeg = (_jogDir > 0) ? ((float)(amax - curOut) / 100.0f)
+                                    : ((float)(curOut - amin) / 100.0f);
+    if (remainDeg < 0.0f) remainDeg = 0.0f;
+    float neededBrake = jogBrakeDistDeg_(dutyAbs, pwmMax, rampDistDeg);
+    if (neededBrake < 0.25f) neededBrake = 0.25f;
+    if (remainDeg <= neededBrake) {
+      _jogPendingDir = 0;
+      startJogDecel_(nowMs, curOut, dutyAbs, pwmMax, rampDistDeg);
+      // Fall-through in Decel-Zweig unten in diesem Aufruf
+    } else {
+      _lastAppliedDuty = (float)_jogDir * dutyAbs;
+      return _lastAppliedDuty;
+    }
+  }
+
+  // Abbremsen: gleichmaessige Rampe startDuty -> 0 ueber genau _jogDecelDistDeg
+  // duty = start * (1 - s/dist). Kein fruehes Abschneiden auf minPwm.
+  if (_jogDecel) {
+    int32_t traveled01 = (_jogDir > 0) ? (curOut - _jogDecelStartDeg01)
+                                       : (_jogDecelStartDeg01 - curOut);
+    if (traveled01 < 0) traveled01 = 0;
+    float traveledDeg = (float)traveled01 / 100.0f;
+    float dist = _jogDecelDistDeg;
+    if (dist < 0.05f) dist = 0.05f;
+
+    float alpha = 1.0f - (traveledDeg / dist);
+    if (alpha < 0.0f) alpha = 0.0f;
+    if (alpha > 1.0f) alpha = 1.0f;
+    float dutyAbs = _jogDecelStartDuty * alpha;
+
+    if (traveledDeg >= dist || dutyAbs < 1.0f) {
+      const bool hadPendingPos = _jogPendingPos;
+      const int32_t pendingPos = _jogPendingPosDeg01;
+      const int8_t pendingDir = _jogPendingDir;
+
+      clearJogState_();
+      _lastAppliedDuty = 0.0f;
+
+      if (pendingDir != 0) {
+        _jogActive = true;
+        _jogDir = pendingDir;
+        _jogDecel = false;
+        _jogRampStartDeg01 = curOut;
+        return 0.0f;
+      }
+      if (hadPendingPos) {
+        commandSetPosDeg01(pendingPos, nowMs);
+      }
+      return 0.0f;
+    }
+
+    _lastAppliedDuty = (float)_jogDir * dutyAbs;
+    return _lastAppliedDuty;
+  }
+
+  _lastAppliedDuty = 0.0f;
+  return 0.0f;
+}
+
 void MotionController::commandStopToCurrentPosition(uint32_t nowMs) {
   // STOP:
   // - Position merken, an der STOP ankam (Stop-Punkt)
@@ -747,6 +1160,12 @@ void MotionController::commandStopToCurrentPosition(uint32_t nowMs) {
   // Waehrend Homing: STOP ist hier ein harter Abbruch der Motion (Homing steuert selbst)
   if (_homing->isActive()) {
     resetControllerState(nowMs);
+    return;
+  }
+
+  // JOG laeuft: proportional abbremsen (eigene Logik), kein STOP-Rueckfahr-Pfad
+  if (_jogActive) {
+    commandJogStop(nowMs);
     return;
   }
 
@@ -799,6 +1218,7 @@ void MotionController::commandStopToCurrentPosition(uint32_t nowMs) {
   _inTol = false;
   _inTolSinceMs = 0;
 }
+
 bool MotionController::getCurrentPositionDeg01(int32_t& outDeg01) const {
   if (!_encoder) return false;
   int32_t encDeg01 = 0;
@@ -821,11 +1241,39 @@ bool MotionController::commandSetPosDeg01(int32_t tgtDeg01, uint32_t nowMs) {
   }
   if (!referenced) return false;
 
+  // ------------------------------------------------------------------
+  // JOG -> SETPOSDG: IMMER gleiche gleichmaessige PWM-Rampe wie JOG:0
+  // ------------------------------------------------------------------
+  // Bremsweg = rampDist * (aktuellePWM / pwmMax), duty linear -> 0.
+  // Kein Direkt-Handoff in die Positionsfahrt (das wuerde die Rampe ueberspringen).
+  // Danach aus Stillstand zum SETPOSDG-Ziel.
+  if (_jogActive) {
+    float rampDistDeg = (_cfg.rampDistDeg) ? (*_cfg.rampDistDeg) : 30.0f;
+    if (!isfinite(rampDistDeg) || rampDistDeg < 0.5f) rampDistDeg = 0.5f;
+    float pwmMax = (_cfg.pwmMaxAbs) ? fabsf(*_cfg.pwmMaxAbs) : 100.0f;
+    if (!isfinite(pwmMax) || pwmMax < 5.0f) pwmMax = 100.0f;
+
+    int32_t curEncH = 0;
+    _encoder->getPositionDeg01(curEncH);
+    const int32_t curOutH = encoderDeg01ToOutputDeg01_(curEncH);
+    const float dutyAbsH = fabsf(_lastAppliedDuty);
+
+    if (_jogDir == 0 && dutyAbsH > 1.0f) {
+      _jogDir = (_lastAppliedDuty > 0.0f) ? +1 : -1;
+    }
+
+    _jogPendingPos = true;
+    _jogPendingPosDeg01 = tgtDeg01;
+    _jogPendingDir = 0;
+    _posActive = false;
+    startJogDecel_(nowMs, curOutH, dutyAbsH, pwmMax, rampDistDeg);
+    return true;
+  }
+
   // Start aus Stillstand?
   // Wenn wir am Ziel in der Feinjustage stehen und ein neues Ziel kommt,
   //  soll die Justage sofort abgebrochen werden und die neue Fahrt wie aus Stillstand starten.)
   bool startingFromIdle = (!_posActive);
-
 
   // Istposition fuer Richtungsentscheidung
   int32_t curDeg01 = 0;
@@ -1355,6 +1803,11 @@ float MotionController::update(uint32_t nowMs, uint32_t dtMs) {
     return +handSpeed;
   }
 
+  // Eigenstaendige JOG-Bewegung (RS485 JOG) — vor Positionsfahrt
+  if (_jogActive) {
+    return updateJog_(nowMs, dtMs);
+  }
+
   // Keine Positionsfahrt
   if (!_posActive) {
     _lastAppliedDuty = 0.0f;
@@ -1509,9 +1962,18 @@ float MotionController::update(uint32_t nowMs, uint32_t dtMs) {
       dir = (errTmp > 0) ? +1 : (errTmp < 0 ? -1 : 0);
     }
 
-    // Bremsweg: immer die konfigurierte NVS-Rampe verwenden.
+    // Bremsweg: normalerweise volle NVS-Rampe.
+    // reason 5 = JOG-Handoff: proportional zur Ist-Geschwindigkeit (nicht PWM),
+    // damit bei langsamer Fahrt (z.B. 60% PWM) nicht endlos ausgerollt wird.
     float brakeDistDeg = rampDistDeg;
     if (!isfinite(brakeDistDeg) || brakeDistDeg < 0.5f) brakeDistDeg = 0.5f;
+    if (_brakeReason == 5) {
+      float pwmMax = (_cfg.pwmMaxAbs) ? fabsf(*_cfg.pwmMaxAbs) : 100.0f;
+      if (!isfinite(pwmMax) || pwmMax < 1.0f) pwmMax = 100.0f;
+      brakeDistDeg = jogBrakeDistDeg_(fabsf(_lastAppliedDuty), pwmMax, rampDistDeg);
+      if (brakeDistDeg < 0.25f) brakeDistDeg = 0.25f;
+      if (brakeDistDeg > rampDistDeg) brakeDistDeg = rampDistDeg;
+    }
 
     const int32_t brakeDistDeg01 = (int32_t)lroundf(brakeDistDeg * 100.0f);
 

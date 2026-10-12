@@ -233,7 +233,7 @@ private:
   uint16_t _calCcw[CAL_STAGES][LOAD_BINS] = {};
   // Tatsaechlich angewendete PWM je Stufe (aufsteigend sortiert), fuer die
   // Interpolation in calBinInterp(). Default = nominale CAL_STAGE_PWM-Werte.
-  float _calStagePwm[CAL_STAGES] = {40.0f, 70.0f, 100.0f};
+  float _calStagePwm[CAL_STAGES] = {45.0f, 75.0f, 100.0f};
 
   // Live-Stat (geglaettet)
   uint16_t _liveCw[LOAD_BINS] = {0};

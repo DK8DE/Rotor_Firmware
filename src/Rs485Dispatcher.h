@@ -89,6 +89,10 @@ struct Rs485DispatcherConfig {
 
   uint32_t* cmdTimeoutMs      = nullptr;
 
+  // JOG-Watchdog: wenn innerhalb dieser Zeit (ms) kein neuer JOG:1/JOG:2
+  // kommt, wird weich gestoppt (wie STOP). Default 500, NVS "jogt".
+  uint32_t* jogTimeoutMs      = nullptr;
+
   uint32_t* isSoftWarnMv      = nullptr;
   uint32_t* isHardStopMv      = nullptr;
 
@@ -276,6 +280,9 @@ private:
   void requestHomingKick(uint32_t nowMs, const char* reason);
   void processErrBroadcastRetry(uint32_t nowMs);
 
+  // JOG: wenn innerhalb jogTimeoutMs kein neuer JOG:1/2 kommt -> weich stoppen
+  void updateJogWatchdog(uint32_t nowMs);
+
   // Parser
   int32_t parseDeg01FromParam(const String& p) const;
 
@@ -294,6 +301,11 @@ private:
 
   // Deadman: letzter gueltiger Befehl vom Master (jedes Kommando zaehlt als Keepalive)
   uint32_t _lastGetPosCmdMs = 0;
+
+  // JOG Dauer-Richtungsfahrt: aktiv solange Master JOG:1/JOG:2 wiederholt sendet
+  bool     _jogActive = false;
+  uint8_t  _jogDir = 0;           // 1 = Richtung amin, 2 = Richtung amax
+  uint32_t _lastJogCmdMs = 0;
 
   // ERR-Retry: nach Fault-Eintritt 3x senden (sofort + 2 Retries)
   uint8_t _errRetryCode = 0;

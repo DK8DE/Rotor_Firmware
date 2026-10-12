@@ -307,6 +307,11 @@ static uint32_t g_posTimeoutMs = 120000;
 // Beispiel: 2000 -> 2 Sekunden ohne Poll waehrend Bewegung => SE_TIMEOUT.
 static uint32_t g_cmdTimeoutMs = 3000;
 
+// JOG-Watchdog (ms): wenn Master JOG:1/JOG:2 nicht mehr wiederholt sendet,
+// stoppt die Dauer-Richtungsfahrt weich (wie STOP). 0 = Watchdog aus.
+// Einstellbar per SETJOGTOUT/GETJOGTOUT, NVS "jogt".
+static uint32_t g_jogTimeoutMs = 500;
+
 // ============================================================================
 // Safety
 // ============================================================================
@@ -582,8 +587,8 @@ static float g_windCoherenceMin = 55.0f; // Kohaerenz-Minimum (%)
 // Ziel-PWM der 3 automatischen Kalibrierstufen (SETCAL), per SETCALPWM1-3/
 // GETCALPWM1-3 einstellbar (NVS cpw1/cpw2/cpw3). Muessen aufsteigend bleiben
 // (Mindestabstand 5%, wird beim SETCALPWMx geprueft) - siehe LoadMonitor.cpp.
-static float g_calStagePwm1 = 40.0f;
-static float g_calStagePwm2 = 70.0f;
+static float g_calStagePwm1 = 45.0f;
+static float g_calStagePwm2 = 75.0f;
 static float g_calStagePwm3 = 100.0f;
 
 // Wind- & Richtungssensor (RS485) aktivieren/deaktivieren
@@ -879,6 +884,11 @@ static void loadPreferencesIntoGlobals() {
   g_handSpeedPercent   = g_prefs.getFloat("hsp", g_handSpeedPercent);
 
   g_cmdTimeoutMs       = g_prefs.getUInt("dman", g_cmdTimeoutMs);
+  g_jogTimeoutMs       = g_prefs.getUInt("jogt", g_jogTimeoutMs);
+  if (g_jogTimeoutMs != 0) {
+    if (g_jogTimeoutMs < 100) g_jogTimeoutMs = 100;
+    if (g_jogTimeoutMs > 5000) g_jogTimeoutMs = 5000;
+  }
 
   g_isSoftWarnMv       = g_prefs.getUInt("iw",   g_isSoftWarnMv);
   g_isHardStopMv       = g_prefs.getUInt("imax", g_isHardStopMv);
@@ -1435,6 +1445,7 @@ dcfg.posTimeoutMs       = &g_posTimeoutMs;
 dcfg.handSpeedPercent   = &g_handSpeedPercent;
 
 dcfg.cmdTimeoutMs       = &g_cmdTimeoutMs;
+dcfg.jogTimeoutMs       = &g_jogTimeoutMs;
 
 dcfg.isSoftWarnMv       = &g_isSoftWarnMv;
 dcfg.isHardStopMv       = &g_isHardStopMv;
@@ -1754,15 +1765,15 @@ void loop() {
     // Nach Ende einer Positionsfahrt Turn + logische Lage nochmals sichern
     // (auch wenn Turn sich nicht geändert hat — sldeg-Fallback für Reboot).
     {
-      static bool s_wasPosActive = false;
-      const bool posActive = motion.isPosActive();
-      if (s_wasPosActive && !posActive && g_prefsOk && encoder.isSsiValid()) {
+      static bool s_wasMotionActive = false;
+      const bool motionActive = motion.isMotionActive();
+      if (s_wasMotionActive && !motionActive && g_prefsOk && encoder.isSsiValid()) {
         int32_t deg01 = 0;
         if (encoder.getPositionDeg01(deg01)) {
           saveSsiTurnState(encoder.getSsiTurn(), deg01);
         }
       }
-      s_wasPosActive = posActive;
+      s_wasMotionActive = motionActive;
     }
   }
 
@@ -1917,7 +1928,7 @@ void loop() {
   // Waehrend Homing oder Positionsfahrt (RS485-gefuehrt) muss innerhalb g_cmdTimeoutMs
   // mindestens ein GUELTIGES Kommando vom Master empfangen werden, sonst Fault (SE_TIMEOUT).
   // Hinweis: Rs485Dispatcher setzt lastMotionCmdMs bei JEDEM gueltigen Master-Frame (auch GETIS etc.).
-  const bool rsMotionActive = (homingActive || motion.isPosActive());
+  const bool rsMotionActive = (homingActive || motion.isMotionActive());
   uint32_t lastMotionCmdMs = rs485Dispatcher.getLastGetPosCmdMs();
   if (lastMotionCmdMs == 0) lastMotionCmdMs = nowMs;
   // Waehrend interner Kalibrierfahrt setzen wir das Keepalive auf "jetzt",

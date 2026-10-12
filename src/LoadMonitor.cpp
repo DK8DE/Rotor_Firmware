@@ -26,7 +26,7 @@ static const char* KEY_CAL_AMAX  = "cama";   // int32: Achsmaximum (Deg01) bei K
 // calBinInterp() setzt das voraus). Die tatsaechlich wirksame PWM je Stufe
 // (kann z.B. durch die Mindest-PWM "g_minPwm" nach oben begrenzt sein) wird
 // separat in _calStagePwm[] gemerkt und mit abgespeichert.
-static const float CAL_STAGE_PWM[CAL_STAGES] = {40.0f, 70.0f, 100.0f};
+static const float CAL_STAGE_PWM[CAL_STAGES] = {45.0f, 75.0f, 100.0f};
 
 // Sicherheits-Timeout fuers Warten auf das Einschwingen der PWM-Rampe
 // zwischen zwei Kalibrierstufen (Slew-Rate ist 10%/s, siehe main.cpp
@@ -402,8 +402,12 @@ void LoadMonitor::update(uint32_t nowMs) {
 
     if (!posActive) {
       if (_stage == ST_MOVE_TO_ZERO) {
-        // Position 0 erreicht. PWM-Sollwert fuer Stufe 0 wurde bereits in
-        // startCalibration() angefordert - jetzt auf das Einschwingen warten.
+        // Position 0 ("Endschalter"/Referenz) erreicht - die Anfahrt dorthin
+        // erfolgt bewusst mit 100% (siehe startCalibration()), nicht mit der
+        // (ggf. deutlich langsameren) Ziel-PWM der ersten Kalibrierstufe.
+        // Jetzt erst die Ziel-PWM der ersten Stufe anfordern und einschwingen
+        // lassen, bevor die eigentliche Messfahrt (CW) startet.
+        if (_cfg.pwmMaxAbsCmd) *_cfg.pwmMaxAbsCmd = stageTargetPwm(_stageIdx);
         _settleStartMs = nowMs;
         _stage = ST_PWM_SETTLE;
       } else if (_stage == ST_PWM_SETTLE) {
@@ -506,9 +510,12 @@ bool LoadMonitor::startCalibration(uint32_t nowMs) {
   _calSavedPwmCmd = safeFPtr(_cfg.pwmMaxAbsCmd, 100.0f);
   _stageIdx = 0;
 
-  // Erste Kalibrierstufe anfordern - laeuft dank PWM-Slew-Rampe bereits
-  // parallel zur Anfahrt auf 0 ein (siehe ST_PWM_SETTLE weiter unten).
-  if (_cfg.pwmMaxAbsCmd) *_cfg.pwmMaxAbsCmd = stageTargetPwm(0);
+  // Anfahrt auf 0 ("Endschalter"/Referenz) erfolgt bewusst mit voller PWM
+  // (100%) - das ist nur eine Positionierfahrt, keine Messfahrt, und soll
+  // daher schnell gehen. Die (ggf. deutlich langsamere) Ziel-PWM der ersten
+  // Kalibrierstufe wird erst nach Erreichen von 0 angefordert (ST_PWM_SETTLE
+  // in update()), direkt vor der eigentlichen Messfahrt.
+  if (_cfg.pwmMaxAbsCmd) *_cfg.pwmMaxAbsCmd = 100.0f;
 
   // Stage 0: erst auf 0 fahren (damit immer gleich gestartet wird)
   if (!_motion->commandSetPosDeg01(0, nowMs)) {

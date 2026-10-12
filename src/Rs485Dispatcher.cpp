@@ -102,7 +102,7 @@ void Rs485Dispatcher::update(uint32_t nowMs) {
   // Frames pro Pass, damit GET* nicht "haengen bleiben" (Queue wuerde sonst mehrere
   // Loop-Takte brauchen).
   const bool motionBusy =
-      (_motion && _motion->isPosActive()) ||
+      (_motion && _motion->isMotionActive()) ||
       (_homing && _homing->isActive()) ||
       (_loadMon && _loadMon->isCalibrationRunning());
   // Bei sehr schnellen Retarget-Sequenzen (kleine SETPOSDG + sofortige Folgebefehle)
@@ -113,6 +113,9 @@ void Rs485Dispatcher::update(uint32_t nowMs) {
 
   // Faellige ERR-Retries zuerst senden, damit sie nicht hinter RX-Bursts haengen.
   processErrBroadcastRetry(nowMs);
+
+  // JOG-Watchdog: wenn Master JOG:1/2 nicht mehr wiederholt -> weich stoppen
+  updateJogWatchdog(nowMs);
 
   Rs485Frame f;
   for (int i = 0; i < maxFramesPerPass && _rs485->poll(f); ++i) {
@@ -164,6 +167,37 @@ void Rs485Dispatcher::updateHomingKickRetry(uint32_t nowMs) {
   }
 
   _homing->start();
+}
+
+void Rs485Dispatcher::updateJogWatchdog(uint32_t nowMs) {
+  // Wenn Master JOG:1/JOG:2 nicht mehr wiederholt -> commandJogStop.
+  if (!_jogActive) return;
+  if (!_motion) {
+    _jogActive = false;
+    _jogDir = 0;
+    return;
+  }
+
+  // JOG-Bewegung bereits beendet (Limit / Auslaufen fertig) -> Watchdog aus
+  if (!_motion->isJogActive()) {
+    _jogActive = false;
+    _jogDir = 0;
+    return;
+  }
+
+  const uint32_t tout = safeU32(_cfg.jogTimeoutMs, 500);
+  if (tout == 0) return; // 0 = Watchdog deaktiviert
+
+  const uint32_t age = nowMs - _lastJogCmdMs;
+  if (age < tout) return;
+
+  // Watchdog: Abbremsen anfordern. Dispatcher-Ownership sofort loesen,
+  // damit commandJogStop nicht jeden Loop neu getriggert wird.
+  // Die Motion-Decel laeuft unabhaengig weiter (motion.isJogActive).
+  _motion->commandJogStop(nowMs);
+  _jogActive = false;
+  _jogDir = 0;
+  serialEventState("JOG_TIMEOUT");
 }
 
 void Rs485Dispatcher::onFrame(const Rs485Frame& f, uint32_t nowMs) {
@@ -829,6 +863,10 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     // Hinweis: Fehler (ERR) werden nur bei SETREF quittiert.
     // Warnungen werden nur ueber DELWARN geloescht.
 
+    // JOG-Ownership beenden (Watchdog soll danach nicht mehr stoppen)
+    _jogActive = false;
+    _jogDir = 0;
+
     // Waehrend Homing: Stop-Punkt macht keinen Sinn -> Homing abbrechen + weich stoppen
     if (_homing->isActive()) {
       _homing->abort();
@@ -856,6 +894,10 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   // - Latcht einen Safety-Fault, damit der Motor garantiert aus bleibt.
   // ------------------------------------------------------------------------
   if (cmd == "NSTOP") {
+    // JOG-Ownership beenden
+    _jogActive = false;
+    _jogDir = 0;
+
     _homing->abort();
     _motion->commandStopSoft();
 
@@ -1737,7 +1779,7 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   // GETCALPWM1-3 / SETCALPWM1-3 (Ziel-PWM der 3 automatischen Kalibrierstufen)
   // ------------------------------------------------------------------------
   // Stellt die PWM-Werte ein, mit denen SETCAL seine 3 automatischen
-  // Kalibrierfahrten durchfuehrt (Default 40% / 70% / 100%, siehe SETCAL).
+  // Kalibrierfahrten durchfuehrt (Default 45% / 75% / 100%, siehe SETCAL).
   // Muessen aufsteigend bleiben (Stufe1 < Stufe2 < Stufe3, Mindestabstand
   // 5%), sonst funktioniert die PWM-Interpolation der Baseline nicht mehr
   // sinnvoll -> wird bei jedem SETCALPWMx gegen die jeweiligen Nachbarstufen
@@ -1747,13 +1789,13 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   // (NAK ...:BUSY_CAL), da die Firmware die Stufen dann selbst durchfaehrt.
   // ------------------------------------------------------------------------
   if (cmd == "GETCALPWM1") {
-    const float v = (_cfg.calStagePwm1) ? *_cfg.calStagePwm1 : 40.0f;
+    const float v = (_cfg.calStagePwm1) ? *_cfg.calStagePwm1 : 45.0f;
     if (shouldReply) sendAck(f.master, "GETCALPWM1", formatFloatComma(v, 1));
     return;
   }
 
   if (cmd == "GETCALPWM2") {
-    const float v = (_cfg.calStagePwm2) ? *_cfg.calStagePwm2 : 70.0f;
+    const float v = (_cfg.calStagePwm2) ? *_cfg.calStagePwm2 : 75.0f;
     if (shouldReply) sendAck(f.master, "GETCALPWM2", formatFloatComma(v, 1));
     return;
   }
@@ -1774,7 +1816,7 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     if (v < 1.0f) v = 1.0f;
     if (v > 100.0f) v = 100.0f;
 
-    const float s2 = (_cfg.calStagePwm2) ? *_cfg.calStagePwm2 : 70.0f;
+    const float s2 = (_cfg.calStagePwm2) ? *_cfg.calStagePwm2 : 75.0f;
     if (v > (s2 - 5.0f)) {
       if (shouldReply) sendNak(f.master, "SETCALPWM1", "ORDER");
       return;
@@ -1796,7 +1838,7 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     if (v < 1.0f) v = 1.0f;
     if (v > 100.0f) v = 100.0f;
 
-    const float s1 = (_cfg.calStagePwm1) ? *_cfg.calStagePwm1 : 40.0f;
+    const float s1 = (_cfg.calStagePwm1) ? *_cfg.calStagePwm1 : 45.0f;
     const float s3 = (_cfg.calStagePwm3) ? *_cfg.calStagePwm3 : 100.0f;
     if (v < (s1 + 5.0f) || v > (s3 - 5.0f)) {
       if (shouldReply) sendNak(f.master, "SETCALPWM2", "ORDER");
@@ -1819,7 +1861,7 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     if (v < 1.0f) v = 1.0f;
     if (v > 100.0f) v = 100.0f;
 
-    const float s2 = (_cfg.calStagePwm2) ? *_cfg.calStagePwm2 : 70.0f;
+    const float s2 = (_cfg.calStagePwm2) ? *_cfg.calStagePwm2 : 75.0f;
     if (v < (s2 + 5.0f)) {
       if (shouldReply) sendNak(f.master, "SETCALPWM3", "ORDER");
       return;
@@ -1836,8 +1878,14 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   // ------------------------------------------------------------------------
   // Fuehrt automatisch 3 komplette Kalibrierfahrten (je 0 -> 360 -> 0) bei
   // 3 verschiedenen PWM-Stufen durch (einstellbar per SETCALPWM1-3, Default
-  // 40% / 70% / 100%). Dabei werden je Stufe geglaettete Stromwerte
+  // 45% / 75% / 100%). Dabei werden je Stufe geglaettete Stromwerte
   // pro Winkel-Bin (72) gespeichert.
+  //
+  // Die Anfahrt auf Position 0 ("Endschalter"/Referenz) am Anfang jeder
+  // SETCAL-Fahrt erfolgt immer mit voller PWM (100%) - das ist nur eine
+  // Positionierfahrt (keine Messfahrt) und soll daher zuegig gehen. Erst
+  // danach wird auf die (ggf. deutlich langsamere) Ziel-PWM der jeweiligen
+  // Kalibrierstufe gewechselt, bevor die eigentliche Messfahrt beginnt.
   //
   // Hintergrund: Der gemessene Motorstrom ist nicht PWM-unabhaengig - bei
   // gleicher mechanischer Last zieht der Motor bei kleinerer PWM (SETPWM/
@@ -2050,7 +2098,7 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   // ------------------------------------------------------------------------
   // Request Params:
   //   <STAGE>;<DIR>;<START>;<COUNT>
-  //     STAGE: 1..3 (siehe SETCAL / GETCALSTATE, Default 40%/70%/100% PWM)
+  //     STAGE: 1..3 (siehe SETCAL / GETCALSTATE, Default 45%/75%/100% PWM)
   //     DIR: 1=CW(positiv/IS1)  2=CCW(negativ/IS2)
   //
   // Antwort:
@@ -2337,10 +2385,64 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   }
 
   // ------------------------------------------------------------------------
-  // JOG ist absichtlich deaktiviert
+  // JOG (Dauer-Richtungsfahrt) — eigene Motion-Logik, nicht SETPOSDG/STOP
+  // ------------------------------------------------------------------------
+  // Protokoll: JOG:<DIR>
+  //   DIR 0 = Abbremsen (Weg proportional zur aktuellen PWM * rampDistDeg)
+  //   DIR 1 = Richtung axisMinDeg01 (typisch 0°)
+  //   DIR 2 = Richtung axisMaxDeg01 (typisch 360°, Typ3/SSI bis 720°)
+  //
+  // Master sendet JOG:1/2 alle paar ms. Hochrampe ueber rampDistDeg.
+  // Kein JOG:1/2 innerhalb jogTimeoutMs (Default 500, SETJOGTOUT) oder
+  // JOG:0 -> proportional abbremsen (lange Fahrt = langer Bremsweg,
+  // kurzer Tip = kurzer/kein Bremsweg). An Achsgrenzen ebenfalls Abbremsen.
   // ------------------------------------------------------------------------
   if (cmd == "JOG") {
-    if (shouldReply) sendNak(f.master, "JOG", "DISABLED");
+    const uint32_t dir = parseU32Param(f.params);
+    if (!(dir == 0 || dir == 1 || dir == 2)) {
+      if (shouldReply) sendNak(f.master, "JOG", "PARAM");
+      return;
+    }
+
+    if (!isRotorReferencedLocal(_cfg, _homing)) {
+      if (shouldReply) sendNak(f.master, "JOG", "NOREF");
+      serialEventState("JOG_NOREF");
+      return;
+    }
+
+    if (_homing && _homing->isActive()) {
+      if (shouldReply) sendNak(f.master, "JOG", "BUSY_HOME");
+      return;
+    }
+
+    if (_loadMon && _loadMon->isCalibrationRunning()) {
+      if (shouldReply) sendNak(f.master, "JOG", "BUSY_CAL");
+      return;
+    }
+
+    if (dir == 0) {
+      if (_motion) _motion->commandJogStop(nowMs);
+      _jogActive = false;
+      _jogDir = 0;
+      if (shouldReply) sendAck(f.master, "JOG", "0");
+      serialEventState("JOG_STOP");
+      return;
+    }
+
+    _safety->notifyMotionEdge(nowMs);
+
+    if (!_motion->commandJog((uint8_t)dir, nowMs)) {
+      if (shouldReply) sendNak(f.master, "JOG", "NOREF");
+      serialEventState("JOG_NOREF");
+      return;
+    }
+
+    _jogActive = true;
+    _jogDir = (uint8_t)dir;
+    _lastJogCmdMs = nowMs;
+
+    if (shouldReply) sendAck(f.master, "JOG", String((int)dir));
+    serialEventState("JOG");
     return;
   }
 
@@ -2353,6 +2455,10 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
       serialEventState("SETPOSDG_NOREF");
       return;
     }
+
+    // JOG-Ownership beenden (Positionsfahrt uebernimmt)
+    _jogActive = false;
+    _jogDir = 0;
 
     // Bei SETPOSDG werden ERR/WARN NICHT automatisch quittiert.
     // ERR nur ueber SETREF, WARN nur ueber DELWARN.
@@ -2430,6 +2536,10 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
       serialEventState("HOME_NOREF");
       return;
     }
+
+    // JOG-Ownership beenden (HOME uebernimmt)
+    _jogActive = false;
+    _jogDir = 0;
 
     _safety->notifyMotionEdge(nowMs);
 
@@ -2840,6 +2950,27 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     persistPutFloat("hsp", _cfg.handSpeedPercent, v);
     if (shouldReply) sendAck(f.master, "SETHANDSPEED", "1");
     serialEventState("SETHANDSPEED");
+    return;
+  }
+
+  // ------------------------------------------------------------------------
+  // JOG-Watchdog Timeout (ms): kein neuer JOG:1/2 -> weich stoppen
+  // ------------------------------------------------------------------------
+  // Default 500ms, Bereich 100..5000. Persistent NVS "jogt".
+  // ------------------------------------------------------------------------
+  if (cmd == "GETJOGTOUT") {
+    const uint32_t v = safeU32(_cfg.jogTimeoutMs, 500);
+    if (shouldReply) sendAck(f.master, "GETJOGTOUT", String(v));
+    return;
+  }
+
+  if (cmd == "SETJOGTOUT") {
+    uint32_t v = parseU32Param(f.params);
+    if (v < 100) v = 100;
+    if (v > 5000) v = 5000;
+    persistPutU32("jogt", _cfg.jogTimeoutMs, v);
+    if (shouldReply) sendAck(f.master, "SETJOGTOUT", String(v));
+    serialEventState("SETJOGTOUT");
     return;
   }
 

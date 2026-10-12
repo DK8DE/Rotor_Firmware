@@ -102,10 +102,19 @@ public:
 
   void commandStopSoft();
   void commandStopToCurrentPosition(uint32_t nowMs);
+  // Eigenstaendige JOG-Bewegungslogik (nicht SETPOSDG/STOP):
+  // dir 1 = Richtung axisMin, dir 2 = Richtung axisMax.
+  // Hochrampe ueber rampDistDeg; Stopp/Timeout: Abbremsweg proportional zur
+  // aktuellen PWM (ebenfalls skaliert mit rampDistDeg).
+  bool commandJog(uint8_t dir, uint32_t nowMs);
+  void commandJogStop(uint32_t nowMs);
   void commandClearMotionForSetRef(uint32_t nowMs);
   bool commandSetPosDeg01(int32_t tgtDeg01, uint32_t nowMs);
 
   bool isPosActive() const { return _posActive; }
+  bool isJogActive() const { return _jogActive; }
+  // true bei Positionsfahrt ODER JOG (fuer Deadman/Safety)
+  bool isMotionActive() const { return _posActive || _jogActive; }
 
   // ------------------------------------------------------------
   // Positionsfahrt-Timeout Event
@@ -122,9 +131,11 @@ public:
   // Diese Funktion liefert true GENAU EINMAL pro Timeout-Ereignis.
   bool consumePosTimeoutEvent();
 
-  // true, wenn gerade eine Bremssequenz (STOP / Richtungswechsel) laeuft.
+  // true, wenn gerade eine Bremssequenz (STOP / Richtungswechsel / JOG-Decel) laeuft.
   // In dieser Phase darf Safety NICHT ueber Encoder-Stall ausloesen.
-  bool isBrakeSequenceActive() const { return _brakeRequest || _brakeActive || _brakeHoldActive; }
+  bool isBrakeSequenceActive() const {
+    return _brakeRequest || _brakeActive || _brakeHoldActive || (_jogActive && _jogDecel);
+  }
 
   // Wird in der Feinphase angefordert: aktive Motorbremse (beide Ausgaenge HIGH).
   // Die eigentliche Umsetzung erfolgt in der INO, damit Safety-Faults immer Vorrang haben.
@@ -204,6 +215,12 @@ private:
 
 
   void resetControllerState(uint32_t nowMs);
+  void clearJogState_();
+  // Abbremsweg aus Ist-Geschwindigkeit (nicht nur PWM) — langsam => kurz.
+  float jogBrakeDistDeg_(float dutyAbs, float pwmMax, float rampDistDeg) const;
+  void startJogDecel_(uint32_t nowMs, int32_t curOutDeg01, float dutyAbs, float pwmMax, float rampDistDeg);
+  void resumeJogAccelFromDuty_(int32_t curOutDeg01, float dutyAbs, float pwmMax, float rampDistDeg, float pwmMin);
+  float updateJog_(uint32_t nowMs, uint32_t dtMs);
 
   // Start einer Positionsfahrt wie aus Stillstand.
   // Setzt Mess-/Reglerzustaende zurueck und aktiviert optional die KICK-Phase,
@@ -225,6 +242,21 @@ private:
   bool _posActive = false;
   int32_t _targetDeg01 = 0;
   uint32_t _posStartMs = 0;
+
+  // ------------------------------------------------------------
+  // Eigenstaendige JOG-Logik (RS485 JOG:1/2/0)
+  // ------------------------------------------------------------
+  bool     _jogActive = false;
+  bool     _jogDecel = false;
+  int8_t   _jogDir = 0;            // +1 Richtung amax, -1 Richtung amin
+  int8_t   _jogPendingDir = 0;     // nach Umkehr-Abbremsen
+  int32_t  _jogRampStartDeg01 = 0; // OUT-Start der Hochrampe
+  float    _jogDecelStartDuty = 0.0f;
+  int32_t  _jogDecelStartDeg01 = 0;
+  float    _jogDecelDistDeg = 0.0f;
+  // Nach JOG-Decel optional SETPOSDG-Ziel anfahren (UI-Loslassposition)
+  bool     _jogPendingPos = false;
+  int32_t  _jogPendingPosDeg01 = 0;
   // Wird gesetzt, wenn posTimeoutMs ueberschritten wurde (siehe consumePosTimeoutEvent()).
   bool _posTimeoutEvent = false;
   // Startpunkt fuer Anfahr-Rampe (in 0,01deg)
