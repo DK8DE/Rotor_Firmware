@@ -252,6 +252,10 @@ void SafetyMonitor::setLatchErrorOnEndstop(bool on) {
   _cfg.latchErrorOnEndstop = on;
 }
 
+void SafetyMonitor::setTwoRevEndstopPolicy(bool on) {
+  _cfg.twoRevEndstopPolicy = on;
+}
+
 void SafetyMonitor::setCmdTimeoutMs(uint32_t ms) {
   _cfg.cmdTimeoutMs = ms;
 }
@@ -698,12 +702,45 @@ float SafetyMonitor::update(uint32_t nowMs,
     const bool allowMin = _cfg.allowPushIntoEndMin;
     const bool allowMax = _cfg.allowPushIntoEndMax;
 
+    const int32_t amax =
+        (_cfg.axisMaxDeg01 && *_cfg.axisMaxDeg01 > 0) ? *_cfg.axisMaxDeg01 : 0;
+    const bool twoRevActive =
+        _cfg.twoRevEndstopPolicy && _cfg.axisPosDeg01 && (amax > 36000);
+
     // Richtungskonvention waehlbar (je nach Verdrahtung/Motorrichtung)
     // dutyPositiveMovesRightEndstop=true (Standard):
     //   duty<0 -> Richtung LEFT (MIN), duty>0 -> Richtung RIGHT (MAX)
     // dutyPositiveMovesRightEndstop=false (invertiert):
     //   duty<0 -> Richtung RIGHT (MAX), duty>0 -> Richtung LEFT (MIN)
-    if (_cfg.dutyPositiveMovesRightEndstop) {
+    const bool moveLeft =
+        _cfg.dutyPositiveMovesRightEndstop ? (duty < 0.0f) : (duty > 0.0f);
+    const bool moveRight =
+        _cfg.dutyPositiveMovesRightEndstop ? (duty > 0.0f) : (duty < 0.0f);
+
+    if (twoRevActive) {
+      // Multi-Turn: Endschalter nur an den Grenzen 0 / amax.
+      // Um 360° (Wechsel 1.<->2. Runde) in beide Richtungen durchfahren.
+      // WICHTIG: richtungsbezogen (endL↔links, endR↔rechts) — sonst wuerde
+      // z.B. endR beim Rueckzug vom MAX-Anschlag faelschlich als Min-Zone
+      // gewertet, wenn die Position noch nicht stimmt.
+      const int32_t pos = *_cfg.axisPosDeg01;
+      constexpr int32_t kMarginDeg01 = 2000; // 20° Fenster an den Achsenden
+      const bool atMinZone = (pos <= kMarginDeg01);
+      const bool atMaxZone = (pos >= (amax - kMarginDeg01));
+
+      if (atMinZone && moveLeft && endL && !allowMin) {
+        duty = 0.0f;
+        if (_cfg.latchErrorOnEndstop && rsMotionActive) {
+          latchError(SE_ENDSTOP);
+        }
+      } else if (atMaxZone && moveRight && endR && !allowMax) {
+        duty = 0.0f;
+        if (_cfg.latchErrorOnEndstop && rsMotionActive) {
+          latchError(SE_ENDSTOP);
+        }
+      }
+      // sonst (inkl. ~360°): Endschalter ignorieren
+    } else if (_cfg.dutyPositiveMovesRightEndstop) {
       if ((duty < 0.0f) && endL) {
         // Richtung LEFT (MIN)
         if (!allowMin) {

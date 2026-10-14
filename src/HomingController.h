@@ -13,6 +13,8 @@
   - Diese Funktionen muessen "true = gedrueckt" liefern (egal ob elektrisch LOW oder HIGH)
 
   Sequenz (immer):
+  0) Optional UNWIND (wenn lastDeg01>=360°): LEFT bis END_MIN, durchfahren,
+     dann normales Homing (verhindert Null bei ~360° nach Fehler in 2. Runde)
   1) LEFT FAST         -> bis END_MIN (debounced)
   2) BACKOFF MIN FAST  -> bis END_MIN frei
   3) LEFT SLOW (Touch1)-> bis END_MIN
@@ -42,18 +44,29 @@
 enum HomingState : uint8_t {
   HOME_IDLE = 0,
 
+  // Multi-Turn: letzte Position war 2. Runde (>=360°) -> zuerst END_MIN bei ~360°
+  // nach links durchfahren, sonst setzt Homing dort die Null (eine Umdrehung zu weit).
+  HOME_UNWIND_SEEK_MIN,
+  HOME_UNWIND_OVERRUN,
+
   // MIN / LEFT
   HOME_SEEK_MIN_FAST,       // schnell anfahren bis END_MIN gedrueckt (debounced)
   // Optionales "Ueberfahren" in den Endschalter hinein (falls mechanisch erlaubt),
   // um nach dem Ausloesen weich abzubremsen.
   HOME_SEEK_MIN_OVERRUN,
+  // Pulse-/Ueberfahr-Endschalter: nach Freigabe im Overrun erst wieder aktiv suchen
+  HOME_BACKOFF_MIN_FIND_ACTIVE,
   HOME_BACKOFF_MIN_FAST,    // freifahren bis END_MIN frei (debounced)
   HOME_SEEK_MIN_SLOW_1,     // langsam anfahren bis END_MIN gedrueckt (1. Touch)
   HOME_BACKOFF_MIN_SLOW,    // langsam freifahren bis END_MIN frei (Release fuer Backlash)
   HOME_SEEK_MIN_SLOW_2,     // langsam anfahren bis END_MIN gedrueckt (2. Touch) -> Nullpunkt setzen
 
-  // MAX / RIGHT
-  HOME_SEEK_MAX_FAST,       // schnell anfahren bis END_MAX gedrueckt
+  // MAX / RIGHT (Anfahrt wie MIN: seekMin + Overrun-Abbremsung)
+  HOME_SEEK_MAX_FAST,       // anfahren bis END_MAX gedrueckt (seekMin-Rampe)
+  HOME_SEEK_MAX_OVERRUN,    // nach Kontakt weich weiter/abbremsen (wie MIN_OVERRUN)
+  // Wenn Endschalter beim Ueberfahren wieder freigibt: erst wieder aktiv suchen,
+  // dann freifahren (Pulse-/Ueberfahr-Endschalter).
+  HOME_BACKOFF_MAX_FIND_ACTIVE,
   HOME_BACKOFF_MAX_FAST,    // freifahren bis END_MAX frei
   HOME_SEEK_MAX_SLOW_1,     // langsam anfahren bis END_MAX gedrueckt (1. Touch)
   HOME_BACKOFF_MAX_SLOW,    // langsam freifahren bis END_MAX frei
@@ -102,13 +115,12 @@ struct HomingConfig {
   // 0 = deaktiviert (sofort stoppen und backoff).
   int32_t seekMinOverrunCounts = 0;
 
-  // SEEK_MAX_FAST: Wir erwarten ungefaehr einen kompletten Umdrehungsweg.
-  // - Beschleunigen ueber seekMaxAccelRampCounts auf fastPwmPercent
-  // - ab seekMaxDecelStartCounts wieder auf approachPwmPercent herunter rampen
-  int32_t expectedCountsPerRevHint = 160000; // Erwartungswert fuer 360deg (zur Rampen-Skalierung)
-  int32_t seekMaxAccelRampCounts = 13300;    // Rampenlaenge fuer Beschleunigung in Counts
-  int32_t seekMaxDecelStartCounts = 150000;  // ab hier Abbremsrampe Richtung approachPwmPercent
-  int32_t seekMaxDecelRampCounts = 10000;    // Rampenlaenge fuer Abbremsen (Counts)
+  // Legacy (nicht mehr fuer SEEK_MAX-Rampe): CPR-Hinweis fuer Return/Fallback.
+  int32_t expectedCountsPerRevHint = 160000;
+  // Legacy-Felder (ungenutzt seit seekMin-only SEEK_MAX; bleiben fuer Config-Kompat.)
+  int32_t seekMaxAccelRampCounts = 13300;
+  int32_t seekMaxDecelStartCounts = 150000;
+  int32_t seekMaxDecelRampCounts = 10000;
 
   // RETURN_MIN_FAST (Rueckweg auf 0 / linker Endschalter): Rampen in Grad.
   // - zu Beginn ueber returnRampDeg auf fastPwmPercent beschleunigen
@@ -144,7 +156,10 @@ public:
   // nicht per RS485 einstellbaren Parameter zu verlieren.
   HomingConfig getConfig() const { return _cfg; }
 
-  void start();               // SETREF
+  // SETREF / Kick-Retry.
+  // lastKnownDeg01: letzte logische Position (FRAM/Encoder), -1 = unbekannt.
+  // Bei >= 36000 (2. Runde) startet zuerst UNWIND (einmal END_MIN durchfahren).
+  void start(int32_t lastKnownDeg01 = -1);
   void abort();               // STOP/NSTOP
   void update(uint32_t nowMs);
 
@@ -198,7 +213,7 @@ private:
   // Wird fuer sanfte Ueberlauf-Rampen am Endschalter genutzt.
   float _lastDutyCmdSigned = 0.0f;
 
-  // Merker: Start-PWM (Betrag) beim Eintritt in HOME_SEEK_MIN_OVERRUN.
+  // Merker: Start-PWM (Betrag) beim Eintritt in *_OVERRUN.
   float _overrunStartAbsPwm = 0.0f;
 
   // ------------------------------------------------------------

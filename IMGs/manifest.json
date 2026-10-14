@@ -1,6 +1,6 @@
 {
     "name":  "Rotor Firmware",
-    "version":  "1.6.0 (2026-10-12 16:43)",
+    "version":  "1.6.0 (2026-10-14 20:13)",
     "new_install_prompt_erase":  true,
     "builds":  [
                    {

@@ -38,7 +38,7 @@ void HomingController::updateConfig(const HomingConfig& cfg) {
 }
 
 
-void HomingController::start() {
+void HomingController::start(int32_t lastKnownDeg01) {
   if (!_board || !_motor || !_enc) return;
 
   _referenced = false;
@@ -61,7 +61,13 @@ void HomingController::start() {
   _endLChangedMs = nowMs;
   _endRChangedMs = nowMs;
 
-  setState(HOME_SEEK_MIN_FAST, nowMs);
+  // 2. Runde (FRAM/Encoder): zuerst den Endschalter bei ~360° nach links
+  // durchfahren, sonst wuerde Homing dort Null setzen (eine Umdrehung zu weit).
+  if (lastKnownDeg01 >= 36000) {
+    setState(HOME_UNWIND_SEEK_MIN, nowMs);
+  } else {
+    setState(HOME_SEEK_MIN_FAST, nowMs);
+  }
 }
 
 void HomingController::abort() {
@@ -82,7 +88,8 @@ void HomingController::setState(HomingState s, uint32_t nowMs) {
   _stateStartCounts = (_enc) ? _enc->getCountsDefault() : 0;
 
   // Zusatz-Merker fuer spezielle States
-  if (s == HOME_SEEK_MIN_OVERRUN) {
+  if (s == HOME_SEEK_MIN_OVERRUN || s == HOME_SEEK_MAX_OVERRUN ||
+      s == HOME_UNWIND_OVERRUN) {
     // Start-PWM (Betrag) beim Eintritt merken, damit die Rampe sauber
     // vom aktuell gefahrenen Wert auf approachPwmPercent herunter laufen kann.
     float a = _lastDutyCmdSigned;
@@ -197,12 +204,15 @@ void HomingController::update(uint32_t nowMs) {
     return;
   }
 
-  const float pwmFast = clampFloat(_cfg.fastPwmPercent, 0.0f, 100.0f);
+  // Anfahrten zu den Endschaltern (SEEK/RETURN) nur noch mit seekMinPwm.
+  // Anschleichen/Backoff bleiben approach/backoff.
+  (void)_cfg.fastPwmPercent; // Legacy-Config, wird fuer SEEK nicht mehr genutzt
   const float pwmSlow = clampFloat(_cfg.approachPwmPercent, 0.0f, 100.0f);
   const float pwmBack = clampFloat(_cfg.backoffPwmPercent, 0.0f, 100.0f);
 
   // Ramping-Parameter
   const float pwmSeekMin = clampFloat(_cfg.seekMinPwmPercent, 0.0f, 100.0f);
+  const float pwmFast = pwmSeekMin; // SEEK_MAX / RETURN nutzen seekMin statt Fast-Cruise
   long rampSeekMinCounts = (long)_cfg.seekMinRampCounts;
   if (rampSeekMinCounts < 1) rampSeekMinCounts = 1;
   long seekMinOverrunCounts = (long)_cfg.seekMinOverrunCounts;
@@ -210,13 +220,9 @@ void HomingController::update(uint32_t nowMs) {
 
   long expectedCounts = (long)_cfg.expectedCountsPerRevHint;
   if (expectedCounts < 1) expectedCounts = 1;
-  long rampSeekMaxAccel = (long)_cfg.seekMaxAccelRampCounts;
-  if (rampSeekMaxAccel < 1) rampSeekMaxAccel = 1;
-  long rampSeekMaxDecel = (long)_cfg.seekMaxDecelRampCounts;
-  if (rampSeekMaxDecel < 1) rampSeekMaxDecel = 1;
-  long seekMaxDecelStart = (long)_cfg.seekMaxDecelStartCounts;
-  if (seekMaxDecelStart < 0) seekMaxDecelStart = 0;
-  if (seekMaxDecelStart > expectedCounts) seekMaxDecelStart = expectedCounts;
+  (void)_cfg.seekMaxAccelRampCounts;
+  (void)_cfg.seekMaxDecelRampCounts;
+  (void)_cfg.seekMaxDecelStartCounts;
 
   float returnRampDeg = _cfg.returnRampDeg;
   if (returnRampDeg < 0.0f) returnRampDeg = 0.0f;
@@ -227,6 +233,71 @@ void HomingController::update(uint32_t nowMs) {
   updateEndstopDebounce(nowMs);
   const bool endMin = endL();
   const bool endMax = endR();
+
+  // ------------------------------------------------------------
+  // 0) Multi-Turn UNWIND: erster END_MIN (~360°) nach links durchfahren
+  // ------------------------------------------------------------
+  if (_state == HOME_UNWIND_SEEK_MIN) {
+    if (endMin) {
+      // Immer ueberfahren versuchen — Ziel ist Durchfahrt in die 1. Runde.
+      // Wenn der Schalter hart bleibt (schon echter 0-Anschlag), faellt
+      // UNWIND_OVERRUN in den normalen Backoff-Pfad.
+      setState(HOME_UNWIND_OVERRUN, nowMs);
+      return;
+    }
+
+    const long cur = _enc->getCountsDefault();
+    long moved = cur - _stateStartCounts;
+    if (moved < 0) moved = -moved;
+
+    float pwm = pwmSeekMin;
+    if (moved < rampSeekMinCounts) {
+      const float t = (float)moved / (float)rampSeekMinCounts;
+      pwm = lerpFloat(pwmSlow, pwmSeekMin, t);
+    }
+    motorDrive(-pwm);
+    return;
+  }
+
+  if (_state == HOME_UNWIND_OVERRUN) {
+    // endMin wieder frei -> Schalter durchfahren, 1. Runde erreicht
+    if (!endMin) {
+      motorStop();
+      setState(HOME_SEEK_MIN_FAST, nowMs);
+      return;
+    }
+
+    // Grosszuegiges Durchfahr-Budget (~45° der erwarteten Umdrehung),
+    // damit der Mid-Endschalter bei ~360° wirklich freikommt.
+    long overrunCounts = seekMinOverrunCounts;
+    if (overrunCounts < rampSeekMinCounts) overrunCounts = rampSeekMinCounts;
+    long passBudget = expectedCounts / 8;
+    if (passBudget < 2000) passBudget = 2000;
+    if (overrunCounts < passBudget) overrunCounts = passBudget;
+
+    const long cur = _enc->getCountsDefault();
+    long moved = cur - _stateStartCounts;
+    if (moved < 0) moved = -moved;
+
+    if (moved >= overrunCounts) {
+      // Schalter immer noch gedrueckt: wahrscheinlich echter MIN-Anschlag
+      // (FRAM lag falsch / schon in 1. Runde) -> normales Homing ab Backoff.
+      motorStop();
+      setState(HOME_BACKOFF_MIN_FAST, nowMs);
+      return;
+    }
+
+    float startAbs = _overrunStartAbsPwm;
+    if (startAbs < pwmSlow) startAbs = pwmSlow;
+    if (startAbs > 100.0f) startAbs = 100.0f;
+
+    const float t = (float)moved / (float)overrunCounts;
+    const float td = clampFloat(t, 0.0f, 1.0f);
+    const float pwm = lerpFloat(startAbs, pwmSlow, td);
+
+    motorDrive(-pwm);
+    return;
+  }
 
   // ------------------------------------------------------------
   // 1) LEFT FAST -> END_MIN (1. Kontakt)
@@ -264,16 +335,19 @@ void HomingController::update(uint32_t nowMs) {
   //     und dabei sanft auf pwmSlow herunter rampen.
   // ------------------------------------------------------------
   if (_state == HOME_SEEK_MIN_OVERRUN) {
-    // Falls der Schalter doch wieder frei wird (Debounce), nicht weiter druecken.
-    if (!endMin) {
+    auto leaveMinOverrun = [&](bool stillPressed) {
       motorStop();
-      setState(HOME_BACKOFF_MIN_FAST, nowMs);
+      // Pulse-/Ueberfahr-Schalter: schon frei -> erst wieder aktiv suchen
+      setState(stillPressed ? HOME_BACKOFF_MIN_FAST : HOME_BACKOFF_MIN_FIND_ACTIVE, nowMs);
+    };
+
+    if (!endMin) {
+      leaveMinOverrun(false);
       return;
     }
 
     if (seekMinOverrunCounts <= 0) {
-      motorStop();
-      setState(HOME_BACKOFF_MIN_FAST, nowMs);
+      leaveMinOverrun(true);
       return;
     }
 
@@ -282,14 +356,10 @@ void HomingController::update(uint32_t nowMs) {
     if (moved < 0) moved = -moved;
 
     if (moved >= seekMinOverrunCounts) {
-      motorStop();
-      setState(HOME_BACKOFF_MIN_FAST, nowMs);
+      leaveMinOverrun(endMin);
       return;
     }
 
-    // Rampe vom aktuellen Wert (Betrag) sanft auf pwmSlow.
-    // Wichtig: niemals "hoch" rampen - wenn der Schalter frueh ausloest,
-    // soll die PWM nicht steigen.
     float startAbs = _overrunStartAbsPwm;
     if (startAbs < pwmSlow) startAbs = pwmSlow;
     if (startAbs > 100.0f) startAbs = 100.0f;
@@ -299,6 +369,19 @@ void HomingController::update(uint32_t nowMs) {
     const float pwm = lerpFloat(startAbs, pwmSlow, td);
 
     motorDrive(-pwm);
+    return;
+  }
+
+  // ------------------------------------------------------------
+  // 1c) MIN: nach Ueberfahren wieder in die Aktivzone fahren (Pulse-Endschalter)
+  // ------------------------------------------------------------
+  if (_state == HOME_BACKOFF_MIN_FIND_ACTIVE) {
+    if (endMin) {
+      motorStop();
+      setState(HOME_BACKOFF_MIN_FAST, nowMs);
+      return;
+    }
+    motorDrive(+pwmBack);
     return;
   }
 
@@ -376,68 +459,82 @@ void HomingController::update(uint32_t nowMs) {
   }
 
   // ------------------------------------------------------------
-  // 6) RIGHT FAST -> END_MAX
+  // 6) RIGHT SEEK -> END_MAX (gleiche Rampe wie SEEK_MIN: accel + seekMin)
   // ------------------------------------------------------------
   if (_state == HOME_SEEK_MAX_FAST) {
+    if (endMax) {
+      if (seekMinOverrunCounts > 0) {
+        setState(HOME_SEEK_MAX_OVERRUN, nowMs);
+      } else {
+        motorStop();
+        setState(HOME_BACKOFF_MAX_FAST, nowMs);
+      }
+      return;
+    }
+
+    const long cur = _enc->getCountsDefault();
+    long moved = cur - _stateStartCounts;
+    if (moved < 0) moved = -moved;
+
+    float pwm = pwmSeekMin;
+    if (moved < rampSeekMinCounts) {
+      const float t = (float)moved / (float)rampSeekMinCounts;
+      pwm = lerpFloat(pwmSlow, pwmSeekMin, t);
+    }
+    motorDrive(+pwm);
+    return;
+  }
+
+  // ------------------------------------------------------------
+  // 6b) END_MAX ueberfahren und weich auf pwmSlow abbremsen
+  // ------------------------------------------------------------
+  if (_state == HOME_SEEK_MAX_OVERRUN) {
+    auto leaveMaxOverrun = [&](bool stillPressed) {
+      motorStop();
+      setState(stillPressed ? HOME_BACKOFF_MAX_FAST : HOME_BACKOFF_MAX_FIND_ACTIVE, nowMs);
+    };
+
+    if (!endMax) {
+      leaveMaxOverrun(false);
+      return;
+    }
+
+    if (seekMinOverrunCounts <= 0) {
+      leaveMaxOverrun(true);
+      return;
+    }
+
+    const long cur = _enc->getCountsDefault();
+    long moved = cur - _stateStartCounts;
+    if (moved < 0) moved = -moved;
+
+    if (moved >= seekMinOverrunCounts) {
+      leaveMaxOverrun(endMax);
+      return;
+    }
+
+    float startAbs = _overrunStartAbsPwm;
+    if (startAbs < pwmSlow) startAbs = pwmSlow;
+    if (startAbs > 100.0f) startAbs = 100.0f;
+
+    const float t = (float)moved / (float)seekMinOverrunCounts;
+    const float td = clampFloat(t, 0.0f, 1.0f);
+    const float pwm = lerpFloat(startAbs, pwmSlow, td);
+
+    motorDrive(+pwm);
+    return;
+  }
+
+  // ------------------------------------------------------------
+  // 6c) MAX: nach Ueberfahren wieder in die Aktivzone (Pulse-Endschalter)
+  // ------------------------------------------------------------
+  if (_state == HOME_BACKOFF_MAX_FIND_ACTIVE) {
     if (endMax) {
       motorStop();
       setState(HOME_BACKOFF_MAX_FAST, nowMs);
       return;
     }
-
-    // Homing-Fahrt rechts / rechter Endschalter:
-    // -------------------------------------------------
-    // Zielverhalten (wie besprochen):
-    // - Die \"Schaetz-Strecke\" (z.B. ~160000 Counts) wird mit g_homeFastPwmPercent gefahren.
-    // - Wenn diese Strecke erreicht ist, NICHT springen, sondern mit einer Rampe
-    //   sauber auf g_minPwm herunter fahren.
-    // - Danach wird der rechte Endschalter mit KONSTANT g_minPwm gesucht,
-    //   OHNE weitere Rampen/Abbremsungen, bis der Endschalter wirklich gedrueckt ist.
-    //
-    // Wichtig:
-    // - g_minPwm muss bis zum Schalter anliegen, sonst kann der Motor kurz davor
-    //   "verhungern" (Drehmoment zu klein) und die Stall-Erkennung kann ausloesen.
-    //
-    // Umsetzung:
-    // - "Cruise" rechts = pwmFast (kommt aus g_homeFastPwmPercent)
-    // - Beschleunigungsrampe am Anfang: pwmSlow -> pwmCruiseRight
-    // - Ab seekMaxDecelStartCounts: Abbremsrampe pwmCruiseRight -> pwmSlow
-    // - Nach Ende der Abbremsrampe: konstant pwmSlow bis END_MAX
-    const long cur = _enc->getCountsDefault();
-    long moved = cur - _stateStartCounts;
-    if (moved < 0) moved = -moved;
-
-    // Rechts-Cruise: explizit g_homeFastPwmPercent (ueber _cfg.fastPwmPercent)
-    const float pwmCruiseRight = pwmFast;
-
-    // Abbremsrampe rechts: definierte Laenge (Counts), damit die Rampe vor dem Endschalter sichtbar ist.
-    // Danach wird mit pwmSlow (g_minPwm) ohne weitere Rampe bis END_MAX gesucht.
-    const long rampDecelCounts = rampSeekMaxDecel;
-    float pwm = pwmCruiseRight;
-
-    // 1) Beschleunigungsrampe am Anfang (pwmSlow -> pwmCruiseRight)
-    if (moved < rampSeekMaxAccel) {
-      const float t = (float)moved / (float)rampSeekMaxAccel;
-      pwm = lerpFloat(pwmSlow, pwmCruiseRight, t);
-    }
-
-    // 2) Ab seekMaxDecelStartCounts: Abbremsrampe auf pwmSlow (g_minPwm)
-    //    Danach konstant pwmSlow bis zum Endschalter (keine weitere Rampe!)
-    if (moved >= seekMaxDecelStart) {
-      const long decelMoved = moved - seekMaxDecelStart;
-      if (decelMoved >= rampDecelCounts) {
-        pwm = pwmSlow;
-      } else {
-        const float t = (float)decelMoved / (float)rampDecelCounts;
-        pwm = lerpFloat(pwmCruiseRight, pwmSlow, clampFloat(t, 0.0f, 1.0f));
-      }
-    }
-
-    // Harte Untergrenze: sobald wir "fahren", niemals unter pwmSlow (g_minPwm)
-    // (0 bleibt 0, aber hier fahren wir immer >0)
-    if (pwm < pwmSlow) pwm = pwmSlow;
-
-    motorDrive(+pwm);
+    motorDrive(-pwmBack);
     return;
   }
 

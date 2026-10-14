@@ -145,6 +145,19 @@ struct SafetyConfig {
   // nicht vorzeichengebunden zur PWM (Positionsregler wechselt die Richtung haeufiger).
   bool     stallAbsoluteEncoder = false;
   int32_t  stallCountsPerRev = 0;  // 0 = kein Wrap (linear)
+
+  // ----------------------------------------------------------
+  // Multi-Turn Endschalter (Typ 1/2, amax > 360°)
+  // ----------------------------------------------------------
+  // Wenn twoRevEndstopPolicy und axisMaxDeg01 > 36000:
+  // - Endschalter nur an den Achsgrenzen: nahe 0° (nach links) und nahe amax
+  //   (nach rechts) -> Soft-Stop / SE_ENDSTOP.
+  // - Durchfahrt um 360° (1.<->2. Runde) in beide Richtungen: Endschalter
+  //   werden ignoriert (kein Soft-Stop, kein Latch).
+  // Homing: allowPushIntoEnd* / setLatchErrorOnEndstop(false) unveraendert.
+  bool            twoRevEndstopPolicy = false;
+  const int32_t*  axisPosDeg01 = nullptr;  // aktuelle logische Position (Deg01)
+  const int32_t*  axisMaxDeg01 = nullptr;  // SETMAXDG
 };
 
 struct SafetyIsSnapshot {
@@ -198,6 +211,11 @@ public:
 
   void setLatchErrorOnEndstop(bool on);
   bool getLatchErrorOnEndstop() const { return _cfg.latchErrorOnEndstop; }
+
+  // Multi-Turn-Endstop-Politik (Typ 1/2, amax>360). Waehrend Homing aus,
+  // weil die logische Position vor CPR-Lernen ungueltig/0 sein kann.
+  void setTwoRevEndstopPolicy(bool on);
+  bool getTwoRevEndstopPolicy() const { return _cfg.twoRevEndstopPolicy; }
 
   void setCmdTimeoutMs(uint32_t ms);
   uint32_t getCmdTimeoutMs() const { return _cfg.cmdTimeoutMs; }

@@ -1,7 +1,9 @@
 #include <Arduino.h>
 #include <math.h>
+#include <string.h>
 
 #include <Preferences.h>
+#include <Wire.h>
 
 #include "HalBoard.h"
 #include "MotorMcpwm.h"
@@ -12,6 +14,8 @@
 #include "EncoderAxis.h"
 #include "TempSensors.h"
 #include "LoadMonitor.h"
+#include "RotorStore.h"
+#include "Fm24cl16b.h"
 
 #include "HomingController.h"
 #include "SafetyMonitor.h"
@@ -42,12 +46,9 @@
 // Muss zum Master passen. Beispiel: Master erwartet Slave 20 -> hier 20 setzen.
 static uint8_t g_slaveId = 20;
 
-// Preferences/NVS: persistente Konfiguration (wird nur bei SET-Kommandos geschrieben).
-static Preferences g_prefs;
-
-// Merker: konnten Preferences/NVS erfolgreich geoeffnet werden?
-// (Wenn nicht, laufen wir mit Defaults, aber persistentes Speichern geht nicht.)
-static bool g_prefsOk = false;
+// Persistenz auf FM24CL16B (I2C-FRAM). NVS nur noch fuer einmalige Migration.
+static RotorStore g_store;
+static bool g_storeOk = false;
 
 // RS485 UART Baudrate. Muss bei Master und Slave identisch sein.
 // 115200 ist ein guter Standard; hoeher = weniger Latenz, aber stoeranfaelliger bei schlechter Leitung.
@@ -113,6 +114,8 @@ static int32_t g_axisMinDeg01 = 0;
 
 // Oberes Achsenlimit (in Deg01). Siehe g_axisMinDeg01.
 static int32_t g_axisMaxDeg01 = 36000;
+// Aktuelle logische Position fuer Safety Multi-Turn-Endschalter (Typ 1/2, amax>360).
+static int32_t g_safetyPosDeg01 = 0;
 
 // Bereichs-Offset (Deg01) fuer mechanischen Versatz des rechten Endschalters.
 //
@@ -807,237 +810,90 @@ struct SsiTurnPersist {
 };
 
 static bool loadSsiTurnState(uint8_t& turnOut, int32_t& sldegOut) {
-  if (!g_prefsOk) return false;
-  SsiTurnPersist p{};
-  size_t n = g_prefs.getBytes("sst", &p, sizeof(p));
-  if (n != sizeof(p)) return false;
-  turnOut = p.turn;
-  sldegOut = p.sldeg;
-  return true;
+  if (!g_storeOk) return false;
+  return g_store.loadSsiTurn(turnOut, sldegOut);
 }
 
 static bool saveSsiTurnState(uint8_t turn, int32_t sldeg) {
-  if (!g_prefsOk) return false;
-  SsiTurnPersist p{ (uint8_t)(turn ? 1 : 0), sldeg };
-  size_t n = g_prefs.putBytes("sst", &p, sizeof(p));
-  return n == sizeof(p);
+  if (!g_storeOk) return false;
+  return g_store.saveSsiTurn(turn, sldeg);
 }
 
 // ============================================================================
 // Setup
 // ============================================================================
 
-// ============================================================================
-// Preferences: Laden (Fallback = aktuelle Default-Werte)
-// ============================================================================
-// WICHTIG:
-// - Wir lesen beim Start alle gespeicherten Werte aus Preferences (NVS).
-// - Wenn ein Key noch nicht existiert, bleibt der aktuelle Default-Wert erhalten.
-// - Schreiben passiert nur bei RS485-SET-Kommandos (nicht zyklisch), um Flash zu schonen.
-static void loadPreferencesIntoGlobals() {
-  // WICHTIG:
-  // Preferences muessen in setup() bereits per begin("rotor", false) geoeffnet worden sein.
-  // (Wir halten die Session offen, weil auch Rs485Dispatcher/LoadMonitor spaeter darauf schreiben.)
-  if (!g_prefsOk) {
-    // Wenn Preferences nicht initialisiert werden kann, bleiben Defaults aktiv.
-    return;
-  }
-
-  g_slaveId          = g_prefs.getUChar("id",    g_slaveId);
-
-  // Rotor-Typ (1=Rotation, 2=Elevation 90°, 3=Elevation 180°) — reine
-  // Identifikation, keine Logik hier.
-  g_rotorType        = g_prefs.getUChar("rty",   g_rotorType);
-  if (g_rotorType < 1 || g_rotorType > 3) g_rotorType = 1;
-
-  // Antennen-Auswahl (1/2/3) — reine Identifikation, siehe oben.
-  g_antSelect        = g_prefs.getUChar("asel",  g_antSelect);
-  if (g_antSelect < 1 || g_antSelect > 3) g_antSelect = 1;
-
-  g_axisMinDeg01     = g_prefs.getInt("amin",    g_axisMinDeg01);
-  g_axisMaxDeg01     = g_prefs.getInt("amax",    g_axisMaxDeg01);
-
-  // Bereichs-Offset fuer rechte-Endschalter-Versatz
-  g_dgOffsetDeg01    = g_prefs.getInt("dgo",     g_dgOffsetDeg01);
-
-  // Home-Position (Deg01, physisch) — Ziel des HOME-Kommandos
-  g_homePosDeg01     = g_prefs.getInt("hpos",    g_homePosDeg01);
-
-  // Feinjustage-Offset (RS485-Winkel)
-  g_dgCalDeg01       = g_prefs.getInt("dgcal",   g_dgCalDeg01);
-  if (g_dgCalDeg01 < -36000) g_dgCalDeg01 = -36000;
-  if (g_dgCalDeg01 > 36000) g_dgCalDeg01 = 36000;
-
-  g_homeFastPwmPercent = g_prefs.getFloat("hfp", g_homeFastPwmPercent);
-  g_homeBackoff        = g_prefs.getFloat("hbo", g_homeBackoff);
-
-  g_homeReturnToZero   = g_prefs.getBool("hrz",  g_homeReturnToZero);
-  g_homeTimeoutMs      = g_prefs.getUInt("hto",  g_homeTimeoutMs);
-
-  g_homeBacklashMeasScale = g_prefs.getFloat("bms", g_homeBacklashMeasScale);
-  if (g_homeBacklashMeasScale < 0.1f) g_homeBacklashMeasScale = 0.1f;
-  if (g_homeBacklashMeasScale > 1.0f) g_homeBacklashMeasScale = 1.0f;
-
-  g_posTimeoutMs       = g_prefs.getUInt("pto",  g_posTimeoutMs);
-
-  g_handSpeedPercent   = g_prefs.getFloat("hsp", g_handSpeedPercent);
-
-  g_cmdTimeoutMs       = g_prefs.getUInt("dman", g_cmdTimeoutMs);
-  g_jogTimeoutMs       = g_prefs.getUInt("jogt", g_jogTimeoutMs);
-  if (g_jogTimeoutMs != 0) {
-    if (g_jogTimeoutMs < 100) g_jogTimeoutMs = 100;
-    if (g_jogTimeoutMs > 5000) g_jogTimeoutMs = 5000;
-  }
-
-  g_isSoftWarnMv       = g_prefs.getUInt("iw",   g_isSoftWarnMv);
-  g_isHardStopMv       = g_prefs.getUInt("imax", g_isHardStopMv);
-
-  g_arriveTolDeg01     = g_prefs.getInt("atol",  g_arriveTolDeg01);
-
-  g_rampDistDeg        = g_prefs.getFloat("ramp", g_rampDistDeg);
-
-  g_minPwm             = g_prefs.getFloat("minp", g_minPwm);
-
-  g_stallTimeoutMs     = g_prefs.getUInt("stto",  g_stallTimeoutMs);
-
-  // --------------------------------------------------------------------------
-  // Zusaetzliche Safety/Stall Parameter (neu: EEPROM + RS485)
-  // --------------------------------------------------------------------------
-  g_stallMonitorEnabled = g_prefs.getBool("sten", g_stallMonitorEnabled);
-  g_minStallPwm         = g_prefs.getFloat("msp", g_minStallPwm);
-  g_stallMinCounts      = g_prefs.getUInt("smc",  g_stallMinCounts);
-
-  g_isGraceMs           = g_prefs.getUInt("igm",  g_isGraceMs);
-  g_isHardHoldMs        = g_prefs.getUInt("ihm",  g_isHardHoldMs);
-  g_isFilterLen         = g_prefs.getUChar("ifl", g_isFilterLen);
-
-  // Defensive Clamps (damit alt/kaputt gespeicherte Werte nicht alles zerlegen)
-  if (g_isFilterLen < 1) g_isFilterLen = 1;
-  if (g_isFilterLen > 32) g_isFilterLen = 32;
-  if (g_minStallPwm < 0.0f) g_minStallPwm = 0.0f;
-  if (g_minStallPwm > 100.0f) g_minStallPwm = 100.0f;
-
-  // Stall-Arming muss ueber g_minPwm liegen, sonst kann bei Creep-PWM
-  // (z.B. Endschalter-Suche im Homing) ein falscher Stall-Fehler entstehen.
-  // Empfehlung: +2..+5% ueber g_minPwm.
-  const float minStallSuggested = g_minPwm + 2.0f;
-  if (g_minStallPwm < minStallSuggested) g_minStallPwm = minStallSuggested;
-  if (g_minStallPwm > 100.0f) g_minStallPwm = 100.0f;
-
-  // --------------------------------------------------------------------------
-  // Zusaetzliche Homing/Encoder Parameter (neu: EEPROM + RS485)
-  // --------------------------------------------------------------------------
-  g_homeSeekMinPwmPercent = g_prefs.getFloat("hsm", g_homeSeekMinPwmPercent);
-  if (g_homeSeekMinPwmPercent < 0.0f) g_homeSeekMinPwmPercent = 0.0f;
-  if (g_homeSeekMinPwmPercent > 100.0f) g_homeSeekMinPwmPercent = 100.0f;
-
-  g_homeExpectedCountsRing  = g_prefs.getInt("ecr", g_homeExpectedCountsRing);
-  g_homeExpectedCountsMotor = g_prefs.getInt("ecm", g_homeExpectedCountsMotor);
-  if (g_homeExpectedCountsRing <= 0)  g_homeExpectedCountsRing = 158000;
-  if (g_homeExpectedCountsMotor <= 0) g_homeExpectedCountsMotor = 28000;
-
-  // EncoderType: 1=MOTOR_AXIS, 2=RING_OUTPUT, 3=ABSOLUTE_SSI (Default: 1)
-  // Kompatibilitaet: alter/ungesetzter Wert 0 wird als RING interpretiert.
-  {
-    uint8_t ect = g_prefs.getUChar("ect", 1);
-    if (ect == 1) {
-      g_encType = ENCTYPE_MOTOR_AXIS;
-    } else if (ect == 3) {
-      g_encType = ENCTYPE_ABSOLUTE_SSI;
-    } else {
-      g_encType = ENCTYPE_RING_OUTPUT;
-    }
-  }
-
-  // Achsmaximum: Typ 3 default 360° wenn amax noch nie gespeichert wurde.
-  // Obergrenze per SETMAXDG bis 720° (Turn 0/1 = zwei Encoder-Umdrehungen).
-  // Typ 1/2: hart auf 360° begrenzen (auch falls alter NVS-Wert groesser war).
-  if (g_encType == ENCTYPE_ABSOLUTE_SSI) {
-    if (!g_prefs.isKey("amax")) {
-      g_axisMaxDeg01 = 36000;
-    }
-    if (g_axisMaxDeg01 > 72000) g_axisMaxDeg01 = 72000;
-    if (g_axisMaxDeg01 < g_axisMinDeg01) g_axisMaxDeg01 = g_axisMinDeg01;
-  } else {
-    if (g_axisMaxDeg01 > 36000) g_axisMaxDeg01 = 36000;
-  }
-
-
-
-  // --------------------------------------------------------------------------
-  // Temperatur / LoadMonitor (Kalibrierung + Statistik)
-  // --------------------------------------------------------------------------
-  // Temperatur-Warnschwellen
-  g_tempWarnAmbientC   = g_prefs.getFloat("twa", g_tempWarnAmbientC);
-  g_tempWarnMotorC     = g_prefs.getFloat("twm", g_tempWarnMotorC);
-
-  // Temperatur-Sensoren tauschen (persistenter Swap)
-  g_tempSwapSensors    = g_prefs.getBool("tsw", g_tempSwapSensors);
-
-  // Kaelte-Kompensation
-  g_coldTempDegC       = g_prefs.getFloat("cth", g_coldTempDegC);
-  g_coldExtraDragPct   = g_prefs.getFloat("cpx", g_coldExtraDragPct);
-
-  // Statistik/Kalibrierung
-  g_calIgnoreRampDeg   = g_prefs.getFloat("cig", g_calIgnoreRampDeg);
-  g_statMinMoveDeg     = g_prefs.getFloat("smm", g_statMinMoveDeg);
-  g_accIgnoreRampDeg   = g_prefs.getFloat("rap", g_accIgnoreRampDeg);
-
-  // Reibung/Wind-Schwellwerte
-  g_dragWarnPct        = g_prefs.getFloat("drw", g_dragWarnPct);
-  g_dragWarnBinsPct    = g_prefs.getFloat("drb", g_dragWarnBinsPct);
-  g_dragPersistMoves   = g_prefs.getUChar("drn", g_dragPersistMoves);
-
-  g_windPeakPct        = g_prefs.getFloat("wpk", g_windPeakPct);
-  g_windCoherenceMin   = g_prefs.getFloat("wco", g_windCoherenceMin);
-
-  // Ziel-PWM der 3 automatischen Kalibrierstufen (SETCAL)
-  g_calStagePwm1       = g_prefs.getFloat("cpw1", g_calStagePwm1);
-  g_calStagePwm2       = g_prefs.getFloat("cpw2", g_calStagePwm2);
-  g_calStagePwm3       = g_prefs.getFloat("cpw3", g_calStagePwm3);
-
-  // Anemometer-Offset (km/h)
-  g_anemoOffsetKmh     = g_prefs.getFloat("ano", g_anemoOffsetKmh);
-
-  // Windrichtung-Offset (Grad)
-  g_windDirOffsetDeg   = g_prefs.getFloat("wdo", g_windDirOffsetDeg);
-
-  // Antennen-Versatz 1..3 (Grad)
-  g_antOffset1Deg      = g_prefs.getFloat("ao1", g_antOffset1Deg);
-  g_antOffset2Deg      = g_prefs.getFloat("ao2", g_antOffset2Deg);
-  g_antOffset3Deg      = g_prefs.getFloat("ao3", g_antOffset3Deg);
-
-  // Frei gespeicherte Winkel 1..3 (Grad)
-  g_angle1Deg          = g_prefs.getFloat("ag1", g_angle1Deg);
-  g_angle2Deg          = g_prefs.getFloat("ag2", g_angle2Deg);
-  g_angle3Deg          = g_prefs.getFloat("ag3", g_angle3Deg);
-
-  g_antDp1             = g_prefs.getBool("ad1", g_antDp1);
-  g_antDp2             = g_prefs.getBool("ad2", g_antDp2);
-  g_antDp3             = g_prefs.getBool("ad3", g_antDp3);
-
-  g_antDis1            = g_prefs.getUInt("di1", g_antDis1);
-  g_antDis2            = g_prefs.getUInt("di2", g_antDis2);
-  g_antDis3            = g_prefs.getUInt("di3", g_antDis3);
-  if (g_antDis1 > 99999u) g_antDis1 = 99999u;
-  if (g_antDis2 > 99999u) g_antDis2 = 99999u;
-  if (g_antDis3 > 99999u) g_antDis3 = 99999u;
-
-  // Antennennamen 1..3 (max. 9 Zeichen)
-  g_antName1           = g_prefs.getString("an1", g_antName1);
-  g_antName2           = g_prefs.getString("an2", g_antName2);
-  g_antName3           = g_prefs.getString("an3", g_antName3);
-  if (g_antName1.length() > 9) g_antName1 = g_antName1.substring(0, 9);
-  if (g_antName2.length() > 9) g_antName2 = g_antName2.substring(0, 9);
-  if (g_antName3.length() > 9) g_antName3 = g_antName3.substring(0, 9);
-
-  // Wind- & Richtungssensor Enable (bool)
-  g_windEnable         = g_prefs.getBool("wen", g_windEnable);
-  // PWM-Max persistent laden
-  g_pwmMaxAbsNv        = g_prefs.getFloat("maxp", g_pwmMaxAbsNv);
-  // Laufzeit-Sollwert und geglaetteter Istwert initial = persistenter Wert
-  g_pwmMaxAbsCmd       = g_pwmMaxAbsNv;
-  g_pwmMaxAbs          = g_pwmMaxAbsNv;
+static RotorStoreRefs makeStoreRefs() {
+  RotorStoreRefs r{};
+  r.slaveId = &g_slaveId;
+  r.rotorType = &g_rotorType;
+  r.antSelect = &g_antSelect;
+  r.encType = &g_encType;
+  r.axisMinDeg01 = &g_axisMinDeg01;
+  r.axisMaxDeg01 = &g_axisMaxDeg01;
+  r.dgOffsetDeg01 = &g_dgOffsetDeg01;
+  r.homePosDeg01 = &g_homePosDeg01;
+  r.dgCalDeg01 = &g_dgCalDeg01;
+  r.arriveTolDeg01 = &g_arriveTolDeg01;
+  r.homeExpectedCountsRing = &g_homeExpectedCountsRing;
+  r.homeExpectedCountsMotor = &g_homeExpectedCountsMotor;
+  r.homeTimeoutMs = &g_homeTimeoutMs;
+  r.posTimeoutMs = &g_posTimeoutMs;
+  r.cmdTimeoutMs = &g_cmdTimeoutMs;
+  r.jogTimeoutMs = &g_jogTimeoutMs;
+  r.isSoftWarnMv = &g_isSoftWarnMv;
+  r.isHardStopMv = &g_isHardStopMv;
+  r.stallTimeoutMs = &g_stallTimeoutMs;
+  r.stallMinCounts = &g_stallMinCounts;
+  r.isGraceMs = &g_isGraceMs;
+  r.isHardHoldMs = &g_isHardHoldMs;
+  r.antDis1 = &g_antDis1;
+  r.antDis2 = &g_antDis2;
+  r.antDis3 = &g_antDis3;
+  r.homeFastPwmPercent = &g_homeFastPwmPercent;
+  r.homeBackoff = &g_homeBackoff;
+  r.homeBacklashMeasScale = &g_homeBacklashMeasScale;
+  r.handSpeedPercent = &g_handSpeedPercent;
+  r.rampDistDeg = &g_rampDistDeg;
+  r.minPwm = &g_minPwm;
+  r.minStallPwm = &g_minStallPwm;
+  r.homeSeekMinPwmPercent = &g_homeSeekMinPwmPercent;
+  r.tempWarnAmbientC = &g_tempWarnAmbientC;
+  r.tempWarnMotorC = &g_tempWarnMotorC;
+  r.coldTempDegC = &g_coldTempDegC;
+  r.coldExtraDragPct = &g_coldExtraDragPct;
+  r.calIgnoreRampDeg = &g_calIgnoreRampDeg;
+  r.statMinMoveDeg = &g_statMinMoveDeg;
+  r.accIgnoreRampDeg = &g_accIgnoreRampDeg;
+  r.dragWarnPct = &g_dragWarnPct;
+  r.dragWarnBinsPct = &g_dragWarnBinsPct;
+  r.windPeakPct = &g_windPeakPct;
+  r.windCoherenceMin = &g_windCoherenceMin;
+  r.calStagePwm1 = &g_calStagePwm1;
+  r.calStagePwm2 = &g_calStagePwm2;
+  r.calStagePwm3 = &g_calStagePwm3;
+  r.anemoOffsetKmh = &g_anemoOffsetKmh;
+  r.windDirOffsetDeg = &g_windDirOffsetDeg;
+  r.antOffset1Deg = &g_antOffset1Deg;
+  r.antOffset2Deg = &g_antOffset2Deg;
+  r.antOffset3Deg = &g_antOffset3Deg;
+  r.angle1Deg = &g_angle1Deg;
+  r.angle2Deg = &g_angle2Deg;
+  r.angle3Deg = &g_angle3Deg;
+  r.pwmMaxAbsNv = &g_pwmMaxAbsNv;
+  r.homeReturnToZero = &g_homeReturnToZero;
+  r.stallMonitorEnabled = &g_stallMonitorEnabled;
+  r.isFilterLen = &g_isFilterLen;
+  r.dragPersistMoves = &g_dragPersistMoves;
+  r.tempSwapSensors = &g_tempSwapSensors;
+  r.windEnable = &g_windEnable;
+  r.antDp1 = &g_antDp1;
+  r.antDp2 = &g_antDp2;
+  r.antDp3 = &g_antDp3;
+  r.antName1 = &g_antName1;
+  r.antName2 = &g_antName2;
+  r.antName3 = &g_antName3;
+  return r;
 }
 
 static bool isRotorReferenced() {
@@ -1057,36 +913,41 @@ void setup() {
   Serial.println(FW_VERSION_STRING);
 
   // ------------------------------------------------------------------------
-  // Board frueh initialisieren, damit wir die Service-Taster fuer einen
-  // "Werksreset" (NVS auf Defaults) bereits beim Boot abfragen koennen.
+  // Board frueh initialisieren (inkl. I2C), Service-Taster fuer Werksreset.
   // ------------------------------------------------------------------------
   board.begin();
   delay(25); // Pullups kurz stabilisieren lassen
 
   // ------------------------------------------------------------------------
-  // Preferences/NVS oeffnen (bleibt offen fuer Rs485Dispatcher/LoadMonitor)
-  // ------------------------------------------------------------------------
-  g_prefsOk = g_prefs.begin("rotor", false);
-
-  // ------------------------------------------------------------------------
   // Werksreset per Hardware: Beide Handspeed-Taster beim Boot gedrueckt halten
-  // -> NVS komplett loeschen (alle Keys im Namespace "rotor")
-  // -> IMMER Neustart
+  // -> FRAM-Header invalidieren + Rest-NVS leeren -> Neustart (Defaults)
   // ------------------------------------------------------------------------
   if (board.readServiceLeft() && board.readServiceRight()) {
     board.setLed(true);
-    if (g_prefsOk) {
-      // Alles loeschen: Konfiguration + Baseline/Statistik
-      g_prefs.clear();
+    Preferences p;
+    if (p.begin("rotor", false)) {
+      p.clear();
+      p.end();
     }
-    // Kleiner Delay, damit Flash/Serial sicher fertig sind
+    Fm24cl16b fram;
+    fram.begin(Wire);
+    if (fram.ok()) {
+      uint8_t z[32];
+      memset(z, 0, sizeof(z));
+      fram.write(FRAM_OFF_HEADER, z, sizeof(z));
+      uint8_t zpos[FRAM_SIZE_POS];
+      memset(zpos, 0, sizeof(zpos));
+      fram.write(FRAM_OFF_POS, zpos, sizeof(zpos));
+    }
     delay(250);
     ESP.restart();
     return;
   }
 
-  // Preferences laden (persistente Konfiguration)
-  loadPreferencesIntoGlobals();
+  // FRAM laden / aus NVS migrieren / Defaults schreiben
+  g_storeOk = g_store.begin(Wire, makeStoreRefs());
+  g_pwmMaxAbsCmd = g_pwmMaxAbsNv;
+  g_pwmMaxAbs = g_pwmMaxAbsNv;
 
   board.applyHardwareProfile(g_encType);
 
@@ -1182,6 +1043,12 @@ void setup() {
     }
   }
 
+  // Typ 1/2 Multi-Turn: 1. Runde rechts durchfahren, 2. Runde Endstop=Fehler
+  safetyCfg.twoRevEndstopPolicy =
+      (g_encType == ENCTYPE_MOTOR_AXIS || g_encType == ENCTYPE_RING_OUTPUT);
+  safetyCfg.axisPosDeg01 = &g_safetyPosDeg01;
+  safetyCfg.axisMaxDeg01 = &g_axisMaxDeg01;
+
   safety.begin(&board, safetyCfg);
   safety.setSerialLogging(g_debug);
 
@@ -1209,7 +1076,7 @@ void setup() {
     ecfg.axisMaxDeg01 = g_axisMaxDeg01;
   } else {
     ecfg.rangeDegOffsetDeg01 = g_dgOffsetDeg01;
-    ecfg.axisMaxDeg01 = 36000;
+    ecfg.axisMaxDeg01 = g_axisMaxDeg01;
 
     if (g_encType == ENCTYPE_RING_OUTPUT) {
       ecfg.zEnabled = true;
@@ -1234,16 +1101,11 @@ void setup() {
     if (g_debug) Serial.println("FEHLER: Encoder begin() fehlgeschlagen!");
   }
 
-  // SSI-Turn aus NVS laden (nach begin, weil begin den Turn auf 0 setzt).
-  // Bevorzugt aus dem kombinierten Blob ("sst"); falls dieser (noch) nicht existiert
-  // (alte Firmware-Version), Fallback auf die alten Einzel-Keys "sturn"/"sldeg".
-  if (g_encType == ENCTYPE_ABSOLUTE_SSI && g_prefsOk) {
+  // SSI-Turn aus FRAM laden (nach begin, weil begin den Turn auf 0 setzt).
+  if (g_encType == ENCTYPE_ABSOLUTE_SSI && g_storeOk) {
     uint8_t st = 0;
     int32_t sld = -1;
     if (loadSsiTurnState(st, sld)) {
-      encoder.loadSsiTurn(st);
-    } else {
-      st = g_prefs.getUChar("sturn", 0);
       encoder.loadSsiTurn(st);
     }
   }
@@ -1290,6 +1152,44 @@ void setup() {
   hcfg.segmentTimeoutMs = g_homeTimeoutMs;
   hcfg.backlashMeasuredToModelScale = g_homeBacklashMeasScale;
   homing.begin(&board, &motor, &encoder, hcfg);
+
+  // FRAM-POS Restore (Typ 1/2): nach einmaligem Homing ohne SETREF starten,
+  // ausser moveActive (Strom weg waehrend Fahrt) -> erneut homen.
+  if (g_storeOk) {
+    RotorPersistPos pos{};
+    if (g_store.loadPos(pos)) {
+      if (g_store.isPosMoveActive()) {
+        homing.setReferenced(false);
+        g_backlashDeg01 = 0;
+        if (g_debug) Serial.println("[POS] moveActive — Homing erforderlich");
+      } else if (g_store.isPosHomeValid() &&
+                 (pos.encTypeU8 == (uint8_t)g_encType) &&
+                 pos.countsPerRev > 100) {
+        encoder.setCountsPerRevActual(pos.countsPerRev);
+        encoder.setCounts((long)pos.encoderCounts);
+        g_backlashDeg01 = pos.backlashDeg01;
+        if (g_backlashDeg01 < 0) g_backlashDeg01 = -g_backlashDeg01;
+        homing.setReferenced(true);
+        if (g_debug) {
+          Serial.print("[POS] restored counts=");
+          Serial.print(pos.encoderCounts);
+          Serial.print(" cpr=");
+          Serial.print(pos.countsPerRev);
+          Serial.print(" backlashDeg01=");
+          Serial.println(g_backlashDeg01);
+        }
+      } else {
+        homing.setReferenced(false);
+        g_backlashDeg01 = 0;
+      }
+    } else {
+      homing.setReferenced(false);
+      g_backlashDeg01 = 0;
+    }
+  } else {
+    homing.setReferenced(false);
+    g_backlashDeg01 = 0;
+  }
   } else {
     HomingConfig hcfg = HomingConfig{};
     homing.begin(&board, &motor, &encoder, hcfg);
@@ -1385,9 +1285,8 @@ void setup() {
   lcfg.calStagePwm2 = &g_calStagePwm2;
   lcfg.calStagePwm3 = &g_calStagePwm3;
 
-  // Preferences sind optional (falls begin() fehlschlaegt):
-  // Ohne Preferences laeuft LoadMonitor trotzdem, speichert aber nichts persistent.
-  loadMon.begin(g_prefsOk ? &g_prefs : nullptr, &safety, &motion, &temps, lcfg);
+  // FRAM optional (falls Probe fehlschlaegt): ohne Store keine Cal-Persistenz.
+  loadMon.begin(g_storeOk ? &g_store : nullptr, &safety, &motion, &temps, lcfg);
 
   // -------------------------
   // RS485 Proto
@@ -1429,8 +1328,8 @@ void setup() {
   dcfg.homePosDeg01 = &g_homePosDeg01;
 
 
-// Persistente Parameter (RS485 SET/GET -> Preferences)
-dcfg.prefs = g_prefsOk ? &g_prefs : nullptr;
+// Persistente Parameter (RS485 SET/GET -> FRAM)
+dcfg.store = g_storeOk ? &g_store : nullptr;
 
 dcfg.homeFastPwmPercent = &g_homeFastPwmPercent;
 dcfg.homeBackoff        = &g_homeBackoff;
@@ -1718,18 +1617,16 @@ void loop() {
   if (g_encType == ENCTYPE_ABSOLUTE_SSI) {
     homing.setReferenced(encoder.isSsiValid());
 
-    // Einmalig nach erstem gültigen SSI-Wert: Turn aus letzter logischer Position heilen,
-    // falls NVS-sturn=0 aber wir eindeutig im Überdrehbereich standen (z.B. 382° → Roh 22°).
-    if (g_prefsOk && encoder.isSsiValid()) {
+    // Einmalig nach erstem gueltigen SSI-Wert: Turn aus letzter logischer Position heilen,
+    // falls sturn=0 aber wir eindeutig im Ueberdrehbereich standen (z.B. 382° → Roh 22°).
+    if (g_storeOk && encoder.isSsiValid()) {
       static bool s_ssiTurnBootReconcileDone = false;
       if (!s_ssiTurnBootReconcileDone) {
         s_ssiTurnBootReconcileDone = true;
         if (encoder.getSsiTurn() == 0) {
           uint8_t stTmp = 0;
           int32_t lastDeg01 = -1;
-          if (!loadSsiTurnState(stTmp, lastDeg01)) {
-            lastDeg01 = g_prefs.getInt("sldeg", -1);
-          }
+          (void)loadSsiTurnState(stTmp, lastDeg01);
           const int32_t amax = (g_axisMaxDeg01 > 0) ? g_axisMaxDeg01 : 36000;
           if (lastDeg01 >= 36000 && lastDeg01 <= amax) {
             int32_t curDeg01 = 0;
@@ -1751,7 +1648,7 @@ void loop() {
     // Turn sofort persistieren (auch während Fahrt) — Kabelbruch-Schutz bei Stromausfall.
     // Ein einzelner kombinierter Flash-Write (statt zwei) haelt den unvermeidlichen
     // kurzen Aussetzer (Flash-Erase/Write blockiert kurz beide CPU-Kerne) so kurz wie moeglich.
-    if (encoder.consumeSsiTurnDirty(nowMs) && g_prefsOk) {
+    if (encoder.consumeSsiTurnDirty(nowMs) && g_storeOk) {
       const uint8_t turn = encoder.getSsiTurn();
       int32_t deg01 = 0;
       encoder.getPositionDeg01(deg01);
@@ -1765,7 +1662,7 @@ void loop() {
     {
       static bool s_wasMotionActive = false;
       const bool motionActive = motion.isMotionActive();
-      if (s_wasMotionActive && !motionActive && g_prefsOk && encoder.isSsiValid()) {
+      if (s_wasMotionActive && !motionActive && g_storeOk && encoder.isSsiValid()) {
         int32_t deg01 = 0;
         if (encoder.getPositionDeg01(deg01)) {
           saveSsiTurnState(encoder.getSsiTurn(), deg01);
@@ -1810,9 +1707,15 @@ void loop() {
   // Im Homing ist es NORMAL, dass ein Endschalter aktiv wird (wir fahren ihn absichtlich an).
   // Deshalb duerfen wir waehrend Homing KEINEN Endstop-Fehler latchen, sondern nur clampen.
   // Ausserhalb Homing bleibt Endstop-Latching aktiv.
+  // Multi-Turn-Endstop-Politik (nur Grenzen 0/amax) waehrend Homing AUS:
+  // Vor CPR-Lernen ist die logische Position oft 0/ungueltig — sonst blockiert
+  // Soft-Stop den Rueckzug vom rechten Endschalter (Motor summt, kein REF).
   static bool s_lastHomingForEndstopLatch = false;
   if (homingActive != s_lastHomingForEndstopLatch) {
     safety.setLatchErrorOnEndstop(!homingActive);
+    const bool typ12 =
+        (g_encType == ENCTYPE_MOTOR_AXIS || g_encType == ENCTYPE_RING_OUTPUT);
+    safety.setTwoRevEndstopPolicy(!homingActive && typ12);
     s_lastHomingForEndstopLatch = homingActive;
   }
 
@@ -1826,58 +1729,72 @@ void loop() {
   //   ein kleines Stueck ueberfahren, um weich abzubremsen.
   // - Daher erlauben wir das Ueberfahren NUR im Overrun-State.
   const HomingState hs = homing.getState();
-  const bool allowMinOverrun = (hs == HOME_SEEK_MIN_OVERRUN);
-  const bool allowMaxOverrun = false; // aktuell nicht genutzt
+  const bool allowMinOverrun =
+      (hs == HOME_SEEK_MIN_OVERRUN) || (hs == HOME_UNWIND_OVERRUN);
+  const bool allowMaxOverrun = (hs == HOME_SEEK_MAX_OVERRUN);
   safety.setAllowPushIntoEndMin(allowMinOverrun);
   safety.setAllowPushIntoEndMax(allowMaxOverrun);
 
-  // Umkehrspiel nach Homing uebernehmen (einmalig beim Uebergang auf referenced)
-  static bool s_lastRefState = false;
-  bool refNow = isRotorReferenced();
-  if (refNow && !s_lastRefState) {
-    if (g_encType == ENCTYPE_MOTOR_AXIS) {
-      g_backlashDeg01 = homing.getBacklashDeg01();
-    } else {
-      g_backlashDeg01 = 0;
+  // Nach echtem Homing (nicht FRAM-Restore): Backlash + POS in FRAM speichern
+  static bool s_prevHomingActive = false;
+  const bool justFinishedHoming =
+      s_prevHomingActive && !homingActive && isRotorReferenced() &&
+      (g_encType == ENCTYPE_MOTOR_AXIS || g_encType == ENCTYPE_RING_OUTPUT);
+  s_prevHomingActive = (g_encType != ENCTYPE_ABSOLUTE_SSI) && homingActive;
+
+  if (justFinishedHoming) {
+    g_backlashDeg01 = homing.getBacklashDeg01();
+    if (g_backlashDeg01 < 0) g_backlashDeg01 = -g_backlashDeg01;
+
+    if (g_storeOk) {
+      int32_t deg01 = 0;
+      (void)encoder.getPositionDeg01(deg01);
+      const int32_t cpr = encoder.getCountsPerRevActual();
+      const long counts = encoder.getCountsDefault();
+      g_store.savePosHome((uint8_t)g_encType, cpr, g_backlashDeg01,
+                          (int32_t)homing.getBacklashCounts(),
+                          (int32_t)counts, deg01);
     }
 
     if (g_debug) {
       Serial.print("[CFG] Homing done | encType=");
-      if (g_encType == ENCTYPE_MOTOR_AXIS) {
-        Serial.print("MOTOR_AXIS");
-      } else if (g_encType == ENCTYPE_RING_OUTPUT) {
-        Serial.print("RING_OUTPUT");
-      } else {
-        Serial.print("ABSOLUTE_SSI");
-      }
-
+      Serial.print((g_encType == ENCTYPE_MOTOR_AXIS) ? "MOTOR_AXIS" : "RING_OUTPUT");
       Serial.print(" | CPRlearned=");
       Serial.print(homing.getCountsPerRevLearned());
-      Serial.print(" | CPRactual=");
-      Serial.print(encoder.getCountsPerRevActual());
-
-      if (g_encType == ENCTYPE_MOTOR_AXIS) {
-        Serial.print(" | backlashCounts=");
-        Serial.print(homing.getBacklashCounts());
-        Serial.print(" | backlashDeg01=");
-        Serial.println(g_backlashDeg01);
-      } else {
-        // Ringencoder: Z-Statistik ausgeben (Counts zwischen den Z-Impulsen)
-        const EncoderZStats zs = encoder.getZStats();
-        Serial.print(" | Zcnt=");
-        Serial.print(zs.zCount);
-        Serial.print(" dzSteps=");
-        Serial.print(zs.dzSteps);
-        Serial.print(" dzUs=");
-        Serial.print(zs.dzUs);
-        Serial.print(" zErr=");
-        Serial.print(zs.zErrSteps);
-        Serial.print(" corrOff=");
-        Serial.println(zs.corrOffsetSteps);
-      }
+      Serial.print(" | backlashDeg01=");
+      Serial.println(g_backlashDeg01);
     }
   }
-  s_lastRefState = refNow;
+
+  // Typ 1/2: Position periodisch / an Bewegungsrändern in FRAM (nicht blockierend)
+  if (g_storeOk &&
+      (g_encType == ENCTYPE_MOTOR_AXIS || g_encType == ENCTYPE_RING_OUTPUT) &&
+      isRotorReferenced() && !homingActive) {
+    static bool s_wasIncMotion = false;
+    static uint32_t s_lastPosSaveMs = 0;
+    const bool mot = motion.isMotionActive();
+
+    if (mot && !s_wasIncMotion) {
+      g_store.setMoveActive(true);
+      int32_t deg01 = 0;
+      (void)encoder.getPositionDeg01(deg01);
+      g_store.savePosSnapshot((int32_t)encoder.getCountsDefault(), deg01);
+      s_lastPosSaveMs = nowMs;
+    } else if (mot) {
+      if ((nowMs - s_lastPosSaveMs) >= 50) {
+        int32_t deg01 = 0;
+        (void)encoder.getPositionDeg01(deg01);
+        g_store.savePosSnapshot((int32_t)encoder.getCountsDefault(), deg01);
+        s_lastPosSaveMs = nowMs;
+      }
+    } else if (s_wasIncMotion && !mot) {
+      int32_t deg01 = 0;
+      (void)encoder.getPositionDeg01(deg01);
+      g_store.savePosSnapshot((int32_t)encoder.getCountsDefault(), deg01);
+      g_store.setMoveActive(false);
+    }
+    s_wasIncMotion = mot;
+  }
 
   // Motion (ohne Safety)
   // Hinweis: Waehrend Homing ist motion.update() zwar aktiv, aber die PWM kommt aus dem HomingController.
@@ -1940,6 +1857,12 @@ void loop() {
   const long safetyEncCounts = (g_encType == ENCTYPE_ABSOLUTE_SSI)
                                    ? encoder.getCountsExtended()
                                    : encoder.getCountsRaw();
+  {
+    int32_t posDeg01 = 0;
+    if (encoder.getPositionDeg01(posDeg01)) {
+      g_safetyPosDeg01 = posDeg01;
+    }
+  }
   // Stall-Erkennung darf waehrend STOP-/Richtungswechsel-Bremssequenzen nicht ausloesen.
   // Sonst kann es passieren, dass bei auslaufender PWM noch > Stall-Schwelle ist,
   // aber nur wenige Counts kommen (gewollt), und trotzdem SE_STALL gelatcht wird.

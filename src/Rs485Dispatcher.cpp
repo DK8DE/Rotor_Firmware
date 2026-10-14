@@ -3,7 +3,7 @@
 
 #include <math.h>
 #include <cstring>
-#include <Preferences.h>
+#include "RotorStore.h"
 
 // Vorwaertsdeklarationen (werden in dieser Datei spaeter definiert)
 static int32_t computeChecksumScaled100Local(uint8_t src, uint8_t dst, const String& params);
@@ -65,8 +65,9 @@ static bool isAbsoluteEncType(const Rs485DispatcherConfig& cfg) {
 }
 
 static int32_t encTypeAxisMaxLimitDeg01(const Rs485DispatcherConfig& cfg) {
-  // Typ 3: Turn 0/1 → logisch bis 2 Umdrehungen (720°).
-  return isAbsoluteEncType(cfg) ? 72000 : 36000;
+  // Typ 1/2/3: bis 720° (2 Umdrehungen). Bei Typ 1/2 ist CPR = 360° wenn amax>360.
+  (void)cfg;
+  return 72000;
 }
 
 // ============================================================================
@@ -166,7 +167,40 @@ void Rs485Dispatcher::updateHomingKickRetry(uint32_t nowMs) {
     Serial.println((int)*_cfg.homingKickTries);
   }
 
-  _homing->start();
+  startHomingWithUnwindHint();
+}
+
+int32_t Rs485Dispatcher::resolveHomingLastDeg01() const {
+  int32_t best = -1;
+
+  // Live-Encoder (nach Fault oft noch Counts/CPR im RAM)
+  if (_cfg.encoderAxis) {
+    int32_t live = 0;
+    if (_cfg.encoderAxis->getPositionDeg01(live)) {
+      best = live;
+    }
+  }
+
+  // FRAM-POS (vor clearHomeValid)
+  if (_cfg.store) {
+    RotorPersistPos p{};
+    if (_cfg.store->loadPos(p)) {
+      if (p.deg01 > best) best = p.deg01;
+    }
+  }
+
+  if (_homingLastKnownDeg01 > best) best = _homingLastKnownDeg01;
+  return best;
+}
+
+void Rs485Dispatcher::startHomingWithUnwindHint() {
+  if (!_homing) return;
+  _homing->start(_homingLastKnownDeg01);
+  if (safeBool(_cfg.debug, false) && _homingLastKnownDeg01 >= 36000) {
+    Serial.print("[HOMING] Unwind 2. Runde (lastDeg01=");
+    Serial.print(_homingLastKnownDeg01);
+    Serial.println(")");
+  }
 }
 
 void Rs485Dispatcher::updateJogWatchdog(uint32_t nowMs) {
@@ -692,8 +726,8 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   }
 
 
-  // Preferences: nur schreiben, wenn ein SET wirklich etwas aendert.
-  Preferences* prefs = _cfg.prefs;
+  // FRAM: nur schreiben, wenn ein SET wirklich etwas aendert.
+  RotorStore* store = _cfg.store;
 
   // ------------------------------------------------------------------------
   // Kleine Helper fuer SET/GET-Parameter
@@ -704,46 +738,46 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     return v;
   };
 
-  auto persistPutU8 = [&](const char* key, uint8_t* var, uint8_t nv) {
-    if (!var) return;
-    if (*var == nv) return;                 // keine Aenderung -> kein Flash-Write
-    *var = nv;
-    if (prefs) prefs->putUChar(key, nv);
-  };
-
-  auto persistPutI32 = [&](const char* key, int32_t* var, int32_t nv) {
+  auto persistPutU8 = [&](const char* /*key*/, uint8_t* var, uint8_t nv) {
     if (!var) return;
     if (*var == nv) return;
     *var = nv;
-    if (prefs) prefs->putInt(key, nv);
+    if (store) store->saveConfig();
   };
 
-  auto persistPutU32 = [&](const char* key, uint32_t* var, uint32_t nv) {
+  auto persistPutI32 = [&](const char* /*key*/, int32_t* var, int32_t nv) {
     if (!var) return;
     if (*var == nv) return;
     *var = nv;
-    if (prefs) prefs->putUInt(key, nv);
+    if (store) store->saveConfig();
   };
 
-  auto persistPutBool = [&](const char* key, bool* var, bool nv) {
+  auto persistPutU32 = [&](const char* /*key*/, uint32_t* var, uint32_t nv) {
     if (!var) return;
     if (*var == nv) return;
     *var = nv;
-    if (prefs) prefs->putBool(key, nv);
+    if (store) store->saveConfig();
   };
 
-  auto persistPutFloat = [&](const char* key, float* var, float nv) {
+  auto persistPutBool = [&](const char* /*key*/, bool* var, bool nv) {
+    if (!var) return;
+    if (*var == nv) return;
+    *var = nv;
+    if (store) store->saveConfig();
+  };
+
+  auto persistPutFloat = [&](const char* /*key*/, float* var, float nv) {
     if (!var) return;
     if (!floatChanged(*var, nv)) return;
     *var = nv;
-    if (prefs) prefs->putFloat(key, nv);
+    if (store) store->saveConfig();
   };
 
-  auto persistPutString = [&](const char* key, String* var, const String& nv) {
+  auto persistPutString = [&](const char* /*key*/, String* var, const String& nv) {
     if (!var) return;
-    if (*var == nv) return;                 // keine Aenderung -> kein Flash-Write
+    if (*var == nv) return;
     *var = nv;
-    if (prefs) prefs->putString(key, nv);
+    if (store) store->saveConfig();
   };
 
   // SafetyConfig live aktualisieren (ohne Neustart).
@@ -826,28 +860,21 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   }
 
   // ------------------------------------------------------------------------
-  // RESET (Werksreset / NVS loeschen)
-  // - Loescht ALLE Keys im Preferences-Namespace "rotor" (Konfiguration + Baseline/Statistik)
+  // RESET (Werksreset / FRAM loeschen)
+  // - Invalidiert FRAM-Header (Boot schreibt Defaults neu)
   // - Danach IMMER Reboot
-  //
-  // Nutzung (Master -> Slave):
-  //   RESET:1
-  // (params wird fuer die Funktion ignoriert, dient nur der Checksumme)
   // ------------------------------------------------------------------------
   if (cmd == "RESET") {
-    Preferences* prefs = _cfg.prefs;
-    if (!prefs) {
-      if (shouldReply) sendNak(f.master, "RESET", "NOPREFS");
+    RotorStore* st = _cfg.store;
+    if (!st) {
+      if (shouldReply) sendNak(f.master, "RESET", "NOSTORE");
       return;
     }
 
-    // Alles loeschen (inkl. Kalibrier-Baseline und Live-Statistik)
-    prefs->clear();
+    st->factoryReset();
 
-    // ACK vor dem Neustart senden (damit Master die Aktion bestaetigt bekommt)
     if (shouldReply) sendAck(f.master, "RESET", "1");
 
-    // Neustart leicht verzoegert, damit RS485 ACK sicher rausgeht
     requestRestart(300);
     serialEventState("RESET");
     return;
@@ -2369,8 +2396,14 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     const bool startHoming = (mode >= 1);
 
     if (startHoming && !isAbsoluteEncType(_cfg)) {
+      // Vor clearHomeValid: Runden-Hinweis sichern (2. Runde -> Unwind)
+      _homingLastKnownDeg01 = resolveHomingLastDeg01();
+      // FRAM-POS: gespeicherte Referenz verwerfen, volles Homing erzwingen
+      if (_cfg.store) {
+        _cfg.store->clearHomeValid();
+      }
       // Homing starten (Legacy) — nicht bei ENCTYPE=3 (SSI absolut)
-      _homing->start();
+      startHomingWithUnwindHint();
 
       requestHomingKick(nowMs, "SETREF");
       serialEventState("SETREF_HOME");
@@ -2390,7 +2423,7 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   // Protokoll: JOG:<DIR>
   //   DIR 0 = Abbremsen (Weg proportional zur aktuellen PWM * rampDistDeg)
   //   DIR 1 = Richtung axisMinDeg01 (typisch 0°)
-  //   DIR 2 = Richtung axisMaxDeg01 (typisch 360°, Typ3/SSI bis 720°)
+  //   DIR 2 = Richtung axisMaxDeg01 (typisch 360°, bis 720° bei SETMAXDG)
   //
   // Master sendet JOG:1/2 alle paar ms. Hochrampe ueber rampDistDeg.
   // Kein JOG:1/2 innerhalb jogTimeoutMs (Default 500, SETJOGTOUT) oder
@@ -2772,8 +2805,8 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   //
   // Ziel (nur Typ 1/2):
   // - Rechter Endschalter kann mechanisch zu spaet ausloesen (z.B. erst bei 362,50deg).
-  // - Logischer Arbeitsbereich bleibt 0..360,00deg.
-  // - Offset wird SYMMETRISCH verteilt, damit "0" nicht in den linken Endschalter faehrt.
+  // - Bei amax<=360: logischer Arbeitsbereich 0..amax; Offset symmetrisch auf Basis amax.
+  // - Bei amax>360 (Multi-Turn): Offset auf Basis 360° (CPR = eine Umdrehung).
   // Typ 3 (SSI): DGOFFSET wird ignoriert (kein Endschalter-Offset).
   //
   // Umsetzung:
@@ -3291,16 +3324,12 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
       if (shouldReply) sendNak(f.master, "SETENCZERO", "NOHW");
       return;
     }
-    // Turn-Zähler mit zurücksetzen und persistieren (kein erneutes Dirty)
+    // Turn-Zaehler mit zuruecksetzen und in FRAM persistieren
     _cfg.encoderAxis->loadSsiTurn(0);
-    if (_cfg.prefs) {
-      _cfg.prefs->putUChar("sturn", 0);
+    if (_cfg.store) {
       int32_t deg01 = 0;
-      if (_cfg.encoderAxis->getPositionDeg01(deg01)) {
-        _cfg.prefs->putInt("sldeg", deg01);
-      } else {
-        _cfg.prefs->putInt("sldeg", 0);
-      }
+      if (!_cfg.encoderAxis->getPositionDeg01(deg01)) deg01 = 0;
+      _cfg.store->saveSsiTurn(0, deg01);
     }
     if (shouldReply) sendAck(f.master, "SETENCZERO", "1");
     serialEventState("SETENCZERO");
@@ -3328,11 +3357,12 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
       return;
     }
     _cfg.encoderAxis->loadSsiTurn((uint8_t)v);
-    if (_cfg.prefs) {
-      _cfg.prefs->putUChar("sturn", (uint8_t)v);
+    if (_cfg.store) {
       int32_t deg01 = 0;
       if (_cfg.encoderAxis->getPositionDeg01(deg01)) {
-        _cfg.prefs->putInt("sldeg", deg01);
+        _cfg.store->saveSsiTurn((uint8_t)v, deg01);
+      } else {
+        _cfg.store->saveSsiTurn((uint8_t)v, 0);
       }
     }
     if (shouldReply) sendAck(f.master, "SETENCTURN", "1");

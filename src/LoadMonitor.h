@@ -2,7 +2,7 @@
 
 #include <Arduino.h>
 
-class Preferences;
+class RotorStore;
 class SafetyMonitor;
 class MotionController;
 class TempSensors;
@@ -93,8 +93,8 @@ class LoadMonitor {
 public:
   LoadMonitor() = default;
 
-  // prefs: Zeiger auf Preferences-Instanz (Namespace "rotor" muss bereits begin() haben)
-  void begin(Preferences* prefs,
+  // store: Zeiger auf RotorStore (FRAM); nullptr = keine Persistenz
+  void begin(RotorStore* store,
              SafetyMonitor* safety,
              MotionController* motion,
              TempSensors* temps,
@@ -116,7 +116,7 @@ public:
   // Abbruch (z.B. ABORTCAL oder Safety-Fault)
   void abortCalibration(uint32_t nowMs);
 
-  // Loescht gespeicherte Baseline (Preferences)
+  // Loescht gespeicherte Baseline (FRAM)
   bool deleteCalibration();
 
   // Loescht Live-Statistik (Preferences bleiben unveraendert)
@@ -221,7 +221,7 @@ private:
   void computeLastMetrics();
 
 private:
-  Preferences* _prefs = nullptr;
+  RotorStore* _store = nullptr;
   SafetyMonitor* _safety = nullptr;
   MotionController* _motion = nullptr;
   TempSensors* _temps = nullptr;

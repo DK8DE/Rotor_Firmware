@@ -1,23 +1,11 @@
 #include "LoadMonitor.h"
 
-#include <Preferences.h>
 #include <math.h>
 
 #include "SafetyMonitor.h"
 #include "MotionController.h"
 #include "TempSensors.h"
-
-// ============================================================================
-// Preferences Keys (Namespace "rotor")
-// ============================================================================
-// Baseline-Profile (Kalibrierung)
-static const char* KEY_CAL_VALID = "calv";   // bool
-static const char* KEY_CAL_CW    = "calcw";  // bytes: CAL_STAGES * LOAD_BINS * uint16
-static const char* KEY_CAL_CCW   = "calcc";  // bytes: CAL_STAGES * LOAD_BINS * uint16
-static const char* KEY_CAL_PWM   = "calpw";  // bytes: CAL_STAGES * float (tatsaechliche PWM je Stufe)
-static const char* KEY_CAL_TAMB  = "ctA";    // float (Umgebungstemp bei Kalibrierung)
-static const char* KEY_CAL_TMOT  = "ctM";    // float (Motortemp bei Kalibrierung)
-static const char* KEY_CAL_AMAX  = "cama";   // int32: Achsmaximum (Deg01) bei Kalibrierung
+#include "RotorStore.h"
 
 // Compiled-in Fallback-Default fuer die 3 PWM-Kalibrierstufen, falls kein
 // Config-Pointer (LoadMonitorConfigPointers::calStagePwm1/2/3) gesetzt ist.
@@ -64,18 +52,18 @@ static float accIgnoreDeg(const LoadMonitorConfigPointers& cfg) {
 // LoadMonitor
 // ============================================================================
 
-void LoadMonitor::begin(Preferences* prefs,
+void LoadMonitor::begin(RotorStore* store,
                         SafetyMonitor* safety,
                         MotionController* motion,
                         TempSensors* temps,
                         const LoadMonitorConfigPointers& cfg) {
-  _prefs = prefs;
+  _store = store;
   _safety = safety;
   _motion = motion;
   _temps = temps;
   _cfg = cfg;
 
-  // Baseline aus Preferences laden
+  // Baseline aus FRAM laden
   _calValid = false;
   for (uint8_t s = 0; s < CAL_STAGES; s++) {
     _calStagePwm[s] = CAL_STAGE_PWM[s];
@@ -95,36 +83,16 @@ void LoadMonitor::begin(Preferences* prefs,
     _accCntCcw[i] = 0;
   }
 
-  if (_prefs) {
-    bool valid = _prefs->getBool(KEY_CAL_VALID, false);
-    size_t lenCw  = _prefs->getBytesLength(KEY_CAL_CW);
-    size_t lenCcw = _prefs->getBytesLength(KEY_CAL_CCW);
-    size_t lenPwm = _prefs->getBytesLength(KEY_CAL_PWM);
-
-    const size_t expectBinsLen = sizeof(_calCw); // CAL_STAGES * LOAD_BINS * uint16
-    const size_t expectPwmLen  = sizeof(_calStagePwm);
-
-    // Hinweis: Eine aeltere, einstufige Kalibrierung (frueheres Firmware-
-    // Format, lenCw == LOAD_BINS*sizeof(uint16)) passt nicht mehr zum neuen
-    // 3-Stufen-Format und wird hier bewusst verworfen -> einmalig neu
-    // kalibrieren (SETCAL) nach einem Firmware-Update erforderlich.
-    if (valid && lenCw == expectBinsLen && lenCcw == expectBinsLen) {
-      _prefs->getBytes(KEY_CAL_CW,  _calCw,  expectBinsLen);
-      _prefs->getBytes(KEY_CAL_CCW, _calCcw, expectBinsLen);
+  if (_store) {
+    bool valid = false;
+    float tA = 0.0f, tM = 0.0f;
+    int32_t storedAmax = 36000;
+    if (_store->loadCalibration(valid, _calCw, _calCcw, _calStagePwm, tA, tM, storedAmax) && valid) {
       _calValid = true;
-
-      if (lenPwm == expectPwmLen) {
-        _prefs->getBytes(KEY_CAL_PWM, _calStagePwm, expectPwmLen);
-      } else {
-        for (uint8_t s = 0; s < CAL_STAGES; s++) _calStagePwm[s] = CAL_STAGE_PWM[s];
-      }
-
-      // Baseline gehoert zu einer bestimmten Load-Spannweite (max. 360°).
-      // Wenn sich die Spannweite aendert, passen die Bins nicht mehr.
-      const int32_t storedAmax = _prefs->getInt(KEY_CAL_AMAX, 36000);
       if (storedAmax != loadSpanDeg01()) {
         _calValid = false;
         for (uint8_t s = 0; s < CAL_STAGES; s++) {
+          _calStagePwm[s] = CAL_STAGE_PWM[s];
           for (uint8_t i = 0; i < LOAD_BINS; i++) {
             _calCw[s][i] = 0;
             _calCcw[s][i] = 0;
@@ -555,26 +523,6 @@ void LoadMonitor::abortCalibration(uint32_t nowMs) {
 }
 
 bool LoadMonitor::deleteCalibration() {
-  if (!_prefs) {
-    _calValid = false;
-    for (uint8_t s = 0; s < CAL_STAGES; s++) {
-      _calStagePwm[s] = CAL_STAGE_PWM[s];
-      for (uint8_t i = 0; i < LOAD_BINS; i++) {
-        _calCw[s][i] = 0;
-        _calCcw[s][i] = 0;
-      }
-    }
-    return false;
-  }
-
-  _prefs->remove(KEY_CAL_VALID);
-  _prefs->remove(KEY_CAL_CW);
-  _prefs->remove(KEY_CAL_CCW);
-  _prefs->remove(KEY_CAL_PWM);
-  _prefs->remove(KEY_CAL_TAMB);
-  _prefs->remove(KEY_CAL_TMOT);
-  _prefs->remove(KEY_CAL_AMAX);
-
   _calValid = false;
   for (uint8_t s = 0; s < CAL_STAGES; s++) {
     _calStagePwm[s] = CAL_STAGE_PWM[s];
@@ -583,7 +531,8 @@ bool LoadMonitor::deleteCalibration() {
       _calCcw[s][i] = 0;
     }
   }
-  return true;
+  if (!_store) return false;
+  return _store->clearCalibration();
 }
 
 void LoadMonitor::clearStats() {
@@ -773,15 +722,9 @@ void LoadMonitor::calFinalizeAndStore() {
     tM = _temps->getMotorC();
   }
 
-  // In Preferences speichern
-  if (_prefs) {
-    _prefs->putBool(KEY_CAL_VALID, true);
-    _prefs->putBytes(KEY_CAL_CW,  _calCw,  sizeof(_calCw));
-    _prefs->putBytes(KEY_CAL_CCW, _calCcw, sizeof(_calCcw));
-    _prefs->putBytes(KEY_CAL_PWM, _calStagePwm, sizeof(_calStagePwm));
-    _prefs->putFloat(KEY_CAL_TAMB, tA);
-    _prefs->putFloat(KEY_CAL_TMOT, tM);
-    _prefs->putInt(KEY_CAL_AMAX, loadSpanDeg01());
+  // In FRAM speichern
+  if (_store) {
+    _store->saveCalibration(true, _calCw, _calCcw, _calStagePwm, tA, tM, loadSpanDeg01());
   }
 
   // Akkus zuruecksetzen

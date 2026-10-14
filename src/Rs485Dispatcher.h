@@ -10,7 +10,7 @@ class HalBoard;
 class SafetyMonitor;
 class HomingController;
 class MotionController;
-class Preferences;
+class RotorStore;
 class LoadMonitor;
 class TempSensors;
 
@@ -74,7 +74,7 @@ struct Rs485DispatcherConfig {
   // ----------------------------------------------------------
   // Persistente Parameter (werden per RS485 SET/GET gesetzt/gelesen)
   // ----------------------------------------------------------
-  Preferences* prefs = nullptr;   // Zeiger auf Preferences-Instanz (muss in setup() begin() haben)
+  RotorStore* store = nullptr;    // FRAM-Persistenz (RotorStore)
 
   float*    homeFastPwmPercent = nullptr;
   float*    homeBackoff        = nullptr;
@@ -280,6 +280,10 @@ private:
   void requestHomingKick(uint32_t nowMs, const char* reason);
   void processErrBroadcastRetry(uint32_t nowMs);
 
+  // Letzte logische Position fuer Multi-Turn-Unwind (FRAM + Encoder), -1 = unbekannt.
+  int32_t resolveHomingLastDeg01() const;
+  void startHomingWithUnwindHint();
+
   // JOG: wenn innerhalb jogTimeoutMs kein neuer JOG:1/2 kommt -> weich stoppen
   void updateJogWatchdog(uint32_t nowMs);
 
@@ -311,4 +315,7 @@ private:
   uint8_t _errRetryCode = 0;
   uint8_t _errRetriesRemaining = 0;
   uint32_t _errRetryNextMs = 0;
+
+  // Merker fuer Kick-Retry: clearHomeValid() loescht FRAM-deg01, Unwind-Hinweis bleibt.
+  int32_t _homingLastKnownDeg01 = -1;
 };
