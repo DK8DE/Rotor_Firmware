@@ -28,8 +28,10 @@ void RS485_Anemometer::begin(HardwareSerial& port,
   _deRePin = deRePin;
   _addr = address;
 
-  pinMode(_deRePin, OUTPUT);
-  digitalWrite(_deRePin, LOW); // Empfangen
+  if (_deRePin >= 0) {
+    pinMode(_deRePin, OUTPUT);
+    digitalWrite(_deRePin, LOW); // Empfangen
+  }
 
   // Modbus RTU Standard: 8N1
   _ser->begin(baud, SERIAL_8N1, rxPin, txPin);
@@ -241,19 +243,20 @@ void RS485_Anemometer::markFrame()
 
 void RS485_Anemometer::txEnable(uint16_t preUs)
 {
-  // RS485 auf Senden schalten
-  digitalWrite(_deRePin, HIGH);
+  if (_deRePin >= 0) {
+    digitalWrite(_deRePin, HIGH);
+  }
   delayMicroseconds(preUs);
 }
 
 void RS485_Anemometer::txDisable(uint16_t postUs)
 {
-  // Nachlaufzeit geben und dann auf Empfangen
   delayMicroseconds(postUs);
-  digitalWrite(_deRePin, LOW);
-
-  // Kleines Extra-Delay, damit der Transceiver sauber umschaltet
-  delayMicroseconds(50);
+  if (_deRePin >= 0) {
+    digitalWrite(_deRePin, LOW);
+    // Extra-Delay nur bei manueller DE/RE-Umschaltung
+    delayMicroseconds(50);
+  }
 }
 
 bool RS485_Anemometer::readBytes(uint8_t* buf, size_t len, uint16_t timeoutMs)

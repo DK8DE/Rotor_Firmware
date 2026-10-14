@@ -13,7 +13,6 @@
 // -----------------------------
 // Pinout
 // -----------------------------
-static const int PIN_RS485_DIR   = 1;   // RX/TX Umschaltung (DE/RE) | HIGH = TX, LOW = RX
 static const int PIN_END_LEFT    = 12;  // Endschalter links, aktiv LOW (gedrueckt = LOW)
 static const int PIN_END_RIGHT   = 13;  // Endschalter rechts, aktiv LOW (gedrueckt = LOW)
 static const int PIN_LED_LB      = 14;  // LED, aktiv LOW
@@ -22,23 +21,26 @@ static const int PIN_OE_INVERTER = 4;    // Schaltet den Level-Shifter an nach d
 
 static const int PIN_RS485_RX    = 18;  // Serial1 RX
 static const int PIN_RS485_TX    = 17;  // Serial1 TX
+// Master-RS485: THVD1406DR schaltet TX/RX automatisch (kein DE/RE-GPIO).
 
 static const int PIN_IS1_ADC     = 15;  // BTN8982 IS1, analog 0..3.3V
 static const int PIN_IS2_ADC     = 16;  // BTN8982 IS2, analog 0..3.3V
 
 // ------------------------------------------------------------
+// I2C-Bus (spaeter fuer Erweiterungsbausteine)
+// ------------------------------------------------------------
+// Frueher: GPIO1 = Master-RS485 DE/RE, GPIO38 = Wind-RS485 DE/RE.
+// Beide Transceiver (THVD1406DR) schalten jetzt automatisch um.
+static const int PIN_I2C_SDA = 1;
+static const int PIN_I2C_SCL = 38;
+
+// ------------------------------------------------------------
 // Wind- & Richtungsmesser (RS485 / Modbus)
 // ------------------------------------------------------------
-// Neuer Sensor laeuft separat ueber RS485 (nicht ueber unser Master-RS485).
-// Verkabelung (Referenz):
-// - RX = Pin 9
-// - TX = Pin 8
-// - DE/RE (Senden/Empfangen Umschaltung) = Pin 38
-// Hinweis:
-// - Wir nutzen hier Serial2 (HardwareSerial) mit 9600 8N1 (Lib-Default).
+// Separater RS485-Bus (nicht Master-RS485), Serial2 @ 9600 8N1.
+// THVD1406DR: automatische Richtungsumschaltung, kein DE/RE-GPIO.
 static const int PIN_WIND_RS485_RX  = 9;
 static const int PIN_WIND_RS485_TX  = 8;
-static const int PIN_WIND_RS485_DIR = 38;
 
 static const int PIN_SRV_LEFT    = 47;  // Service-Taster links, aktiv LOW
 static const int PIN_SRV_RIGHT   = 48;  // Service-Taster rechts, aktiv LOW
@@ -51,7 +53,7 @@ public:
   void begin();
 
   // Pin-Profil nach NVS-Laden (EncoderType): Typ 1/2 = OE/Endschalter/Wind;
-  // Typ 3 = SSI (Pin 4 HIGH), kein Anemometer auf 8/9/38.
+  // Typ 3 = SSI (Pin 4 HIGH), kein Anemometer auf 8/9.
   void applyHardwareProfile(EncoderType encType);
 
   bool isWindHardwareAvailable() const { return _windHardwareAvailable; }

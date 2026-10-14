@@ -19,7 +19,6 @@ static bool parseU8Strict(const String& s, uint8_t& out) {
 
 void Rs485Proto::begin(HardwareSerial& uart,
                        uint32_t baud,
-                       gpio_num_t dirPin,
                        int rxPin,
                        int txPin,
                        uint8_t ownSlaveId,
@@ -27,7 +26,6 @@ void Rs485Proto::begin(HardwareSerial& uart,
                        uint16_t tPostUs,
                        size_t rxBufferBytes) {
   _uart = &uart;
-  _dirPin = dirPin;
   _ownSlaveId = ownSlaveId;
 
   _tPreUs  = tPreUs;
@@ -40,9 +38,6 @@ void Rs485Proto::begin(HardwareSerial& uart,
   //   liefert aber nur bool ohne weitere Diagnose. Der Wunschwert bleibt hier trotzdem dokumentiert.
   _uart->setRxBufferSize(_rxBufferBytes);
   _uart->begin(baud, SERIAL_8N1, rxPin, txPin);
-
-  pinMode((int)_dirPin, OUTPUT);
-  digitalWrite((int)_dirPin, LOW); // RX default
 
   _rxOk.store(0);
   _rxBad.store(0);
@@ -74,10 +69,6 @@ void Rs485Proto::begin(HardwareSerial& uart,
 
 void Rs485Proto::setOwnSlaveId(uint8_t ownSlaveId) {
   _ownSlaveId = ownSlaveId;
-}
-
-void Rs485Proto::setTxMode(bool tx) {
-  digitalWrite((int)_dirPin, tx ? HIGH : LOW);
 }
 
 bool Rs485Proto::readLine(String& outLine) {
@@ -485,14 +476,12 @@ void Rs485Proto::sendFrame(uint8_t src, uint8_t dst, const String& cmd, const St
     return;
   }
 
-  setTxMode(true);
   delayMicroseconds(_tPreUs);
 
   _uart->print(frame);
   _uart->flush();
 
   delayMicroseconds(_tPostUs);
-  setTxMode(false);
   xSemaphoreGive(_ioMutex);
   taskYIELD();
 }
@@ -522,14 +511,12 @@ void Rs485Proto::sendPayloadFrame(uint8_t src, uint8_t dst, const String& payloa
     return;
   }
 
-  setTxMode(true);
   delayMicroseconds(_tPreUs);
 
   _uart->print(frame);
   _uart->flush();
 
   delayMicroseconds(_tPostUs);
-  setTxMode(false);
   xSemaphoreGive(_ioMutex);
   taskYIELD();
 }

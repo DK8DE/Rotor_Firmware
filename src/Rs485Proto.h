@@ -3,7 +3,6 @@
 #include <atomic>
 
 #include <Arduino.h>
-#include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -22,9 +21,9 @@ class Rs485Proto {
 public:
   Rs485Proto() = default;
 
+  // THVD1406DR: automatische Richtungsumschaltung — kein DE/RE-GPIO.
   void begin(HardwareSerial& uart,
              uint32_t baud,
-             gpio_num_t dirPin,
              int rxPin,
              int txPin,
              uint8_t ownSlaveId,
@@ -72,7 +71,6 @@ private:
     char text[RX_RAW_FRAME_MAX];
   };
 
-  void setTxMode(bool tx);
   bool readLine(String& outLine);
   Rs485Frame parseFrame(const String& raw);
 
@@ -93,16 +91,12 @@ private:
 
 private:
   HardwareSerial* _uart = nullptr;
-  gpio_num_t _dirPin = GPIO_NUM_NC;
   uint8_t _ownSlaveId = 0;
 
   uint16_t _tPreUs  = 150;
   uint16_t _tPostUs = 150;
 
-  // Schutz fuer die gemeinsame UART / DE-RE-Umschaltung.
-  // - RX-Task liest darueber Serial1.
-  // - sendFrame()/sendPayloadFrame() senden darueber Antworten.
-  // Dadurch greift nie gleichzeitig ein Sende- und ein Lesepfad auf dieselbe UART zu.
+  // Schutz fuer die gemeinsame UART (kein paralleles TX+RX auf Serial1).
   SemaphoreHandle_t _ioMutex = nullptr;
 
   // RX-Task + Queue fuer fertig erkannte Frames.

@@ -1,5 +1,7 @@
 #include "HalBoard.h"
 
+#include <Wire.h>
+
 // ------------------------------------------------------------
 // Wind-Sensor Poll-Interval
 // ------------------------------------------------------------
@@ -24,9 +26,8 @@ static const uint32_t WIND_TASK_STACK_WORDS = 4096;
 static const BaseType_t WIND_TASK_CORE = 0;
 
 void HalBoard::begin() {
-  // RS485 DIR Pin: wird von Rs485Proto geschaltet, hier nur als OUTPUT vorbereiten
-  pinMode(PIN_RS485_DIR, OUTPUT);
-  digitalWrite(PIN_RS485_DIR, LOW); // RX default
+  // I2C-Bus vorbereiten (Bausteine folgen spaeter)
+  Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
 
   // ------------------------------------------------------------
   // Endschalter aktiv LOW (gedrueckt = LOW)
@@ -91,7 +92,8 @@ void HalBoard::applyHardwareProfile(EncoderType encType) {
   pinMode(PIN_OE_INVERTER, OUTPUT);
   digitalWrite(PIN_OE_INVERTER, LOW);
 
-  _wind.begin(Serial2, PIN_WIND_RS485_RX, PIN_WIND_RS485_TX, PIN_WIND_RS485_DIR, 0x01, 9600);
+  // deRePin=-1: THVD1406DR schaltet TX/RX automatisch
+  _wind.begin(Serial2, PIN_WIND_RS485_RX, PIN_WIND_RS485_TX, -1, 0x01, 9600);
   _windInit = true;
 
   _wind.setSpeedOffsetMps(0.0f);

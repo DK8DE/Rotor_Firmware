@@ -38,13 +38,13 @@ public:
   // port  : HardwareSerial (z.B. Serial2)
   // rxPin : RX-Pin des ESP32
   // txPin : ESP32 TX pin
-  // deRePin: DE/RE pin of the RS485 transceiver (HIGH=transmit, LOW=receive)
+  // deRePin: DE/RE-Pin (HIGH=TX, LOW=RX). -1 = Auto-Richtung (z.B. THVD1406DR)
   // address: Modbus address of the sensor (typically 0x01)
   // baud   : default 9600
   void begin(HardwareSerial& port,
              int rxPin,
              int txPin,
-             int deRePin,
+             int deRePin = -1,
              uint8_t address = 0x01,
              uint32_t baud = 9600);
 

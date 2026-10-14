@@ -53,10 +53,9 @@ static bool g_prefsOk = false;
 // 115200 ist ein guter Standard; hoeher = weniger Latenz, aber stoeranfaelliger bei schlechter Leitung.
 static const uint32_t RS485_BAUD = 115200;
 
-// RS485 Sende-Timing (Treiber-Umschaltung).
-// TPRE = Wartezeit vor Senden (DIR auf TX), TPOST = Wartezeit nach Senden (DIR zurueck).
-// Halbduplex: nach TX muss der Wandler sicher im RX sein, bevor der Master antwortet —
-// zu kurz -> Kollisionen / keine ACKs (Master sendete frueher ohne Inter-Frame-Gap).
+// RS485 Sende-Timing (Bus-Ruhe vor/nach TX).
+// THVD1406DR schaltet TX/RX automatisch; TPRE/TPOST bleiben als kurze
+// Inter-Frame-Pausen gegen Kollisionen auf dem Halbduplex-Bus.
 static const uint16_t RS485_TPRE_US  = 550;
 static const uint16_t RS485_TPOST_US = 550;
 
@@ -1398,7 +1397,6 @@ void setup() {
   Serial1.setRxBufferSize(RS485_RX_BUFFER_BYTES);
 
   rs485.begin(Serial1, RS485_BAUD,
-              (gpio_num_t)PIN_RS485_DIR,
               (int)PIN_RS485_RX,
               (int)PIN_RS485_TX,
               g_slaveId,
