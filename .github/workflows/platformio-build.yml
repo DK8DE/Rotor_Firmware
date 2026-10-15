@@ -1,203 +1,208 @@
-name: PlatformIO Build & Release
+name: Build Webflasher & Release
 
 on:
   push:
-    branches: [ main, master, develop ]
-    tags:
-      - 'v*'
+    branches: [main, master]
   pull_request:
-    branches: [ main, master, develop ]
+    branches: [main, master]
+  workflow_dispatch:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: webflasher-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-
+    runs-on: ubuntu-24.04
     outputs:
-      version: ${{ steps.fwver.outputs.version }}
-      tag: ${{ steps.fwver.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      is_new_release: ${{ steps.meta.outputs.is_new_release }}
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v7
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
-    - name: Set up Python
-      uses: actions/setup-python@v7
-      with:
-        python-version: '3.11'
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
 
-    - name: Cache PlatformIO
-      uses: actions/cache@v6
-      with:
-        path: ~/.platformio
-        key: ${{ runner.os }}-platformio-${{ hashFiles('**/platformio.ini') }}
-        restore-keys: |
-          ${{ runner.os }}-platformio-
+      - name: Cache PlatformIO
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.platformio
+          key: ${{ runner.os }}-pio-${{ hashFiles('platformio.ini') }}
+          restore-keys: |
+            ${{ runner.os }}-pio-
 
-    - name: Install PlatformIO
-      run: |
-        pip install platformio
+      - name: Install PlatformIO
+        run: pip install -U platformio
 
-    - name: Build PlatformIO Project
-      run: |
-        pio run --environment esp32-s3-n8r8
+      - name: Build firmware (esp32-s3-n8r8)
+        run: pio run -e esp32-s3-n8r8
 
-    - name: Read firmware version (src/Version.h)
-      id: fwver
-      run: |
-        MAJOR=$(grep -oP '#define\s+FW_VERSION_MAJOR\s+\K\d+' src/Version.h)
-        MINOR=$(grep -oP '#define\s+FW_VERSION_MINOR\s+\K\d+' src/Version.h)
-        PATCH=$(grep -oP '#define\s+FW_VERSION_PATCH\s+\K\d+' src/Version.h)
-        VERSION="$MAJOR.$MINOR.$PATCH"
-        echo "Firmware-Version: $VERSION"
-        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-        echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Prepare flash images (factory + firmware + Pages)
+        id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ENV=esp32-s3-n8r8
+          BUILD_DIR=".pio/build/${ENV}"
+          OUT_DIR="IMGs"
+          mkdir -p "$OUT_DIR"
 
-    - name: Locate boot_app0.bin
-      run: |
-        BOOT_APP0=$(find ~/.platformio/packages -name 'boot_app0.bin' | head -n 1)
-        if [ -z "$BOOT_APP0" ]; then
-          echo "boot_app0.bin nicht gefunden"; exit 1
-        fi
-        cp "$BOOT_APP0" .pio/build/esp32-s3-n8r8/boot_app0.bin
+          chmod +x scripts/read_version.sh
+          VERSION="$(./scripts/read_version.sh)"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Firmware-Version: ${VERSION}"
+          export FW_VERSION="${VERSION}"
 
-    - name: Build ESP Web Tools manifest.json
-      run: |
-        cat > .pio/build/esp32-s3-n8r8/manifest.json <<EOF
-        {
-          "name": "Rotor Firmware",
-          "version": "${{ steps.fwver.outputs.version }}",
-          "new_install_prompt_erase": true,
-          "builds": [
-            {
-              "chipFamily": "ESP32-S3",
-              "parts": [
-                { "path": "bootloader.bin", "offset": 0 },
-                { "path": "partitions.bin", "offset": 32768 },
-                { "path": "boot_app0.bin", "offset": 57344 },
-                { "path": "firmware.bin", "offset": 65536 }
-              ]
-            }
-          ]
-        }
-        EOF
+          TAG="v${VERSION}"
+          IS_NEW=0
+          if [[ "${{ github.event_name }}" == "push" && ( "${{ github.ref }}" == "refs/heads/main" || "${{ github.ref }}" == "refs/heads/master" ) ]]; then
+            if ! gh release view "$TAG" >/dev/null 2>&1; then
+              IS_NEW=1
+            fi
+          fi
+          echo "is_new_release=${IS_NEW}" >> "$GITHUB_OUTPUT"
+          echo "Release-Tag ${TAG}: neu=${IS_NEW}"
 
-    - name: Upload Build Artifacts
-      uses: actions/upload-artifact@v7
-      with:
-        name: firmware-bin
-        path: |
-          .pio/build/esp32-s3-n8r8/firmware.bin
-          .pio/build/esp32-s3-n8r8/firmware.elf
-          .pio/build/esp32-s3-n8r8/partitions.bin
-          .pio/build/esp32-s3-n8r8/bootloader.bin
-          .pio/build/esp32-s3-n8r8/boot_app0.bin
-          .pio/build/esp32-s3-n8r8/manifest.json
-        if-no-files-found: warn
+          BOOT_APP0="$(find ~/.platformio/packages -name 'boot_app0.bin' | head -n1)"
+          if [ -z "$BOOT_APP0" ]; then
+            echo "boot_app0.bin nicht gefunden" >&2
+            exit 1
+          fi
 
-  release:
+          cp "$BUILD_DIR/firmware.bin" "$OUT_DIR/firmware.bin"
+          cp "$BUILD_DIR/bootloader.bin" "$OUT_DIR/bootloader.bin"
+          cp "$BUILD_DIR/partitions.bin" "$OUT_DIR/partitions.bin"
+          cp "$BOOT_APP0" "$OUT_DIR/boot_app0.bin"
+
+          pip install -q esptool
+          python -m esptool --chip esp32s3 merge_bin \
+            -o "$OUT_DIR/factory.bin" \
+            --flash_mode qio --flash_freq 80m --flash_size 8MB \
+            0x0 "$BUILD_DIR/bootloader.bin" \
+            0x8000 "$BUILD_DIR/partitions.bin" \
+            0xe000 "$BOOT_APP0" \
+            0x10000 "$BUILD_DIR/firmware.bin"
+
+          python3 <<'PY'
+          import json, os
+          from pathlib import Path
+          version = os.environ["FW_VERSION"]
+          data = {
+              "name": "Rotor DK8DE",
+              "version": version,
+              "new_install_prompt_erase": True,
+              "builds": [
+                  {
+                      "chipFamily": "ESP32-S3",
+                      "parts": [{"path": "factory.bin", "offset": 0}],
+                  }
+              ],
+          }
+          Path("IMGs/manifest.json").write_text(
+              json.dumps(data, indent=2) + "\n", encoding="utf-8"
+          )
+          readme = "\n".join([
+              f"Rotor DK8DE Firmware {version}",
+              "",
+              "factory.bin  - Komplettflash ab Adresse 0 (USB-Webflasher / esptool)",
+              "firmware.bin - nur App fuer SoftAP-OTA (Web-Tab Update)",
+              "",
+              "USB-Webflasher:",
+              "  https://dk8de.github.io/Rotor_Firmware/",
+              "",
+              "SoftAP-OTA:",
+              "  SETWLAN:1 -> http://192.168.4.1 (admin / Rotorconfig) -> Update -> firmware.bin",
+              "",
+              "Beispiel Komplettflash:",
+              "  esptool.py --chip esp32s3 write_flash 0x0 factory.bin",
+              "",
+          ])
+          Path("IMGs/README.txt").write_text(readme, encoding="utf-8")
+          PY
+
+          cp "$OUT_DIR/factory.bin" "$OUT_DIR/Rotor-${VERSION}-factory.bin"
+          cp "$OUT_DIR/firmware.bin" "$OUT_DIR/Rotor-${VERSION}-firmware.bin"
+
+          rm -rf site
+          mkdir -p site/IMGs
+          cp webflasher/index.html site/index.html
+          cp "$OUT_DIR/factory.bin" "$OUT_DIR/firmware.bin" "$OUT_DIR/manifest.json" site/IMGs/
+          ls -la IMGs site/IMGs
+
+      - name: Upload flash binaries (artifact)
+        uses: actions/upload-artifact@v6
+        with:
+          name: Rotor-${{ steps.meta.outputs.version }}
+          path: |
+            IMGs/factory.bin
+            IMGs/firmware.bin
+            IMGs/manifest.json
+            IMGs/README.txt
+            IMGs/Rotor-${{ steps.meta.outputs.version }}-factory.bin
+            IMGs/Rotor-${{ steps.meta.outputs.version }}-firmware.bin
+            IMGs/bootloader.bin
+            IMGs/partitions.bin
+            IMGs/boot_app0.bin
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Create GitHub Release (nur bei neuer Version)
+        if: steps.meta.outputs.is_new_release == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.meta.outputs.version }}"
+          TAG="v${VERSION}"
+          NOTES=$(cat <<NOTES_EOF
+          Firmware ${VERSION} aus \`src/Version.h\`.
+
+          - \`Rotor-${VERSION}-factory.bin\` – Komplettflash ab 0x0 (USB-Webflasher / Erstinstallation)
+          - \`Rotor-${VERSION}-firmware.bin\` – SoftAP-OTA (App, Tab Update)
+          - \`README.txt\` – Kurzhilfe
+
+          USB-Webflasher: https://dk8de.github.io/Rotor_Firmware/
+
+          SoftAP-OTA: \`SETWLAN:1\` → http://192.168.4.1 (admin / Rotorconfig) → Update → nur firmware.bin
+          NOTES_EOF
+          )
+          # führende Einrückung der Heredoc-Zeilen entfernen
+          NOTES="$(printf '%s\n' "$NOTES" | sed 's/^[[:space:]]*//')"
+          gh release create "$TAG" \
+            --title "Rotor DK8DE ${VERSION}" \
+            --notes "$NOTES" \
+            "IMGs/Rotor-${VERSION}-factory.bin" \
+            "IMGs/Rotor-${VERSION}-firmware.bin" \
+            "IMGs/README.txt"
+
+      - name: Upload Pages artifact
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+  deploy-pages:
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     needs: build
-    runs-on: ubuntu-latest
-    # Ein Release wird erstellt bei:
-    #  - manuellem Tag-Push "vX.Y.Z", ODER
-    #  - Push nach main/master (Release-Job prueft selbst, ob sich die
-    #    Version in src/Version.h seit dem letzten Release geaendert hat).
-    if: >
-      github.event_name == 'push' &&
-      (startsWith(github.ref, 'refs/tags/v') ||
-       github.ref == 'refs/heads/main' ||
-       github.ref == 'refs/heads/master')
-
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v7
-      with:
-        fetch-depth: 0
-
-    - name: Determine release tag
-      id: reltag
-      run: |
-        if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-          TAG="${{ github.ref_name }}"
-        else
-          TAG="${{ needs.build.outputs.tag }}"
-        fi
-        echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
-    - name: Check if tag/release already exists
-      id: check
-      run: |
-        if git ls-remote --tags origin | grep -q "refs/tags/${{ steps.reltag.outputs.tag }}$"; then
-          echo "Tag ${{ steps.reltag.outputs.tag }} existiert bereits -> kein neues Release (Version unveraendert)."
-          echo "exists=true" >> "$GITHUB_OUTPUT"
-        else
-          echo "Tag ${{ steps.reltag.outputs.tag }} existiert noch nicht -> neues Release wird erstellt."
-          echo "exists=false" >> "$GITHUB_OUTPUT"
-        fi
-
-    - name: Download Build Artifacts
-      if: steps.check.outputs.exists == 'false'
-      uses: actions/download-artifact@v8
-      with:
-        name: firmware-bin
-        path: firmware/
-
-    - name: Create Release Package
-      if: steps.check.outputs.exists == 'false'
-      run: |
-        cd firmware
-        zip -r ../Rotor_Firmware_${{ steps.reltag.outputs.tag }}.zip .
-        cd ..
-
-    - name: Generate Release Notes
-      if: steps.check.outputs.exists == 'false'
-      run: |
-        echo "## Rotor Firmware ${{ steps.reltag.outputs.tag }}" > RELEASE_NOTES.md
-        echo "" >> RELEASE_NOTES.md
-        echo "### Hardware" >> RELEASE_NOTES.md
-        echo "- MCU: ESP32-S3 (8MB Flash, 8MB PSRAM)" >> RELEASE_NOTES.md
-        echo "" >> RELEASE_NOTES.md
-        echo "### Enthaltene Dateien" >> RELEASE_NOTES.md
-        echo "- \`firmware.bin\` - Hauptfirmware" >> RELEASE_NOTES.md
-        echo "- \`bootloader.bin\` - Bootloader" >> RELEASE_NOTES.md
-        echo "- \`partitions.bin\` - Partitionstabelle" >> RELEASE_NOTES.md
-        echo "- \`boot_app0.bin\` - OTA Boot-Selector" >> RELEASE_NOTES.md
-        echo "- \`manifest.json\` - ESP Web Tools Manifest (Browser-Flash)" >> RELEASE_NOTES.md
-        echo "- \`firmware.elf\` - Debug-Symbole" >> RELEASE_NOTES.md
-        echo "" >> RELEASE_NOTES.md
-        echo "### Installation" >> RELEASE_NOTES.md
-        echo '```bash' >> RELEASE_NOTES.md
-        echo "# Mit PlatformIO" >> RELEASE_NOTES.md
-        echo "pio run --target upload" >> RELEASE_NOTES.md
-        echo "" >> RELEASE_NOTES.md
-        echo "# Mit esptool" >> RELEASE_NOTES.md
-        echo "esptool.py --chip esp32s3 --port /dev/ttyUSB0 write_flash 0x0 firmware.bin" >> RELEASE_NOTES.md
-        echo '```' >> RELEASE_NOTES.md
-        echo "" >> RELEASE_NOTES.md
-        echo "Oder per Browser (ESP Web Tools) mit \`manifest.json\`." >> RELEASE_NOTES.md
-
-    - name: Tag commit (nur bei Branch-Push, nicht bei manuellem Tag-Push)
-      if: steps.check.outputs.exists == 'false' && !startsWith(github.ref, 'refs/tags/')
-      run: |
-        git tag ${{ steps.reltag.outputs.tag }}
-        git push origin ${{ steps.reltag.outputs.tag }}
-
-    - name: Create GitHub Release
-      if: steps.check.outputs.exists == 'false'
-      uses: softprops/action-gh-release@v3
-      with:
-        tag_name: ${{ steps.reltag.outputs.tag }}
-        name: "Rotor Firmware ${{ steps.reltag.outputs.tag }}"
-        body_path: RELEASE_NOTES.md
-        files: |
-          Rotor_Firmware_${{ steps.reltag.outputs.tag }}.zip
-          firmware/firmware.bin
-          firmware/bootloader.bin
-          firmware/partitions.bin
-          firmware/boot_app0.bin
-          firmware/manifest.json
-        generate_release_notes: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

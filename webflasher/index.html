@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rotor DK8DE – Webflasher</title>
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      max-width: 42rem;
+      margin: 2rem auto;
+      padding: 0 1rem;
+      line-height: 1.5;
+    }
+    code { padding: 0.1rem 0.35rem; border-radius: 4px; background: color-mix(in srgb, CanvasText 12%, Canvas); }
+    .hint { opacity: 0.8; font-size: 0.95rem; }
+    ul { padding-left: 1.2rem; }
+    h2 { font-size: 1.1rem; margin-top: 1.75rem; }
+  </style>
+</head>
+<body>
+  <h1>Rotor DK8DE – Webflasher</h1>
+  <p>ESP32-S3 per Browser flashen (Chrome/Edge, USB).</p>
+  <p>Version: <strong id="fwVer">—</strong></p>
+  <p>
+    <esp-web-install-button manifest="./IMGs/manifest.json"></esp-web-install-button>
+  </p>
+  <p class="hint">Der USB-Webflasher schreibt <code>factory.bin</code> (Komplettimage ab Adresse&nbsp;0 – Erstinstallation / Full-Flash).</p>
+
+  <h2>Downloads</h2>
+  <ul>
+    <li><a href="./IMGs/factory.bin">factory.bin</a> – Komplettflash (USB-Webflasher / esptool, ab 0x0)</li>
+    <li><a href="./IMGs/firmware.bin">firmware.bin</a> – nur App für SoftAP-OTA (Web-Tab Update)</li>
+  </ul>
+
+  <h2>SoftAP-OTA (WLAN-Update)</h2>
+  <p class="hint">
+    Per RS485 <code>SETWLAN:1</code> Hotspot starten (<code>Rotor_&lt;UID&gt;</code> / Passwort <code>Rotorconfig</code>),
+    dann <code>http://192.168.4.1</code> (Login <code>admin</code> / <code>Rotorconfig</code>) → Tab <strong>Update</strong> →
+    nur <code>firmware.bin</code> hochladen (nicht factory.bin).
+  </p>
+
+  <h2>esptool (Komplettflash)</h2>
+  <pre><code>esptool.py --chip esp32s3 write_flash 0x0 factory.bin</code></pre>
+
+  <script>
+    fetch('./IMGs/manifest.json', { cache: 'no-store' })
+      .then(r => r.json())
+      .then(m => { document.getElementById('fwVer').textContent = m.version || '—'; })
+      .catch(() => {});
+  </script>
+</body>
+</html>

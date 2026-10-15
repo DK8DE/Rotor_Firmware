@@ -11,12 +11,9 @@
 
 static WebServer* g_server = nullptr;
 static bool g_webActive = false;
-static bool g_apHadClient = false;
 static bool g_routesReady = false;
 static char g_ssidCache[40] = "";
 static char g_ipCache[20] = "192.168.4.1";
-static uint32_t g_apEmptySinceMs = 0;
-static constexpr uint32_t AP_IDLE_SHUTDOWN_MS = 20000;
 
 static const char* WEB_USER = "admin";
 static const char* WEB_PASS = "Rotorconfig";
@@ -50,14 +47,18 @@ static void handleRoot() {
 }
 
 static void handleLive() {
-  if (!checkAuth()) return;
+  // Ohne Auth: Captive-/Handy-Browser sendet Basic-Auth bei fetch oft nicht mit.
+  // SoftAP ist ohnehin passwortgeschuetzt (WLAN + Login fuer HTML/OTA/Reset).
   char buf[512];
   webAppFillLiveJson(buf, sizeof(buf), g_ssidCache, g_ipCache);
   sendJson(200, buf);
 }
 
 static void handleStatus() {
-  handleLive();
+  if (!checkAuth()) return;
+  char buf[512];
+  webAppFillLiveJson(buf, sizeof(buf), g_ssidCache, g_ipCache);
+  sendJson(200, buf);
 }
 
 static void handleUpdateInfo() {
@@ -199,8 +200,6 @@ void webUiBegin(const char* ssid, const char* password) {
   }
 
   g_server->begin();
-  g_apHadClient = false;
-  g_apEmptySinceMs = 0;
   g_webActive = true;
 }
 
@@ -211,29 +210,15 @@ void webUiEnd() {
   }
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_OFF);
-  g_apHadClient = false;
-  g_apEmptySinceMs = 0;
   g_webActive = false;
 }
 
 void webUiLoop() {
   if (!g_webActive) return;
+  // SoftAP bleibt aktiv bis SETWLAN:0 oder Neustart (kein Idle-Shutdown).
   if (g_server != nullptr) {
     for (int i = 0; i < 4; i++) {
       g_server->handleClient();
-    }
-  }
-
-  const int stations = WiFi.softAPgetStationNum();
-  if (stations > 0) {
-    g_apHadClient = true;
-    g_apEmptySinceMs = 0;
-  } else if (g_apHadClient) {
-    if (g_apEmptySinceMs == 0) {
-      g_apEmptySinceMs = millis();
-    } else if ((uint32_t)(millis() - g_apEmptySinceMs) >= AP_IDLE_SHUTDOWN_MS) {
-      webUiEnd();
-      webAppOnSoftApAutoOff();
     }
   }
 }

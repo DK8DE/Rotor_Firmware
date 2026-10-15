@@ -95,7 +95,7 @@ nav button.active{
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:.75rem}
 .kv{background:var(--blue-light);border:1px solid var(--line);border-radius:.75rem;padding:.7rem .8rem}
 .kv .k{color:var(--muted);font-size:.75rem;text-transform:uppercase;letter-spacing:.04em}
-.kv .v{margin-top:.2rem;color:var(--white);word-break:break-all}
+.kv .v{margin-top:.35rem;color:var(--white);word-break:break-all;font-size:2em;font-weight:700;line-height:1.15}
 .field{margin-bottom:.15rem}
 label{display:block;color:var(--muted);font-size:.8rem;margin:0 0 .35rem}
 input,button{font:inherit}
@@ -164,7 +164,9 @@ input[type=file]{
         <div class="kv"><div class="k" data-i18n="k_tempM">Temp Motor (°C)</div><div class="v mono" id="vTempM">—</div></div>
         <div class="kv"><div class="k" data-i18n="k_fw">Firmware</div><div class="v mono" id="vFw">—</div></div>
         <div class="kv"><div class="k" data-i18n="k_homed">Gehomt</div><div class="v mono" id="vHomed">—</div></div>
-        <div class="kv"><div class="k" data-i18n="k_pwm">PWM (%)</div><div class="v mono" id="vPwm">—</div></div>
+        <div class="kv"><div class="k" data-i18n="k_pwm">SETPWM (%)</div><div class="v mono" id="vPwm">—</div></div>
+        <div class="kv" id="kvWindKmh" hidden><div class="k" data-i18n="k_wind">Wind (km/h)</div><div class="v mono" id="vWindKmh">—</div></div>
+        <div class="kv" id="kvWindDir" hidden><div class="k" data-i18n="k_windDir">Windrichtung (°)</div><div class="v mono" id="vWindDir">—</div></div>
         <div class="kv"><div class="k">SoftAP</div><div class="v mono" id="vAp">—</div></div>
         <div class="kv"><div class="k">UID</div><div class="v mono" id="vUid">—</div></div>
       </div>
@@ -214,9 +216,10 @@ de:{
   tab_status:'Status', tab_update:'Update', tab_reset:'Reset',
   h_rotor:'Rotordaten',
   k_angle:'Winkel (°)', k_tempA:'Temp Umgebung (°C)', k_tempM:'Temp Motor (°C)',
-  k_fw:'Firmware', k_homed:'Gehomt', k_pwm:'PWM (%)',
+  k_fw:'Firmware', k_homed:'Gehomt', k_pwm:'SETPWM (%)',
+  k_wind:'Wind (km/h)', k_windDir:'Windrichtung (°)',
   h_update:'Firmware-Update (OTA)', k_cur:'Aktuell', k_part:'Partition',
-  btn_upload:'Hochladen & flashen', hint_ota:'Nur App-Firmware (Dual-OTA). Nach Erfolg Neustart.',
+  btn_upload:'Hochladen & flashen', hint_ota:'Nur firmware.bin (App-OTA). Nicht factory.bin. Nach Erfolg Neustart.',
   upd_choose:'Datei wählen', upd_uploading:'Upload…', upd_ok:'OK – Neustart…', upd_fail:'Update fehlgeschlagen',
   h_reset:'Neustart / Werkseinstellung',
   p_reset:'Neustart: SoftAP bleibt aus bis SETWLAN:1. Werkseinstellung: FRAM + NVS löschen und Neustart.',
@@ -231,9 +234,10 @@ en:{
   tab_status:'Status', tab_update:'Update', tab_reset:'Reset',
   h_rotor:'Rotor data',
   k_angle:'Angle (°)', k_tempA:'Ambient temp (°C)', k_tempM:'Motor temp (°C)',
-  k_fw:'Firmware', k_homed:'Homed', k_pwm:'PWM (%)',
+  k_fw:'Firmware', k_homed:'Homed', k_pwm:'SETPWM (%)',
+  k_wind:'Wind (km/h)', k_windDir:'Wind direction (°)',
   h_update:'Firmware update (OTA)', k_cur:'Current', k_part:'Partition',
-  btn_upload:'Upload & flash', hint_ota:'App firmware only (dual OTA). Reboot after success.',
+  btn_upload:'Upload & flash', hint_ota:'firmware.bin only (app OTA). Not factory.bin. Reboot after success.',
   upd_choose:'Choose file', upd_uploading:'Upload…', upd_ok:'OK – rebooting…', upd_fail:'Update failed',
   h_reset:'Reboot / factory reset',
   p_reset:'Reboot: SoftAP stays off until SETWLAN:1. Factory: clear FRAM + NVS and reboot.',
@@ -254,91 +258,137 @@ function toast(msg, ok){
   const el=$('toast'); el.textContent=msg; el.className='toast show '+(ok?'ok':'bad');
   setTimeout(()=>el.classList.remove('show'), 2800);
 }
-async function api(path, opts){
-  const u=path+(path.includes('?')?'&':'?')+'_='+Date.now();
-  const r=await fetch(u, Objectcredentials:'same-origin', ...(opts||{})});
-  if(r.status===401){ toast(t('auth_required'), false); throw new Error('auth'); }
-  return r;
+function api(path, opts){
+  var u=path+(path.indexOf('?')>=0?'&':'?')+'_='+Date.now();
+  var o={credentials:'same-origin'};
+  if(opts){
+    if(opts.method) o.method=opts.method;
+    if(opts.body) o.body=opts.body;
+    if(opts.headers) o.headers=opts.headers;
+  }
+  return fetch(u, o).then(function(r){
+    if(r.status===401){ toast(t('auth_required'), false); throw new Error('auth'); }
+    return r;
+  });
 }
 function showTab(name){
-  ['status','update','reset'].forEach(n=>{
-    const sec=$('tab-'+n); if(sec) sec.hidden=(n!==name);
-  });
-  document.querySelectorAll('nav button[data-tab]').forEach(b=>b.classList.toggle('active', b.dataset.tab===name));
-  $('navWrap').classList.remove('open');
-  $('navBurger').setAttribute('aria-expanded','false');
+  var tabs=['status','update','reset'];
+  for(var i=0;i<tabs.length;i++){
+    var sec=document.getElementById('tab-'+tabs[i]);
+    if(sec){
+      if(tabs[i]===name){ sec.removeAttribute('hidden'); sec.style.display=''; }
+      else { sec.setAttribute('hidden',''); sec.style.display='none'; }
+    }
+  }
+  var buttons=document.querySelectorAll('nav button[data-tab]');
+  for(var j=0;j<buttons.length;j++){
+    var b=buttons[j];
+    if(b.getAttribute('data-tab')===name) b.classList.add('active');
+    else b.classList.remove('active');
+  }
+  var wrap=document.getElementById('navWrap'); if(wrap) wrap.classList.remove('open');
+  var burger=document.getElementById('navBurger'); if(burger) burger.setAttribute('aria-expanded','false');
   if(name==='update') loadUpdInfo();
 }
 function setConn(ok){
-  $('connDot').className='dot '+(ok?'on':'off');
-  $('connBadge').textContent=ok?t('badge_ok'):t('badge_offline');
+  var d=document.getElementById('connDot'); if(d) d.className='dot '+(ok?'on':'off');
+  var b=document.getElementById('connBadge'); if(b) b.textContent=ok?t('badge_ok'):t('badge_offline');
 }
-function fmt(n, d){ if(n==null||!isFinite(n)) return '—'; return Number(n).toFixed(d); }
-async function pollLive(){
-  try{
-    const r=await api('/api/live');
-    const j=await r.json();
-    $('vAngle').textContent=fmt(j.angle, 2);
-    $('vTempA').textContent=fmt(j.tempA, 1);
-    $('vTempM').textContent=fmt(j.tempM, 1);
-    $('vFw').textContent=j.fw||'—';
-    $('vHomed').textContent=(j.homed!=null)?String(j.homed):'—';
-    $('vPwm').textContent=fmt(j.pwm, 1);
-    $('vAp').textContent=(j.ssid||'')+' / '+(j.ip||'');
-    $('vUid').textContent=j.uid||'—';
+function fmt(n, d){ if(n==null||!isFinite(n)) return '-'; return Number(n).toFixed(d); }
+function setTxt(id, v){ var el=document.getElementById(id); if(el) el.textContent=v; }
+function setHtml(id, v){ var el=document.getElementById(id); if(el) el.innerHTML=v; }
+function showEl(id, on){
+  var el=document.getElementById(id); if(!el) return;
+  if(on){ el.removeAttribute('hidden'); el.style.display=''; }
+  else { el.setAttribute('hidden',''); el.style.display='none'; }
+}
+function pollLive(){
+  api('/api/live').then(function(r){ return r.json(); }).then(function(j){
+    setTxt('vAngle', fmt(j.angle, 2));
+    setTxt('vTempA', fmt(j.tempA, 1));
+    setTxt('vTempM', fmt(j.tempM, 1));
+    setTxt('vFw', j.fw||'-');
+    setTxt('vHomed', (j.homed!=null)?String(j.homed):'-');
+    setTxt('vPwm', fmt(j.pwm, 1));
+    var windOn=!!j.windEn;
+    showEl('kvWindKmh', windOn);
+    showEl('kvWindDir', windOn);
+    if(windOn){
+      setTxt('vWindKmh', fmt(j.windKmh, 1));
+      setTxt('vWindDir', fmt(j.windDir, 1));
+    }
+    var ssid=j.ssid||'-';
+    var ip=j.ip||'-';
+    setHtml('vAp', ssid+'<br>'+ip);
+    setTxt('vUid', j.uid||'-');
     setConn(true);
-  }catch(e){ setConn(false); }
+  }).catch(function(){ setConn(false); });
 }
-async function loadUpdInfo(){
-  try{
-    const r=await api('/api/update/info');
-    const j=await r.json();
-    $('updCur').textContent=j.fw||'—';
-    $('updPart').textContent=(j.partition||'—')+(j.size?(' · '+j.size):'');
-  }catch(e){}
+function loadUpdInfo(){
+  api('/api/update/info').then(function(r){ return r.json(); }).then(function(j){
+    setTxt('updCur', j.fw||'-');
+    setTxt('updPart', (j.partition||'-')+(j.size?(' · '+j.size):''));
+  }).catch(function(){});
 }
-$('btnUpload').onclick=async()=>{
-  const f=$('fwFile').files&&$('fwFile').files[0];
+var btnUpload=document.getElementById('btnUpload');
+if(btnUpload) btnUpload.onclick=function(){
+  var inp=document.getElementById('fwFile');
+  var f=inp&&inp.files&&inp.files[0];
   if(!f){ toast(t('upd_choose'), false); return; }
-  $('updMsg').textContent=t('upd_uploading');
-  $('updBar').style.width='0%';
-  const xhr=new XMLHttpRequest();
+  setTxt('updMsg', t('upd_uploading'));
+  var bar=document.getElementById('updBar'); if(bar) bar.style.width='0%';
+  var xhr=new XMLHttpRequest();
   xhr.open('POST','/api/update');
-  xhr.upload.onprogress=(ev)=>{
-    if(ev.lengthComputable) $('updBar').style.width=Math.round(100*ev.loaded/ev.total)+'%';
+  xhr.withCredentials=true;
+  xhr.upload.onprogress=function(ev){
+    if(ev.lengthComputable&&bar) bar.style.width=Math.round(100*ev.loaded/ev.total)+'%';
   };
-  xhr.onload=()=>{
-    let ok=false;
+  xhr.onload=function(){
+    var ok=false;
     try{ ok=JSON.parse(xhr.responseText).ok; }catch(e){}
     if(ok){
-      $('updMsg').textContent=t('upd_ok');
+      setTxt('updMsg', t('upd_ok'));
       toast(t('toast_update_ok'), true);
-      setTimeout(()=>api('/api/reboot',{method:'POST'}), 600);
+      setTimeout(function(){ api('/api/reboot',{method:'POST'}); }, 600);
     }else{
-      $('updMsg').textContent=t('upd_fail');
+      setTxt('updMsg', t('upd_fail'));
       toast(t('toast_update_fail'), false);
     }
   };
-  xhr.onerror=()=>{ $('updMsg').textContent=t('upd_fail'); toast(t('toast_update_fail'), false); };
-  const fd=new FormData(); fd.append('update', f);
+  xhr.onerror=function(){ setTxt('updMsg', t('upd_fail')); toast(t('toast_update_fail'), false); };
+  var fd=new FormData(); fd.append('update', f);
   xhr.send(fd);
 };
-$('btnReboot').onclick=async()=>{
+var btnReboot=document.getElementById('btnReboot');
+if(btnReboot) btnReboot.onclick=function(){
   toast(t('toast_reboot'), true);
-  try{ await api('/api/reboot',{method:'POST'}); }catch(e){}
+  api('/api/reboot',{method:'POST'}).catch(function(){});
 };
-$('btnFactory').onclick=async()=>{
+var btnFactory=document.getElementById('btnFactory');
+if(btnFactory) btnFactory.onclick=function(){
   if(!confirm(t('confirm_factory'))) return;
   toast(t('toast_factory'), true);
-  try{ await api('/api/factory',{method:'POST'}); }catch(e){}
+  api('/api/factory',{method:'POST'}).catch(function(){});
 };
-document.querySelectorAll('nav button[data-tab]').forEach(b=>b.onclick=()=>showTab(b.dataset.tab));
-$('navBurger').onclick=()=>{
-  const w=$('navWrap'); const open=!w.classList.contains('open');
-  w.classList.toggle('open', open);
-  $('navBurger').setAttribute('aria-expanded', open?'true':'false');
+var navBtns=document.querySelectorAll('nav button[data-tab]');
+for(var ni=0;ni<navBtns.length;ni++){
+  (function(btn){
+    btn.onclick=function(){ showTab(btn.getAttribute('data-tab')); };
+  })(navBtns[ni]);
+}
+var burgerEl=document.getElementById('navBurger');
+if(burgerEl) burgerEl.onclick=function(){
+  var w=document.getElementById('navWrap'); if(!w) return;
+  var open=!w.classList.contains('open');
+  if(open) w.classList.add('open'); else w.classList.remove('open');
+  burgerEl.setAttribute('aria-expanded', open?'true':'false');
 };
-document.querySelectorAll('.lang-btn').forEach(b=>b.onclick=()=>{ lang=b.dataset.lang; applyI18n(); });
+var langBtns=document.querySelectorAll('.lang-btn');
+for(var li=0;li<langBtns.length;li++){
+  (function(btn){
+    btn.onclick=function(){ lang=btn.getAttribute('data-lang'); applyI18n(); };
+  })(langBtns[li]);
+}
 applyI18n();
 showTab('status');
 pollLive();

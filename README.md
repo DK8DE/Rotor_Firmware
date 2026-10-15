@@ -32,7 +32,7 @@ Die Firmware-Versionsnummer (Semantic Versioning: `MAJOR.MINOR.PATCH`) wird an *
 
 - Wird beim Boot unabhängig von `g_debug` einmal über USB-Serial ausgegeben (`Rotor_Firmware v1.6.0`).
 - Über RS485 per **`GETVERSION`** abfragbar (`ACK_GETVERSION:1.6.0`).
-- `build.ps1` liest die Version aus `src/Version.h` und übernimmt sie (zusammen mit dem Build-Zeitstempel) in `IMGs/manifest.json` (Feld `version`).
+- `build.ps1` liest die Version aus `src/Version.h` und übernimmt sie in `IMGs/manifest.json` (Feld `version`).
 
 ### Version setzen (`build.ps1 -Version`)
 
@@ -58,16 +58,17 @@ git commit -m "Version 1.6.0"
 git push
 ```
 
-### Automatisches GitHub-Release bei Versionsänderung
+### Automatisches GitHub-Release & Webflasher
 
-Der Workflow [`.github/workflows/platformio-build.yml`](.github/workflows/platformio-build.yml) baut die Firmware bei jedem Push/PR (`build`-Job) und prüft danach (`release`-Job), ob sich die Version in `src/Version.h` seit dem letzten Release geändert hat:
+Der Workflow [`.github/workflows/platformio-build.yml`](.github/workflows/platformio-build.yml) baut bei jedem Push/PR die Firmware und bereitet Flash-Images vor (wie beim [Inklinometer](https://github.com/DK8DE/Inklinometer_IIS2ICLXTR/releases/tag/v1.3.3)):
 
-- Bei einem Push nach `main`/`master` wird die aktuelle Version ausgelesen und geprüft, ob dafür bereits ein Git-Tag `vMAJOR.MINOR.PATCH` existiert.
-- **Existiert kein Tag** (= Version wurde erhöht) → es wird automatisch der Tag `vX.Y.Z` erstellt und gepusht **und** ein GitHub-Release mit `firmware.bin`, `bootloader.bin`, `partitions.bin`, `boot_app0.bin`, `manifest.json` (ESP Web Tools) sowie einem gepackten ZIP angehängt.
-- **Existiert der Tag bereits** (= Version unverändert) → es passiert nichts weiter, es gibt kein doppeltes Release.
-- Alternativ kann ein Release auch klassisch per manuellem Tag-Push ausgelöst werden: `git tag v1.6.0 && git push --tags`.
+- Bei Push nach `main`/`master`: GitHub Pages mit USB-Webflasher unter https://dk8de.github.io/Rotor_Firmware/
+- Wenn für die Version aus `src/Version.h` noch kein Release `vMAJOR.MINOR.PATCH` existiert → Release mit:
+  - `Rotor-X.Y.Z-factory.bin` – Komplettflash ab 0x0 (USB-Webflasher / Erstinstallation)
+  - `Rotor-X.Y.Z-firmware.bin` – SoftAP-OTA (App, Web-Tab Update)
+- Existiert das Release bereits → kein doppeltes Release; Pages/Artifacts werden trotzdem aktualisiert
 
-Beim Ändern der Firmware sollte die Version daher immer erhöht werden (`PATCH` für Bugfixes, `MINOR` für neue Features, `MAJOR` für inkompatible Änderungen an RS485-Protokoll oder NVS-Layout) — sonst wird beim Push kein neues Release erzeugt.
+Beim Ändern der Firmware die Version erhöhen (`PATCH` / `MINOR` / `MAJOR`) — sonst entsteht kein neues Release.
 
 ## Zusammenspiel mit PC und Controller
 
@@ -118,15 +119,16 @@ Für reproduzierbare Ergebnisse sollten Firmware, Controller und PC-Software zue
 
 Details zur Versionsvergabe und zum automatischen GitHub-Release: siehe [Versionierung](#versionierung).
 
-`build.ps1` legt bzw. erneuert den Ordner **`IMGs/`** mit den aktuellen Images und einer `manifest.json` für [ESP Web Tools](https://esphome.github.io/esp-web-tools/):
+`build.ps1` legt bzw. erneuert den Ordner **`IMGs/`** und die `manifest.json` für [ESP Web Tools](https://esphome.github.io/esp-web-tools/) (USB-Webflasher, ein Part):
 
-| Datei | Offset (ESP32-S3) |
-|-------|-------------------|
-| `bootloader.bin` | `0x0000` |
-| `partitions.bin` | `0x8000` |
-| `boot_app0.bin` | `0xE000` |
-| `firmware.bin` | `0x10000` |
-| `manifest.json` | — |
+| Datei | Verwendung |
+|-------|------------|
+| `factory.bin` | Komplettimage ab `0x0` (USB-Webflasher / Erstinstallation) |
+| `firmware.bin` | nur App für SoftAP-OTA (Web-Tab Update) |
+| `manifest.json` | verweist auf `factory.bin` @ Offset 0 |
+| `bootloader.bin` / `partitions.bin` / `boot_app0.bin` | Einzelteile (Debug / manuelles Flashen) |
+
+Die Flasher-Seite liegt unter [`webflasher/`](webflasher/) und wird von CI nach GitHub Pages deployed.
 
 ### PlatformIO CLI
 
@@ -226,42 +228,32 @@ Der SSI-Encoder liefert nur 0…360°. Ein Soft-Turn (0/1) erweitert den logisch
 - Turn wird bei Wrap erkannt und **sofort** in NVS geschrieben (`sturn`, Fallback `sldeg`)
 - Nach Stromausfall im Überdrehbereich muss wieder die logische Lage (>360°) erscheinen — sonst Kabelbruch-Risiko
 
-## Firmware herunterladen
+## Firmware herunterladen & flashen
 
-Fertige Binaries kommen über GitHub Actions oder lokal aus `IMGs/`.
+### USB-Webflasher (GitHub Pages)
 
-### GitHub Actions
+https://dk8de.github.io/Rotor_Firmware/ — Chrome/Edge, USB, schreibt `factory.bin` (Komplettflash).
 
-1. **[Actions → PlatformIO Build & Release](https://github.com/DK8DE/Rotor_Firmware/actions/workflows/platformio-build.yml)**
-2. Neuesten erfolgreichen Run öffnen
-3. Artifact `firmware-bin` herunterladen und entpacken
+Lokal: `webflasher/index.html` + `IMGs/` (nach `.\build.ps1 -SkipUpload`).
 
-| Datei | Beschreibung |
-|-------|--------------|
-| `firmware.bin` | Haupt-Firmware |
-| `bootloader.bin` | Bootloader |
-| `partitions.bin` | Partitionstabelle |
-| `firmware.elf` | Debug-Symbole |
+### SoftAP-OTA (WLAN-Update über die interne Seite)
 
-### Flashen
+1. RS485: `SETWLAN:1` → Hotspot `Rotor_<UID>` / Passwort `Rotorconfig`
+2. Browser: http://192.168.4.1 (Login `admin` / `Rotorconfig`)
+3. Tab **Update** → nur `firmware.bin` hochladen (nicht `factory.bin`)
 
-**ESP Web Tools:** `IMGs/manifest.json` bzw. die Images aus `.\build.ps1 -SkipUpload` verwenden.
+### GitHub Releases / Actions
 
-**esptool.py:**
+- Releases: [github.com/DK8DE/Rotor_Firmware/releases](https://github.com/DK8DE/Rotor_Firmware/releases) (`*-factory.bin`, `*-firmware.bin`)
+- Artifacts: [Actions → Build Webflasher & Release](https://github.com/DK8DE/Rotor_Firmware/actions/workflows/platformio-build.yml)
+
+### esptool / PlatformIO
 
 ```bash
-esptool.py --chip esp32-s3 --port /dev/ttyUSB0 write_flash \
-  0x0000 bootloader.bin \
-  0x8000 partitions.bin \
-  0xe000 boot_app0.bin \
-  0x10000 firmware.bin
-```
+# Komplettflash (wie Webflasher)
+esptool.py --chip esp32s3 --port COM7 write_flash 0x0 factory.bin
 
-Unter Windows z. B. `--port COM7`. `boot_app0.bin` liegt nach dem Build in `IMGs/`.
-
-**PlatformIO:**
-
-```bash
+# oder PlatformIO-Upload
 pio run -t upload -e esp32-s3-n8r8 --upload-port COM7
 ```
 
@@ -270,11 +262,13 @@ pio run -t upload -e esp32-s3-n8r8 --upload-port COM7
 ```
 Rotor_Firmware/
 ├── src/                      # Anwendung (main, Motion, Encoder, RS485, Safety, …)
-├── lib/                      # Lokale Bibliotheken (falls vorhanden)
-├── IMGs/                     # Aktuelle Flash-Images + manifest.json (via build.ps1)
+├── lib/                      # Lokale Bibliotheken
+├── webflasher/               # USB-Webflasher-Seite (→ GitHub Pages)
+├── IMGs/                     # factory.bin, firmware.bin, manifest.json (via build.ps1)
+├── scripts/read_version.sh   # Version aus src/Version.h (CI)
 ├── build.ps1                 # Build, IMGs, optional Upload
 ├── platformio.ini
-└── .github/workflows/        # CI/CD
+└── .github/workflows/        # CI: Build, Release, Pages
 ```
 
 ## Lizenz

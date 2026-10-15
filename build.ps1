@@ -5,8 +5,8 @@
 
 .DESCRIPTION
   - Baut die Firmware (PlatformIO, env esp32-s3-n8r8)
-  - Legt/aktualisiert den Ordner IMGs/ mit bootloader, partitions, boot_app0, firmware
-    und einer manifest.json fuer ESP Web Tools / espwebtool
+  - Legt/aktualisiert den Ordner IMGs/ mit factory.bin (merge), firmware.bin
+    und einer manifest.json fuer ESP Web Tools (ein Part ab 0x0)
   - Ohne -SkipUpload: anschliessend Upload auf den in platformio.ini konfigurierten Port
 
 .EXAMPLE
@@ -39,12 +39,6 @@ Set-Location -LiteralPath $PSScriptRoot
 $EnvName = 'esp32-s3-n8r8'
 $BuildDir = Join-Path $PSScriptRoot ".pio\build\$EnvName"
 $ImgsDir = Join-Path $PSScriptRoot 'IMGs'
-
-# Flash-Offsets ESP32-S3 (Arduino-ESP32 3.x / diese Projekt-README)
-$OffsetBootloader = 0x0000
-$OffsetPartitions = 0x8000
-$OffsetBootApp0   = 0xE000
-$OffsetFirmware   = 0x10000
 
 function Invoke-Step {
     param([string]$Label, [scriptblock]$Action)
@@ -174,36 +168,65 @@ function Update-ImgsFolder {
     Copy-Item -LiteralPath $bootApp0Src -Destination (Join-Path $ImgsDir 'boot_app0.bin') -Force
     Copy-Item -LiteralPath $required['firmware.bin'] -Destination (Join-Path $ImgsDir 'firmware.bin') -Force
 
+    $factoryPath = Join-Path $ImgsDir 'factory.bin'
+    Write-Host "factory.bin mergen (esptool)..." -ForegroundColor Cyan
+    $mergeArgs = @(
+        '-m', 'esptool', '--chip', 'esp32s3', 'merge_bin',
+        '-o', $factoryPath,
+        '--flash_mode', 'qio', '--flash_freq', '80m', '--flash_size', '8MB',
+        '0x0', $required['bootloader.bin'],
+        '0x8000', $required['partitions.bin'],
+        '0xe000', $bootApp0Src,
+        '0x10000', $required['firmware.bin']
+    )
+    & python @mergeArgs
+    if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+        throw "esptool merge_bin fehlgeschlagen (Exit $LASTEXITCODE). Ist esptool installiert? (pip install esptool)"
+    }
+
     $fwVersion = Get-FirmwareVersion
-    $buildStamp = (Get-Date -Format 'yyyy-MM-dd HH:mm')
-    $version = if ($fwVersion) { "$fwVersion ($buildStamp)" } else { $buildStamp }
+    $version = if ($fwVersion) { $fwVersion } else { (Get-Date -Format 'yyyy-MM-dd') }
     $manifest = [ordered]@{
-        name                        = 'Rotor Firmware'
-        version                     = $version
-        new_install_prompt_erase    = $true
-        builds                      = @(
+        name                     = 'Rotor DK8DE'
+        version                  = $version
+        new_install_prompt_erase = $true
+        builds                   = @(
             [ordered]@{
                 chipFamily = 'ESP32-S3'
                 parts      = @(
-                    [ordered]@{ path = 'bootloader.bin'; offset = $OffsetBootloader }
-                    [ordered]@{ path = 'partitions.bin'; offset = $OffsetPartitions }
-                    [ordered]@{ path = 'boot_app0.bin';   offset = $OffsetBootApp0 }
-                    [ordered]@{ path = 'firmware.bin';    offset = $OffsetFirmware }
+                    [ordered]@{ path = 'factory.bin'; offset = 0 }
                 )
             }
         )
     }
 
     $manifestPath = Join-Path $ImgsDir 'manifest.json'
-    $json = $manifest | ConvertTo-Json -Depth 6
+    $json = ($manifest | ConvertTo-Json -Depth 6) + "`n"
     # UTF-8 ohne BOM (Web-Flasher / Browser)
     [System.IO.File]::WriteAllText($manifestPath, $json)
+
+    $readmeTxt = @"
+Rotor DK8DE Firmware $version
+
+factory.bin  - Komplettflash ab Adresse 0 (USB-Webflasher / esptool)
+firmware.bin - nur App fuer SoftAP-OTA (Web-Tab Update)
+
+USB-Webflasher:
+  https://dk8de.github.io/Rotor_Firmware/
+
+SoftAP-OTA:
+  SETWLAN:1 -> http://192.168.4.1 (admin / Rotorconfig) -> Update -> firmware.bin
+
+Beispiel Komplettflash:
+  esptool.py --chip esp32s3 write_flash 0x0 factory.bin
+"@
+    [System.IO.File]::WriteAllText((Join-Path $ImgsDir 'README.txt'), $readmeTxt + "`n")
 
     Write-Host "IMGs aktualisiert (Firmware-Version: $version):" -ForegroundColor Green
     Get-ChildItem -LiteralPath $ImgsDir | ForEach-Object {
         Write-Host ("  {0,-18} {1,10:N0} Bytes" -f $_.Name, $_.Length)
     }
-    Write-Host "  Offsets: bootloader=0x$($OffsetBootloader.ToString('X')) partitions=0x$($OffsetPartitions.ToString('X')) boot_app0=0x$($OffsetBootApp0.ToString('X')) firmware=0x$($OffsetFirmware.ToString('X'))"
+    Write-Host "  USB-Webflasher: factory.bin @ 0x0 | SoftAP-OTA: firmware.bin"
 }
 
 try {

@@ -939,16 +939,26 @@ void webAppFillLiveJson(char* buf, size_t buflen, const char* ssid, const char* 
     angle = (float)(deg01 + g_dgCalDeg01) / 100.0f;
   }
 
+  const bool windEn = board.getWindEnable();
+  float windKmh = 0.0f;
+  float windDir = 0.0f;
+  if (windEn) {
+    (void)board.getWindSpeedKmh(windKmh);
+    (void)board.getWindDirDeg(windDir);
+  }
+
   char uid[16];
   webAppDeviceUid(uid, sizeof(uid));
 
+  // pwm = SETPWM-Soll (g_pwmMaxAbsCmd), nicht Motor-Ist-Duty
   snprintf(buf, buflen,
            "{\"angle\":%.2f,\"tempA\":%.1f,\"tempM\":%.1f,\"fw\":\"%s\","
-           "\"homed\":%d,\"pwm\":%.1f,\"uptime\":%lu,\"heap\":%u,"
-           "\"ssid\":\"%s\",\"ip\":\"%s\",\"uid\":\"%s\"}",
+           "\"homed\":%d,\"pwm\":%.1f,\"windEn\":%d,\"windKmh\":%.1f,\"windDir\":%.1f,"
+           "\"uptime\":%lu,\"heap\":%u,\"ssid\":\"%s\",\"ip\":\"%s\",\"uid\":\"%s\"}",
            (double)angle, (double)temps.getAmbientC(), (double)temps.getMotorC(),
            FW_VERSION_STRING, isRotorReferenced() ? 1 : 0,
-           (double)motor.getLastDutySigned(),
+           (double)g_pwmMaxAbsCmd,
+           windEn ? 1 : 0, (double)windKmh, (double)windDir,
            (unsigned long)(millis() / 1000UL), (unsigned)ESP.getFreeHeap(),
            ssid ? ssid : "", ip ? ip : "", uid);
 }
