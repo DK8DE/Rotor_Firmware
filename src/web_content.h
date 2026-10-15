@@ -96,6 +96,7 @@ nav button.active{
 .kv{background:var(--blue-light);border:1px solid var(--line);border-radius:.75rem;padding:.7rem .8rem}
 .kv .k{color:var(--muted);font-size:.75rem;text-transform:uppercase;letter-spacing:.04em}
 .kv .v{margin-top:.35rem;color:var(--white);word-break:break-all;font-size:2em;font-weight:700;line-height:1.15}
+#vAp{font-size:1.5em;line-height:1.2}
 .field{margin-bottom:.15rem}
 label{display:block;color:var(--muted);font-size:.8rem;margin:0 0 .35rem}
 input,button{font:inherit}

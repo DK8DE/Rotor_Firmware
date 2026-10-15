@@ -13,7 +13,7 @@
 // nicht-kompatible Aenderungen an RS485-Protokoll/NVS-Layout).
 #define FW_VERSION_MAJOR 1
 #define FW_VERSION_MINOR 6
-#define FW_VERSION_PATCH 3
+#define FW_VERSION_PATCH 4
 
 #define FW_VERSION_STRINGIFY_(x) #x
 #define FW_VERSION_STRINGIFY(x) FW_VERSION_STRINGIFY_(x)
