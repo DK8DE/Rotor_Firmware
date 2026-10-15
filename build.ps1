@@ -173,13 +173,19 @@ function Update-ImgsFolder {
     $mergeArgs = @(
         '-m', 'esptool', '--chip', 'esp32s3', 'merge_bin',
         '-o', $factoryPath,
-        '--flash_mode', 'qio', '--flash_freq', '80m', '--flash_size', '8MB',
+        '--flash-mode', 'qio', '--flash-freq', '80m', '--flash-size', '8MB',
         '0x0', $required['bootloader.bin'],
         '0x8000', $required['partitions.bin'],
         '0xe000', $bootApp0Src,
         '0x10000', $required['firmware.bin']
     )
-    & python @mergeArgs
+    # esptool schreibt Hinweise auf stderr -> bei 'Stop' wuerde PowerShell abbrechen
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    & python @mergeArgs 2>&1 | ForEach-Object { Write-Host $_ }
+    $mergeExit = $LASTEXITCODE
+    $ErrorActionPreference = $prevEap
+    $LASTEXITCODE = $mergeExit
     if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
         throw "esptool merge_bin fehlgeschlagen (Exit $LASTEXITCODE). Ist esptool installiert? (pip install esptool)"
     }

@@ -2230,6 +2230,13 @@ const float errDeg = (float)errDeg01 / 100.0f;
         } else {
           _rampStartDeg01 = curDeg01;
           armSsiRampStart_(cNow);
+          // Hochrampe startet exakt bei der Kick-PWM (kickMin) -> bis pwmMax.
+          float kickMinNs = (_cfg.pwmKickMinAbs) ? (*_cfg.pwmKickMinAbs) : 0.0f;
+          if (kickMinNs < 0.0f) kickMinNs = -kickMinNs;
+          const float anchorNs = fabsf(_lastAppliedDuty);
+          if (kickMinNs > 0.01f) {
+            _pwmRampUpAnchorAbs = (anchorNs >= kickMinNs) ? anchorNs : kickMinNs;
+          }
         }
 
         // Speed-Messung und Regler neu initialisieren
@@ -2259,20 +2266,24 @@ const float errDeg = (float)errDeg01 / 100.0f;
           // ------------------------------------------------------------
           // KICK-Target bestimmen
           // ------------------------------------------------------------
-          // Normalfall: Target steigt mit der Zeit an, bis Bewegung erkannt wird.
-          // Soft-Mode (neues Ziel kam waehrend einer Bremsrampe):
-          //   -> wir starten sanfter und halten das Target erstmal bei kickMin,
-          //      damit es beim Neustart keinen Ruck gibt.
+          // Der KICK ist NUR noch die Mindest-PWM (g_minPwm = sicher bewegen),
+          // KEIN Hochziehen bis pwmMax mehr. Sobald Bewegung erkannt ist, faehrt
+          // das Dreieckprofil von kickMin ueber rampDist bis zur eingestellten PWM hoch
+          // (gilt fuer alle Encoder-Typen, Start aus Stillstand, Re-Kick, Gegenrichtung,
+          // neues Ziel waehrend Bremsrampe).
+          //
+          // Nur als Sicherung gegen Festsitzen: bleibt der Rotor nach kKickHoldMs
+          // trotz kickMin stehen, steigt das Target langsam (kKickEscalatePerSec).
+          constexpr uint32_t kKickHoldMs = 600;
+          constexpr float kKickEscalatePerSec = 15.0f;
           float kickTargetAbs = kickMin;
-          if (!_kickSoftMode && !isAbsoluteSsiMotion_()) {
-            float kickSlew = _autoPwmSlewPerSec;
-            if (!isfinite(kickSlew) || kickSlew <= 0.01f) kickSlew = 200.0f;
-
-            const float t = (float)(nowMs - _kickStartMs) / 1000.0f;
-            kickTargetAbs = kickMin + (kickSlew * t);
-            kickTargetAbs = clampFloat(kickTargetAbs, kickMin, pwmMax);
+          if (!_kickSoftMode) {
+            const uint32_t heldMs = (nowMs >= _kickStartMs) ? (nowMs - _kickStartMs) : 0;
+            if (heldMs > kKickHoldMs) {
+              kickTargetAbs = kickMin + kKickEscalatePerSec * ((float)(heldMs - kKickHoldMs) / 1000.0f);
+              kickTargetAbs = clampFloat(kickTargetAbs, kickMin, pwmMax);
+            }
           }
-          // SSI: KICK nur Losbrechung auf kickMin — Hochrampe macht das Dreieckprofil.
 
           const float kickTarget = (float)dir * kickTargetAbs;
 
@@ -2282,11 +2293,9 @@ const float errDeg = (float)errDeg01 / 100.0f;
           float dutyOut = 0.0f;
           if (_kickSoftMode) {
             dutyOut = applyPwmSlew(kickTarget, _lastAppliedDuty, dtMs);
-          } else if (isAbsoluteSsiMotion_()) {
-            // SSI: schnell kickMin, nicht darueber — Hochrampe folgt im Profil.
-            dutyOut = applyPwmSlewCustom(kickTarget, _lastAppliedDuty, dtMs, 400.0f);
           } else {
-            dutyOut = applyPwmSlewCustom(kickTarget, _lastAppliedDuty, dtMs, 600.0f);
+            // schnell auf kickMin (Losbrechen), aber nicht darueber
+            dutyOut = applyPwmSlewCustom(kickTarget, _lastAppliedDuty, dtMs, 400.0f);
           }
           _lastAppliedDuty = dutyOut;
 

@@ -91,7 +91,7 @@ jobs:
           pip install -q esptool
           python -m esptool --chip esp32s3 merge_bin \
             -o "$OUT_DIR/factory.bin" \
-            --flash_mode qio --flash_freq 80m --flash_size 8MB \
+            --flash-mode qio --flash-freq 80m --flash-size 8MB \
             0x0 "$BUILD_DIR/bootloader.bin" \
             0x8000 "$BUILD_DIR/partitions.bin" \
             0xe000 "$BOOT_APP0" \
