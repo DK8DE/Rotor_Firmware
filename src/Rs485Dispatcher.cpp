@@ -961,6 +961,29 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   }
 
   // ------------------------------------------------------------------------
+  // SoftAP-Web-UI: GETWLAN / SETWLAN (nicht persistent, nach Reboot aus)
+  // ------------------------------------------------------------------------
+  if (cmd == "GETWLAN") {
+    const bool on = _cfg.wlanActive ? *_cfg.wlanActive : false;
+    if (shouldReply) sendAck(f.master, "GETWLAN", on ? "1" : "0");
+    return;
+  }
+
+  if (cmd == "SETWLAN") {
+    const uint32_t v = parseU32Param(f.params);
+    if (!(v == 0 || v == 1)) {
+      if (shouldReply) sendNak(f.master, "SETWLAN", "PARAM");
+      return;
+    }
+    if (_cfg.wlanWanted) {
+      *_cfg.wlanWanted = (v != 0);
+    }
+    if (shouldReply) sendAck(f.master, "SETWLAN", "1");
+    serialEventState("SETWLAN");
+    return;
+  }
+
+  // ------------------------------------------------------------------------
   // GETHOMING (Homing laeuft gerade — 1 waehrend SETREF-Prozess, sonst 0)
   // ------------------------------------------------------------------------
   if (cmd == "GETHOMING") {

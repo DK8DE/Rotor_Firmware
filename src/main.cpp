@@ -20,6 +20,10 @@
 #include "HomingController.h"
 #include "SafetyMonitor.h"
 #include "MotionController.h"
+#include "web_ui.h"
+#include "web_app_api.h"
+#include <WiFi.h>
+#include <esp_mac.h>
 
 // ============================================================================
 // Hardware
@@ -85,6 +89,10 @@ static bool g_debug = false;
 // (mit kurzer Verzoegerung, damit die ACK-Nachricht sicher rausgeht).
 static bool g_restartRequested = false;
 static uint32_t g_restartAtMs = 0;
+
+// SoftAP-Web-UI (SETWLAN); nach Reboot immer aus, nicht in FRAM/NVS.
+static bool g_wlanWanted = false;
+static bool g_wlanActive = false;
 
 // ============================================================================
 // Einheiten-Konventionen (wichtig fuer alle Einstellwerte)
@@ -903,6 +911,101 @@ static bool isRotorReferenced() {
   return homing.isReferenced();
 }
 
+// ============================================================================
+// SoftAP-Web-UI Bridge (web_app_api.h)
+// ============================================================================
+void webAppDeviceUid(char* out, size_t outLen) {
+  if (!out || outLen < 7) {
+    if (out && outLen) out[0] = 0;
+    return;
+  }
+  uint8_t mac[6] = {0};
+  if (esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP) != ESP_OK) {
+    (void)esp_read_mac(mac, ESP_MAC_WIFI_STA);
+  }
+  snprintf(out, outLen, "%02X%02X%02X", mac[3], mac[4], mac[5]);
+}
+
+const char* webAppFwVersion() {
+  return FW_VERSION_STRING;
+}
+
+void webAppFillLiveJson(char* buf, size_t buflen, const char* ssid, const char* ip) {
+  if (!buf || buflen < 32) return;
+
+  float angle = 0.0f;
+  int32_t deg01 = 0;
+  if (motion.getCurrentPositionDeg01(deg01)) {
+    angle = (float)(deg01 + g_dgCalDeg01) / 100.0f;
+  }
+
+  char uid[16];
+  webAppDeviceUid(uid, sizeof(uid));
+
+  snprintf(buf, buflen,
+           "{\"angle\":%.2f,\"tempA\":%.1f,\"tempM\":%.1f,\"fw\":\"%s\","
+           "\"homed\":%d,\"pwm\":%.1f,\"uptime\":%lu,\"heap\":%u,"
+           "\"ssid\":\"%s\",\"ip\":\"%s\",\"uid\":\"%s\"}",
+           (double)angle, (double)temps.getAmbientC(), (double)temps.getMotorC(),
+           FW_VERSION_STRING, isRotorReferenced() ? 1 : 0,
+           (double)motor.getLastDutySigned(),
+           (unsigned long)(millis() / 1000UL), (unsigned)ESP.getFreeHeap(),
+           ssid ? ssid : "", ip ? ip : "", uid);
+}
+
+void webAppRequestReboot() {
+  g_restartRequested = true;
+  g_restartAtMs = millis() + 300;
+}
+
+void webAppFactoryReset() {
+  Preferences p;
+  if (p.begin("rotor", false)) {
+    p.clear();
+    p.end();
+  }
+  if (g_storeOk) {
+    (void)g_store.factoryReset();
+  } else {
+    Fm24cl16b fram;
+    fram.begin(Wire);
+    if (fram.ok()) {
+      uint8_t z[32];
+      memset(z, 0, sizeof(z));
+      fram.write(FRAM_OFF_HEADER, z, sizeof(z));
+      uint8_t zpos[FRAM_SIZE_POS];
+      memset(zpos, 0, sizeof(zpos));
+      fram.write(FRAM_OFF_POS, zpos, sizeof(zpos));
+    }
+  }
+}
+
+void webAppOnSoftApAutoOff() {
+  g_wlanWanted = false;
+  g_wlanActive = false;
+}
+
+static void updateSoftApFromWanted() {
+  const bool want = g_wlanWanted;
+  const bool on = webUiIsActive();
+  if (want && !on) {
+    char uid[16];
+    webAppDeviceUid(uid, sizeof(uid));
+    char ssid[32];
+    snprintf(ssid, sizeof(ssid), "Rotor_%s", uid);
+    webUiBegin(ssid, "Rotorconfig");
+    if (g_debug) {
+      Serial.print("[WLAN] SoftAP an: ");
+      Serial.print(ssid);
+      Serial.println(" / Rotorconfig @ 192.168.4.1");
+    }
+  } else if (!want && on) {
+    webUiEnd();
+    if (g_debug) Serial.println("[WLAN] SoftAP aus");
+  }
+  g_wlanActive = webUiIsActive();
+}
+
 void setup() {
   Serial.begin(115200);
   delay(200);
@@ -1406,6 +1509,10 @@ dcfg.encoderAxis = &encoder;
 dcfg.restartRequested = &g_restartRequested;
 dcfg.restartAtMs      = &g_restartAtMs;
 
+// SoftAP-Web-UI (SETWLAN/GETWLAN)
+dcfg.wlanWanted = &g_wlanWanted;
+dcfg.wlanActive = &g_wlanActive;
+
 
 
 
@@ -1609,6 +1716,9 @@ void loop() {
   // RS485 zuerst, damit externe Kommandos auch dann schnell bedient werden,
   // wenn im Hintergrund andere Tasks laufen.
   rs485Dispatcher.update(nowMs);
+  updateSoftApFromWanted();
+  webUiLoop();
+  g_wlanActive = webUiIsActive();
   updatePwmMaxApplied(dtMs);
   updateEncoderRangeOffsetApplied();
   updateEncoderAxisMaxApplied();

@@ -718,22 +718,23 @@ float SafetyMonitor::update(uint32_t nowMs,
         _cfg.dutyPositiveMovesRightEndstop ? (duty > 0.0f) : (duty < 0.0f);
 
     if (twoRevActive) {
-      // Multi-Turn: Endschalter nur an den Grenzen 0 / amax.
-      // Um 360° (Wechsel 1.<->2. Runde) in beide Richtungen durchfahren.
-      // WICHTIG: richtungsbezogen (endL↔links, endR↔rechts) — sonst wuerde
-      // z.B. endR beim Rueckzug vom MAX-Anschlag faelschlich als Min-Zone
-      // gewertet, wenn die Position noch nicht stimmt.
+      // Multi-Turn: Fehler nur an den Achsgrenzen 0 / amax.
+      // Um 360° beide Endschalter in beide Richtungen durchfahren.
+      // An amax kann mechanisch endL oder endR kommen (2. Umdrehung = gleiche
+      // Nockenlage wie bei 0°) — deshalb anyEnd, aber nur in Fahrtrichtung
+      // gegen die Grenze (Wegdrehen vom Anschlag bleibt erlaubt).
       const int32_t pos = *_cfg.axisPosDeg01;
-      constexpr int32_t kMarginDeg01 = 2000; // 20° Fenster an den Achsenden
+      constexpr int32_t kMarginDeg01 = 2500; // 25° Fenster (ab ~695° bei amax=720)
       const bool atMinZone = (pos <= kMarginDeg01);
       const bool atMaxZone = (pos >= (amax - kMarginDeg01));
+      const bool anyEnd = (endL || endR);
 
-      if (atMinZone && moveLeft && endL && !allowMin) {
+      if (atMinZone && moveLeft && anyEnd && !allowMin) {
         duty = 0.0f;
         if (_cfg.latchErrorOnEndstop && rsMotionActive) {
           latchError(SE_ENDSTOP);
         }
-      } else if (atMaxZone && moveRight && endR && !allowMax) {
+      } else if (atMaxZone && moveRight && anyEnd && !allowMax) {
         duty = 0.0f;
         if (_cfg.latchErrorOnEndstop && rsMotionActive) {
           latchError(SE_ENDSTOP);

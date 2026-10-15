@@ -150,11 +150,11 @@ struct SafetyConfig {
   // Multi-Turn Endschalter (Typ 1/2, amax > 360°)
   // ----------------------------------------------------------
   // Wenn twoRevEndstopPolicy und axisMaxDeg01 > 36000:
-  // - Endschalter nur an den Achsgrenzen: nahe 0° (nach links) und nahe amax
-  //   (nach rechts) -> Soft-Stop / SE_ENDSTOP.
-  // - Durchfahrt um 360° (1.<->2. Runde) in beide Richtungen: Endschalter
-  //   werden ignoriert (kein Soft-Stop, kein Latch).
-  // Homing: allowPushIntoEnd* / setLatchErrorOnEndstop(false) unveraendert.
+  // - nahe 0° + Fahrt nach links + irgendein Endschalter -> SE_ENDSTOP
+  // - nahe amax (z.B. 700..720°) + Fahrt nach rechts + irgendein Endschalter
+  //   -> SE_ENDSTOP (bei 720° kann mechanisch endL ODER endR kommen)
+  // - um 360° (und sonst Mitte): beide Endschalter durchfahrbar, kein Fehler
+  // Homing: Policy aus (klassische Soft-Stops).
   bool            twoRevEndstopPolicy = false;
   const int32_t*  axisPosDeg01 = nullptr;  // aktuelle logische Position (Deg01)
   const int32_t*  axisMaxDeg01 = nullptr;  // SETMAXDG

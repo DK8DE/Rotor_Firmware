@@ -24,6 +24,7 @@ Die Firmware läuft auf der Steuerhardware und bietet unter anderem:
 - **Last-/Baseline-Analyse** (LoadMonitor, Kalibrierfahrt über eine Getriebe-Umdrehung)
 - **Sicherheitsfunktionen**: Stall-Erkennung, Endschalter, Deadman/Keepalive
 - **Persistente Parameter** über NVS/Preferences
+- **SoftAP-Konfigurationsseite** (`SETWLAN`): Status, HTTP-OTA-Update, Reboot/Werksreset (Hotspot `Rotor_<UID>`, nicht persistent)
 
 ## Versionierung
 
@@ -205,6 +206,7 @@ Winkelangaben typisch als Grad mit Komma (`12,50` = 12,50°). Intern: Deg01 (= G
 | Kommando | Beschreibung |
 |----------|--------------|
 | `GETVERSION` | Firmware-Version (z. B. `1.6.0`), siehe [Versionierung](#versionierung) |
+| `GETWLAN` / `SETWLAN:0` / `SETWLAN:1` | SoftAP-Web-UI: `1` = Hotspot `Rotor_<UID>` an (Passwort `Rotorconfig`, UI `admin`/`Rotorconfig` @ 192.168.4.1), `0` = aus. Nicht persistent — nach Reboot immer aus. HTTP-OTA unter Tab Update. Hinweis: WiFi kann die Strommessung (ADC2) beeinträchtigen. |
 | `GETID` / `SETID` | Slave-ID |
 | `SETROTORID` | ID nur per Broadcast `255` setzen |
 | `GETROTORTYPE` / `SETROTORTYPE` | Rotor-Typ: 1=Rotation/Azimut, 2=Elevation 90°, 3=Elevation 180° (nur Identifikation, NVS `rty`, keine Logik in dieser Firmware) |

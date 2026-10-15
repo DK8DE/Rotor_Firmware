@@ -135,6 +135,11 @@ struct Rs485DispatcherConfig {
   bool*     restartRequested = nullptr;
   uint32_t* restartAtMs      = nullptr;
 
+  // SoftAP-Web-UI (nicht persistent; nach Reboot aus).
+  // SETWLAN:1/0 setzt *wlanWanted; GETWLAN liest *wlanActive (webUiIsActive).
+  bool*     wlanWanted = nullptr;
+  bool*     wlanActive = nullptr;
+
   // PWM-Max: runtime (SETPWM) und persistent (SETMAXPWM)
   float*    pwmMaxAbsRuntime   = nullptr;  // wird von Motion genutzt (Geschwindigkeit)
   float*    pwmMaxAbsStored    = nullptr;  // in Preferences gespeichert (Default nach Neustart)
