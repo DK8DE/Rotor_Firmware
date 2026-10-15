@@ -1,16 +1,16 @@
 {
-  "name": "Rotor DK8DE",
-  "version": "1.6.0",
-  "new_install_prompt_erase": true,
-  "builds": [
-    {
-      "chipFamily": "ESP32-S3",
-      "parts": [
-        {
-          "path": "factory.bin",
-          "offset": 0
-        }
-      ]
-    }
-  ]
+    "name":  "Rotor DK8DE",
+    "version":  "1.6.2",
+    "new_install_prompt_erase":  true,
+    "builds":  [
+                   {
+                       "chipFamily":  "ESP32-S3",
+                       "parts":  [
+                                     {
+                                         "path":  "factory.bin",
+                                         "offset":  0
+                                     }
+                                 ]
+                   }
+               ]
 }

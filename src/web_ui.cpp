@@ -18,9 +18,15 @@ static char g_ipCache[20] = "192.168.4.1";
 static const char* WEB_USER = "admin";
 static const char* WEB_PASS = "Rotorconfig";
 
+// esp_app_desc_t.magic_word @ Offset 32 im App-Image (nicht in factory.bin).
 static constexpr uint32_t APP_DESC_MAGIC = 0xABCD5432UL;
 static bool g_updReject = false;
 static bool g_updFailed = false;
+static bool g_updBegun = false;
+static bool g_updMagicOk = false;
+static uint8_t g_updHdr[36];
+static size_t g_updHdrLen = 0;
+static const char* g_updErr = nullptr;
 
 static bool checkAuth() {
   if (g_server == nullptr) return false;
@@ -35,6 +41,41 @@ static void sendJson(int code, const String& body) {
   g_server->sendHeader("Pragma", "no-cache");
   g_server->sendHeader("Connection", "close");
   g_server->send(code, "application/json", body);
+}
+
+static void updResetState() {
+  g_updReject = false;
+  g_updFailed = false;
+  g_updBegun = false;
+  g_updMagicOk = false;
+  g_updHdrLen = 0;
+  g_updErr = nullptr;
+  memset(g_updHdr, 0, sizeof(g_updHdr));
+}
+
+static bool updEnsureBegun() {
+  if (g_updBegun) return true;
+  const esp_partition_t* next = esp_ota_get_next_update_partition(nullptr);
+  size_t maxSketch = next ? next->size : ESP.getFreeSketchSpace();
+  if (maxSketch == 0) {
+    g_updFailed = true;
+    g_updErr = "no_ota_slot";
+    return false;
+  }
+  if (!Update.begin(maxSketch, U_FLASH)) {
+    Update.printError(Serial);
+    g_updFailed = true;
+    g_updErr = "begin";
+    return false;
+  }
+  g_updBegun = true;
+  return true;
+}
+
+static bool updCheckMagic(const uint8_t* hdr) {
+  uint32_t magic = 0;
+  memcpy(&magic, hdr + 32, sizeof(magic));
+  return hdr[0] == 0xE9 && magic == APP_DESC_MAGIC;
 }
 
 static void handleRoot() {
@@ -64,61 +105,119 @@ static void handleStatus() {
 static void handleUpdateInfo() {
   if (!checkAuth()) return;
   const esp_partition_t* running = esp_ota_get_running_partition();
-  char buf[192];
+  const esp_partition_t* next = esp_ota_get_next_update_partition(nullptr);
+  char buf[256];
   snprintf(buf, sizeof(buf),
-           "{\"fw\":\"%s\",\"partition\":\"%s\",\"size\":%u}", webAppFwVersion(),
-           running ? running->label : "?", running ? (unsigned)running->size : 0U);
+           "{\"fw\":\"%s\",\"partition\":\"%s\",\"size\":%u,\"ota\":\"%s\",\"otaSize\":%u}",
+           webAppFwVersion(), running ? running->label : "?",
+           running ? (unsigned)running->size : 0U, next ? next->label : "?",
+           next ? (unsigned)next->size : 0U);
   sendJson(200, buf);
 }
 
 static void handleUpdateUpload() {
   if (g_server == nullptr) return;
   HTTPUpload& upload = g_server->upload();
+
   if (upload.status == UPLOAD_FILE_START) {
-    g_updReject = false;
-    g_updFailed = false;
-    size_t maxSketch = ESP.getFreeSketchSpace();
-    if (!Update.begin(maxSketch)) {
-      Update.printError(Serial);
-      g_updFailed = true;
-    }
-  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    updResetState();
+    Serial.printf("[OTA] start name=%s\n", upload.filename.c_str());
+    return;
+  }
+
+  if (upload.status == UPLOAD_FILE_WRITE) {
     if (g_updReject || g_updFailed) return;
-    if (upload.totalSize == upload.currentSize) {
-      uint32_t magic = 0;
-      if (upload.currentSize >= 36) {
-        memcpy(&magic, upload.buf + 32, sizeof(magic));
+
+    const uint8_t* data = upload.buf;
+    size_t len = upload.currentSize;
+    if (len == 0) return;
+
+    // Magic erst pruefen, wenn die ersten 36 Bytes vollstaendig sind
+    // (erster HTTP-Chunk kann < 36 sein — sonst fälschlich not_app).
+    if (!g_updMagicOk) {
+      size_t need = sizeof(g_updHdr) - g_updHdrLen;
+      size_t take = (len < need) ? len : need;
+      memcpy(g_updHdr + g_updHdrLen, data, take);
+      g_updHdrLen += take;
+
+      if (g_updHdrLen < sizeof(g_updHdr)) {
+        return;  // warten auf weitere Bytes, noch nichts flashen
       }
-      if (upload.currentSize < 36 || upload.buf[0] != 0xE9 || magic != APP_DESC_MAGIC) {
+
+      if (!updCheckMagic(g_updHdr)) {
+        Serial.println("[OTA] reject: not app image (magic)");
         g_updReject = true;
-        Update.abort();
+        g_updErr = "not_app";
+        if (g_updBegun) Update.abort();
         return;
       }
+      g_updMagicOk = true;
+
+      if (!updEnsureBegun()) return;
+
+      if (Update.write(g_updHdr, sizeof(g_updHdr)) != sizeof(g_updHdr)) {
+        Update.printError(Serial);
+        g_updFailed = true;
+        g_updErr = "write";
+        return;
+      }
+
+      data += take;
+      len -= take;
+      if (len == 0) return;
     }
-    if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+
+    if (!updEnsureBegun()) return;
+
+    if (Update.write(const_cast<uint8_t*>(data), len) != len) {
       Update.printError(Serial);
       g_updFailed = true;
+      g_updErr = "write";
     }
-  } else if (upload.status == UPLOAD_FILE_END) {
+    return;
+  }
+
+  if (upload.status == UPLOAD_FILE_END) {
     if (g_updReject || g_updFailed) return;
+    if (!g_updMagicOk || !g_updBegun) {
+      g_updFailed = true;
+      g_updErr = "short";
+      if (g_updBegun) Update.abort();
+      return;
+    }
     if (!Update.end(true)) {
       Update.printError(Serial);
       g_updFailed = true;
+      g_updErr = "end";
+      return;
     }
-  } else if (upload.status == UPLOAD_FILE_ABORTED) {
-    Update.abort();
+    Serial.printf("[OTA] ok size=%u\n", (unsigned)upload.totalSize);
+    return;
+  }
+
+  if (upload.status == UPLOAD_FILE_ABORTED) {
+    if (g_updBegun) Update.abort();
     g_updFailed = true;
+    g_updErr = "aborted";
   }
 }
 
 static void handleUpdateDone() {
-  if (!checkAuth()) return;
+  // Kein checkAuth(): XHR/FormData sendet Basic-Auth oft nicht mit.
+  // SoftAP-PSK schuetzt den Zugang; Magic-Check verhindert factory.bin.
   if (g_updReject) {
     sendJson(400, "{\"ok\":false,\"err\":\"not_app\"}");
     return;
   }
   if (g_updFailed || Update.hasError()) {
-    sendJson(500, "{\"ok\":false}");
+    char buf[96];
+    snprintf(buf, sizeof(buf), "{\"ok\":false,\"err\":\"%s\"}",
+             g_updErr ? g_updErr : "update");
+    sendJson(500, buf);
+    return;
+  }
+  if (!g_updMagicOk || !g_updBegun) {
+    sendJson(500, "{\"ok\":false,\"err\":\"short\"}");
     return;
   }
   sendJson(200, "{\"ok\":true}");
@@ -217,8 +316,11 @@ void webUiLoop() {
   if (!g_webActive) return;
   // SoftAP bleibt aktiv bis SETWLAN:0 oder Neustart (kein Idle-Shutdown).
   if (g_server != nullptr) {
-    for (int i = 0; i < 4; i++) {
+    // Mehr Durchlaeufe waehrend OTA-Upload (grosse firmware.bin).
+    const int n = (g_updBegun || g_updHdrLen > 0) ? 16 : 4;
+    for (int i = 0; i < n; i++) {
       g_server->handleClient();
+      yield();
     }
   }
 }

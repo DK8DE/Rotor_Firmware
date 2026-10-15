@@ -327,7 +327,9 @@ function pollLive(){
 function loadUpdInfo(){
   api('/api/update/info').then(function(r){ return r.json(); }).then(function(j){
     setTxt('updCur', j.fw||'-');
-    setTxt('updPart', (j.partition||'-')+(j.size?(' · '+j.size):''));
+    var run=(j.partition||'-')+(j.size?(' · '+j.size):'');
+    var ota=j.ota?(' → OTA '+j.ota+(j.otaSize?(' · '+j.otaSize):'')):'';
+    setTxt('updPart', run+ota);
   }).catch(function(){});
 }
 var btnUpload=document.getElementById('btnUpload');
@@ -335,6 +337,7 @@ if(btnUpload) btnUpload.onclick=function(){
   var inp=document.getElementById('fwFile');
   var f=inp&&inp.files&&inp.files[0];
   if(!f){ toast(t('upd_choose'), false); return; }
+  if(/factory/i.test(f.name)){ setTxt('updMsg', t('upd_fail')+' (not_app)'); toast(t('toast_update_fail'), false); return; }
   setTxt('updMsg', t('upd_uploading'));
   var bar=document.getElementById('updBar'); if(bar) bar.style.width='0%';
   var xhr=new XMLHttpRequest();
@@ -344,14 +347,14 @@ if(btnUpload) btnUpload.onclick=function(){
     if(ev.lengthComputable&&bar) bar.style.width=Math.round(100*ev.loaded/ev.total)+'%';
   };
   xhr.onload=function(){
-    var ok=false;
-    try{ ok=JSON.parse(xhr.responseText).ok; }catch(e){}
+    var ok=false, err='';
+    try{ var j=JSON.parse(xhr.responseText); ok=!!j.ok; err=j.err||''; }catch(e){}
     if(ok){
       setTxt('updMsg', t('upd_ok'));
       toast(t('toast_update_ok'), true);
       setTimeout(function(){ api('/api/reboot',{method:'POST'}); }, 600);
     }else{
-      setTxt('updMsg', t('upd_fail'));
+      setTxt('updMsg', t('upd_fail')+(err?(' ('+err+')'):(' HTTP '+xhr.status)));
       toast(t('toast_update_fail'), false);
     }
   };
