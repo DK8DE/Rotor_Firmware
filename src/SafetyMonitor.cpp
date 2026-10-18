@@ -204,8 +204,39 @@ void SafetyMonitor::updateEndstopDebounce(uint32_t nowMs) {
     return;
   }
 
+  const uint8_t esc = _board->getEndstopCount();
+  if (esc == 0) {
+    _endLRaw = _endRRaw = false;
+    _endLStable = _endRStable = false;
+    _endContactStable = false;
+    return;
+  }
+
   const uint32_t db = _cfg.endstopDebounceMs;
-  // 0 = Entprellung aus: stable folgt sofort raw
+
+  if (esc == 1) {
+    // Ein Kontakt: L || R entprellen, dann per Seitenhinweis aufteilen
+    const bool rawC = _board->readEndContact();
+    if (db == 0) {
+      _endLRaw = rawC;
+      _endContactStable = rawC;
+    } else {
+      if (rawC != _endLRaw) {
+        _endLRaw = rawC;
+        _endLChangeMs = nowMs;
+      }
+      if ((nowMs - _endLChangeMs) >= db) {
+        _endContactStable = _endLRaw;
+      }
+    }
+    _endRRaw = _endLRaw;
+    _endRChangeMs = _endLChangeMs;
+    _endLStable = _endContactStable && (_endstopSide < 0);
+    _endRStable = _endContactStable && (_endstopSide > 0);
+    return;
+  }
+
+  // Zwei Kontakte (bisheriges Verhalten)
   const bool rawL = _board->readEndLeft();
   const bool rawR = _board->readEndRight();
 
@@ -238,6 +269,12 @@ void SafetyMonitor::updateEndstopDebounce(uint32_t nowMs) {
 
 void SafetyMonitor::setRestrictEndstops(bool on) {
   _cfg.restrictEndstops = on;
+}
+
+void SafetyMonitor::setEndstopSide(int8_t side) {
+  if (side < -1) side = -1;
+  if (side > 1) side = 1;
+  _endstopSide = side;
 }
 
 void SafetyMonitor::setAllowPushIntoEndMin(bool on) {

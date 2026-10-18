@@ -1,4 +1,5 @@
 #include "EncoderAxis.h"
+#include "HalBoard.h"
 
 #include <TWK_KBE58_SSI.h>
 
@@ -45,7 +46,32 @@ bool EncoderAxis::begin(const EncoderAxisConfig& cfg) {
   if (_cfg.encType == ENCTYPE_ABSOLUTE_SSI) {
     return beginSsi();
   }
+  if (_cfg.encType == ENCTYPE_INCLINOMETER) {
+    return beginInclino();
+  }
   return beginPcnt();
+}
+
+bool EncoderAxis::beginInclino() {
+  if (!_cfg.inclinoBoard) {
+    return false;
+  }
+  // Synthetische Counts: 1 Count = 0,01° (= 1 Deg01).
+  // CPR = 36000, damit Motion-Deg-pro-Count (36000/cpr) = 1 Deg01 bleibt.
+  if (_cfg.countsPerRevActual <= 0) {
+    _cfg.countsPerRevActual = 36000;
+  }
+  if (_cfg.axisMaxDeg01 <= 0) {
+    _cfg.axisMaxDeg01 = 9000;
+  }
+  return true;
+}
+
+bool EncoderAxis::isInclinoValid() const {
+  if (_cfg.encType != ENCTYPE_INCLINOMETER || !_cfg.inclinoBoard) {
+    return false;
+  }
+  return _cfg.inclinoBoard->isInclinoValid();
 }
 
 bool EncoderAxis::beginPcnt() {
@@ -237,7 +263,8 @@ void EncoderAxis::setCountsPerRevActual(int32_t cpr) {
 int32_t EncoderAxis::getCountsPerRevEffective() const {
   if (_cfg.countsPerRevActual <= 0) return 0;
 
-  if (_cfg.encType == ENCTYPE_ABSOLUTE_SSI) {
+  if (_cfg.encType == ENCTYPE_ABSOLUTE_SSI ||
+      _cfg.encType == ENCTYPE_INCLINOMETER) {
     return _cfg.countsPerRevActual;
   }
 
@@ -269,18 +296,29 @@ void EncoderAxis::setEncoderType(EncoderType t) {
 }
 
 long EncoderAxis::getCountsRaw() const {
+  if (_cfg.encType == ENCTYPE_INCLINOMETER) {
+    int32_t deg01 = 0;
+    if (!getPositionDeg01(deg01)) return 0;
+    return (long)deg01;
+  }
   if (_ssi) return (long)_ssiPosition;
   if (!_enc) return 0;
   return _enc->getPositionStepsRaw();
 }
 
 long EncoderAxis::getCountsCorrected() const {
+  if (_cfg.encType == ENCTYPE_INCLINOMETER) {
+    return getCountsRaw();
+  }
   if (_ssi) return (long)_ssiPosition;
   if (!_enc) return 0;
   return _enc->getPositionStepsCorrected();
 }
 
 long EncoderAxis::getCountsDefault() const {
+  if (_cfg.encType == ENCTYPE_INCLINOMETER) {
+    return getCountsRaw();
+  }
   if (_ssi) return (long)_ssiPosition;
   if (!_enc) return 0;
   return _enc->getPositionSteps();
@@ -297,12 +335,15 @@ long EncoderAxis::getCountsExtended() const {
 
 void EncoderAxis::setCountsZero() {
   if (_ssi) return;
+  if (_cfg.encType == ENCTYPE_INCLINOMETER) return;
   if (!_enc) return;
   _enc->setPositionSteps(0);
   _enc->resetZHistory();
 }
 
 bool EncoderAxis::setEncZero() {
+  // Typ 4: Kalibrierung am Inklinometer-Geraet, kein Soft/HW-Zero hier.
+  if (_cfg.encType == ENCTYPE_INCLINOMETER) return false;
   if (_cfg.encType != ENCTYPE_ABSOLUTE_SSI || !_ssi || _cfg.ssiZeroPin < 0) {
     return false;
   }
@@ -344,6 +385,10 @@ void EncoderAxis::clearSsiTurnDirty() {
 }
 
 void EncoderAxis::setCounts(long newCounts) {
+  if (_cfg.encType == ENCTYPE_INCLINOMETER) {
+    (void)newCounts;
+    return;
+  }
   if (_ssi) {
     if (newCounts < 0) newCounts = 0;
     const int32_t cpr = _cfg.countsPerRevActual;
@@ -358,6 +403,15 @@ void EncoderAxis::setCounts(long newCounts) {
 }
 
 bool EncoderAxis::getPositionDeg01(int32_t& outDeg01) const {
+  if (_cfg.encType == ENCTYPE_INCLINOMETER) {
+    if (!_cfg.inclinoBoard) return false;
+    int32_t deg01 = 0;
+    if (!_cfg.inclinoBoard->getInclinoDeg01(deg01)) return false;
+    const int32_t amax = (_cfg.axisMaxDeg01 > 0) ? _cfg.axisMaxDeg01 : 9000;
+    outDeg01 = clampI32(deg01, 0, amax);
+    return true;
+  }
+
   const int32_t cprActual = _cfg.countsPerRevActual;
   if (cprActual <= 0) return false;
 
@@ -400,6 +454,12 @@ bool EncoderAxis::getPositionDeg01(int32_t& outDeg01) const {
 }
 
 bool EncoderAxis::deg01ToCounts(int32_t deg01, int32_t& outCounts) const {
+  if (_cfg.encType == ENCTYPE_INCLINOMETER) {
+    const int32_t amax = (_cfg.axisMaxDeg01 > 0) ? _cfg.axisMaxDeg01 : 9000;
+    outCounts = clampI32(deg01, 0, amax);
+    return true;
+  }
+
   const int32_t cprActual = _cfg.countsPerRevActual;
   if (cprActual <= 0) return false;
 

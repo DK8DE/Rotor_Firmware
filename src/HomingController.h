@@ -49,6 +49,10 @@ enum HomingState : uint8_t {
   HOME_UNWIND_SEEK_MIN,
   HOME_UNWIND_OVERRUN,
 
+  // Ein-Kontakt-Modus: Start am rechten Anschlag (Kontakt belegt) ->
+  // zuerst nach links freifahren, dann normales SEEK_MIN.
+  HOME_SINGLE_FREE_LEFT,
+
   // MIN / LEFT
   HOME_SEEK_MIN_FAST,       // schnell anfahren bis END_MIN gedrueckt (debounced)
   // Optionales "Ueberfahren" in den Endschalter hinein (falls mechanisch erlaubt),
@@ -60,6 +64,10 @@ enum HomingState : uint8_t {
   HOME_SEEK_MIN_SLOW_1,     // langsam anfahren bis END_MIN gedrueckt (1. Touch)
   HOME_BACKOFF_MIN_SLOW,    // langsam freifahren bis END_MIN frei (Release fuer Backlash)
   HOME_SEEK_MIN_SLOW_2,     // langsam anfahren bis END_MIN gedrueckt (2. Touch) -> Nullpunkt setzen
+
+  // Ein-Kontakt-Modus: nach Nullsetzen am linken Kontakt zuerst nach rechts
+  // freifahren, sonst gilt der noch gedrueckte Reed sofort als END_MAX.
+  HOME_SINGLE_LEAVE_MIN,
 
   // MAX / RIGHT (Anfahrt wie MIN: seekMin + Overrun-Abbremsung)
   HOME_SEEK_MAX_FAST,       // anfahren bis END_MAX gedrueckt (seekMin-Rampe)
@@ -168,6 +176,10 @@ public:
   void setReferenced(bool v) { _referenced = v; }
   HomingState getState() const { return _state; }
 
+  // Bei endstopCount==1: welcher Anschlag der gemeinsame Kontakt gerade bedeutet.
+  // -1 = links/MIN, +1 = rechts/MAX, 0 = idle/unbekannt.
+  int8_t getEndstopSide() const;
+
   int32_t getCountsPerRevLearned() const { return _countsPerRevLearned; }
   int32_t getBacklashDeg01() const { return _backlashDeg01; }
   // Debug/Diagnose: gemessene Backlash-Counts (Encoder-Counts) zwischen "frei" und "wieder gedrueckt".
@@ -179,8 +191,9 @@ private:
   // Endstop debounce (mechanische Entprellung).
   // Wir arbeiten mit stabilen Zustaenden, damit der "Schalt-Count" reproduzierbar wird.
   void updateEndstopDebounce(uint32_t nowMs);
-  bool endL() const { return _endLStable; }
-  bool endR() const { return _endRStable; }
+  bool endL() const;
+  bool endR() const;
+  bool singleEndstopMode() const;
 
   void setState(HomingState s, uint32_t nowMs);
   void fail(const char* msg, uint32_t nowMs);

@@ -256,6 +256,8 @@ static float g_homeReturnRampDeg = 30.0f;
 // - ENCTYPE_ABSOLUTE_SSI:
 //     TWK KBE58 SSI auf Pin 8/9, SET0 Pin 4 — kein Homing, Position sofort bekannt.
 //     Encoder-Welle und Abtriebsachse laufen 1:1 — ssiAngleScaleNum/Den = 1/1.
+// - ENCTYPE_INCLINOMETER:
+//     Inklinometer am Wind-RS485 (Serial2 @115200, #GETDG$) — kein Homing, kein Wind.
 static EncoderType g_encType = ENCTYPE_MOTOR_AXIS;
 
 // Rotor-Typ: reine Identifikation fuer die Steuerung (Master), wird aktuell
@@ -329,6 +331,10 @@ static uint32_t g_jogTimeoutMs = 500;
 // true = Bewegungen werden auf [axisMin..axisMax] begrenzt und Endstop-Zustaende werden sicher behandelt.
 // false = nur fuer spezielle Tests (nicht empfohlen).
 static bool g_restrictEndstops = true;
+
+// Anzahl Endschalter: 0=keine (Absolutgeber), 1=ein Kontakt (L||R), 2=zwei Kontakte.
+// Persistent via SETENDSTC/GETENDSTC (FRAM). Default: 2, bei SSI 0.
+static uint8_t g_endstopCount = 2;
 
 // Endschalter-Entprellung / Stoerunterdrueckung (ms)  (EEPROM-tauglich)
 //
@@ -898,6 +904,7 @@ static RotorStoreRefs makeStoreRefs() {
   r.antDp1 = &g_antDp1;
   r.antDp2 = &g_antDp2;
   r.antDp3 = &g_antDp3;
+  r.endstopCount = &g_endstopCount;
   r.antName1 = &g_antName1;
   r.antName2 = &g_antName2;
   r.antName3 = &g_antName3;
@@ -907,6 +914,9 @@ static RotorStoreRefs makeStoreRefs() {
 static bool isRotorReferenced() {
   if (g_encType == ENCTYPE_ABSOLUTE_SSI) {
     return encoder.isSsiValid();
+  }
+  if (g_encType == ENCTYPE_INCLINOMETER) {
+    return encoder.isInclinoValid();
   }
   return homing.isReferenced();
 }
@@ -1064,10 +1074,16 @@ void setup() {
 
   board.applyHardwareProfile(g_encType);
 
-  if (g_encType == ENCTYPE_ABSOLUTE_SSI) {
+  if (g_encType == ENCTYPE_ABSOLUTE_SSI || g_encType == ENCTYPE_INCLINOMETER) {
     g_windEnable = false;
-    g_restrictEndstops = false;
   }
+  if (g_encType == ENCTYPE_INCLINOMETER && g_endstopCount == 1) {
+    g_endstopCount = 0;
+  }
+
+  // Endschalter-Anzahl aus FRAM (0/1/2); Absolut-Default 0 kommt aus unpack ohne Flag.
+  if (g_endstopCount > 2) g_endstopCount = 2;
+  board.setEndstopCount(g_endstopCount);
 
   // Persistente Wind-Offsets in den Wind-Sensor uebernehmen
   // (Speed-Offset bleibt kompatibel zum alten Analogsensor: km/h)
@@ -1080,6 +1096,9 @@ void setup() {
     board.startWindTask();
   } else {
     board.setWindEnable(false);
+  }
+  if (board.isInclinoHardwareAvailable()) {
+    board.startInclinoTask();
   }
 
   motor.begin(PWM_GPIO_IN1, PWM_GPIO_IN2, ENABLE_GPIO, PWM_FREQUENCY_HZ, 10UL * 1000UL * 1000UL);
@@ -1114,7 +1133,8 @@ void setup() {
   // Safety
   // -------------------------
   safetyCfg = SafetyConfig{};
-  safetyCfg.restrictEndstops = g_restrictEndstops;
+  // Endschalter-Sperre nur wenn gewuenscht UND mindestens ein Kontakt konfiguriert.
+  safetyCfg.restrictEndstops = g_restrictEndstops && (g_endstopCount > 0);
   safetyCfg.latchErrorOnEndstop = true;
   safetyCfg.cmdTimeoutMs = g_cmdTimeoutMs;
 
@@ -1154,6 +1174,13 @@ void setup() {
     if (safetyCfg.stallMinCounts > 3u) {
       safetyCfg.stallMinCounts = 3u;
     }
+  } else if (g_encType == ENCTYPE_INCLINOMETER) {
+    // Synthetische Counts = Deg01 (1 Count = 0,01°)
+    safetyCfg.stallAbsoluteEncoder = false;
+    safetyCfg.stallCountsPerRev = 0;
+    if (safetyCfg.stallMinCounts > 5u) {
+      safetyCfg.stallMinCounts = 5u;
+    }
   }
 
   // Typ 1/2 Multi-Turn: 1. Runde rechts durchfahren, 2. Runde Endstop=Fehler
@@ -1187,6 +1214,13 @@ void setup() {
     ecfg.ssiZeroPin = ENC_SSI_ZERO_PIN;
     ecfg.rangeDegOffsetDeg01 = 0;
     ecfg.axisMaxDeg01 = g_axisMaxDeg01;
+  } else if (g_encType == ENCTYPE_INCLINOMETER) {
+    ecfg.inclinoBoard = &board;
+    ecfg.rangeDegOffsetDeg01 = 0;
+    ecfg.axisMaxDeg01 = (g_axisMaxDeg01 > 0) ? g_axisMaxDeg01 : 9000;
+    ecfg.countsPerRevActual = 36000; // 1 Count = 1 Deg01
+    ecfg.zEnabled = false;
+    ecfg.zCorrEnabled = false;
   } else {
     ecfg.rangeDegOffsetDeg01 = g_dgOffsetDeg01;
     ecfg.axisMaxDeg01 = g_axisMaxDeg01;
@@ -1224,9 +1258,9 @@ void setup() {
   }
 
   // -------------------------
-  // Homing (nur Typ 1/2 — Typ 3: SSI liefert Position ohne Endschalter)
+  // Homing (nur Typ 1/2 — Typ 3/4: Absolutlage ohne Homing-Seek)
   // -------------------------
-  if (g_encType != ENCTYPE_ABSOLUTE_SSI) {
+  if (g_encType != ENCTYPE_ABSOLUTE_SSI && g_encType != ENCTYPE_INCLINOMETER) {
   HomingConfig hcfg;
   hcfg = HomingConfig{};
   hcfg.fastPwmPercent = g_homeFastPwmPercent;
@@ -1266,12 +1300,15 @@ void setup() {
   hcfg.backlashMeasuredToModelScale = g_homeBacklashMeasScale;
   homing.begin(&board, &motor, &encoder, hcfg);
 
-  // FRAM-POS Restore (Typ 1/2): nach einmaligem Homing ohne SETREF starten,
-  // ausser moveActive (Strom weg waehrend Fahrt) -> erneut homen.
+  // FRAM-POS Restore (Typ 1/2): nach einmaligem Homing/SETREF ohne erneutes Homing.
+  // moveActive (Strom weg waehrend Fahrt): mit Endschaltern -> erneut homen;
+  // ohne Endschalter (endstopCount==0) -> trotzdem restore (kein Homing moeglich).
   if (g_storeOk) {
     RotorPersistPos pos{};
     if (g_store.loadPos(pos)) {
-      if (g_store.isPosMoveActive()) {
+      const bool moveActive = g_store.isPosMoveActive();
+      const bool forceRehome = moveActive && (g_endstopCount > 0);
+      if (forceRehome) {
         homing.setReferenced(false);
         g_backlashDeg01 = 0;
         if (g_debug) Serial.println("[POS] moveActive — Homing erforderlich");
@@ -1283,6 +1320,10 @@ void setup() {
         g_backlashDeg01 = pos.backlashDeg01;
         if (g_backlashDeg01 < 0) g_backlashDeg01 = -g_backlashDeg01;
         homing.setReferenced(true);
+        if (moveActive && g_endstopCount == 0) {
+          g_store.setMoveActive(false);
+          if (g_debug) Serial.println("[POS] moveActive ignoriert (keine Endschalter)");
+        }
         if (g_debug) {
           Serial.print("[POS] restored counts=");
           Serial.print(pos.encoderCounts);
@@ -1513,6 +1554,8 @@ dcfg.homeSeekMinPwmPercent = &g_homeSeekMinPwmPercent;
 dcfg.homeExpectedCountsRing = &g_homeExpectedCountsRing;
 dcfg.homeExpectedCountsMotor = &g_homeExpectedCountsMotor;
 dcfg.encTypeU8 = (uint8_t*)&g_encType; // Enum basiert auf uint8_t
+dcfg.endstopCount = &g_endstopCount;
+dcfg.backlashDeg01 = &g_backlashDeg01;
 dcfg.encoderAxis = &encoder;
 
 // Neustart-Flags (werden von Rs485Dispatcher gesetzt)
@@ -1573,6 +1616,7 @@ dcfg.wlanActive = &g_wlanActive;
     Serial.print("[CFG] cmdTimeoutMs=");      Serial.println(g_cmdTimeoutMs);
 
     Serial.print("[CFG] endstopDebounceMs="); Serial.println(g_endstopDebounceMs);
+    Serial.print("[CFG] endstopCount=");      Serial.println((int)g_endstopCount);
 
     Serial.print("[CFG] IS enabled=");        Serial.println(g_currentMonitorEnabled ? 1 : 0);
     Serial.print("[CFG] IS softWarnMv=");     Serial.println(g_isSoftWarnMv);
@@ -1673,7 +1717,7 @@ static void updatePwmMaxApplied(uint32_t dtMs) {
 // - Wenn man sie waehrend der Bewegung aendert, "springt" die angezeigte Gradposition
 //   entsprechend leicht. Sinnvoll ist daher: aendern im Stillstand.
 static void updateEncoderRangeOffsetApplied() {
-  if (g_encType == ENCTYPE_ABSOLUTE_SSI) return;
+  if (g_encType == ENCTYPE_ABSOLUTE_SSI || g_encType == ENCTYPE_INCLINOMETER) return;
   static int32_t s_lastOff = INT32_MIN;
   if (s_lastOff == g_dgOffsetDeg01) return;
   s_lastOff = g_dgOffsetDeg01;
@@ -1734,6 +1778,9 @@ void loop() {
   updateEncoderAxisMaxApplied();
 
   encoder.update();
+  if (g_encType == ENCTYPE_INCLINOMETER) {
+    homing.setReferenced(encoder.isInclinoValid());
+  }
   if (g_encType == ENCTYPE_ABSOLUTE_SSI) {
     homing.setReferenced(encoder.isSsiValid());
 
@@ -1792,7 +1839,7 @@ void loop() {
     }
   }
 
-  if (g_encType != ENCTYPE_ABSOLUTE_SSI) {
+  if (g_encType != ENCTYPE_ABSOLUTE_SSI && g_encType != ENCTYPE_INCLINOMETER) {
   homing.update(nowMs);
   rs485Dispatcher.updateHomingKickRetry(nowMs);
   }
@@ -1806,7 +1853,7 @@ void loop() {
   // - Wir ueberschreiben KEINEN bereits existierenden Safety-Fault (z.B. SE_STALL/SE_TIMEOUT).
   // - Quittierung erfolgt (wie gewuenscht) nur ueber SETREF (Rs485Dispatcher->clearFault()).
   static bool s_homeFailLatched = false;
-  if (g_encType != ENCTYPE_ABSOLUTE_SSI) {
+  if (g_encType != ENCTYPE_ABSOLUTE_SSI && g_encType != ENCTYPE_INCLINOMETER) {
   if (homing.getState() == HOME_ERROR) {
     if (!safety.isFault() && !s_homeFailLatched) {
       safety.triggerEmergencyStop(SE_HOME_FAIL);
@@ -1855,12 +1902,31 @@ void loop() {
   safety.setAllowPushIntoEndMin(allowMinOverrun);
   safety.setAllowPushIntoEndMax(allowMaxOverrun);
 
+  // Ein-Kontakt-Modus: Seitenhinweis fuer Safety (Homing-State oder Positions-Haelfte)
+  if (g_endstopCount == 1) {
+    int8_t side = 0;
+    if (homingActive) {
+      side = homing.getEndstopSide();
+    } else {
+      int32_t pos = 0;
+      if (encoder.getPositionDeg01(pos)) {
+        const int32_t amax = (g_axisMaxDeg01 > 0) ? g_axisMaxDeg01 : 36000;
+        side = (pos < (amax / 2)) ? (int8_t)-1 : (int8_t)+1;
+      }
+    }
+    safety.setEndstopSide(side);
+  } else {
+    safety.setEndstopSide(0);
+  }
+
   // Nach echtem Homing (nicht FRAM-Restore): Backlash + POS in FRAM speichern
   static bool s_prevHomingActive = false;
   const bool justFinishedHoming =
       s_prevHomingActive && !homingActive && isRotorReferenced() &&
       (g_encType == ENCTYPE_MOTOR_AXIS || g_encType == ENCTYPE_RING_OUTPUT);
-  s_prevHomingActive = (g_encType != ENCTYPE_ABSOLUTE_SSI) && homingActive;
+  s_prevHomingActive =
+      (g_encType != ENCTYPE_ABSOLUTE_SSI && g_encType != ENCTYPE_INCLINOMETER) &&
+      homingActive;
 
   if (justFinishedHoming) {
     g_backlashDeg01 = homing.getBacklashDeg01();
@@ -1895,7 +1961,8 @@ void loop() {
     const bool mot = motion.isMotionActive();
 
     if (mot && !s_wasIncMotion) {
-      g_store.setMoveActive(true);
+      // Ohne Endschalter: kein moveActive-Flag (Re-Home waere ohnehin unmoeglich).
+      if (g_endstopCount > 0) g_store.setMoveActive(true);
       int32_t deg01 = 0;
       (void)encoder.getPositionDeg01(deg01);
       g_store.savePosSnapshot((int32_t)encoder.getCountsDefault(), deg01);
@@ -1911,7 +1978,7 @@ void loop() {
       int32_t deg01 = 0;
       (void)encoder.getPositionDeg01(deg01);
       g_store.savePosSnapshot((int32_t)encoder.getCountsDefault(), deg01);
-      g_store.setMoveActive(false);
+      if (g_endstopCount > 0) g_store.setMoveActive(false);
     }
     s_wasIncMotion = mot;
   }
@@ -1974,9 +2041,10 @@ void loop() {
   // SSI: fortlaufende Counts (inkl. Turn) — Ring-Delta auf 0..4095 wuerde bei Fahrten
   // >180° Fortschritt unterzaehlen und nahe der Wrap-Grenze falsch stallen.
   // Typ 1/2: RAW-Counts, damit Z-Korrektur keinen Fake-Fortschritt erzeugt.
-  const long safetyEncCounts = (g_encType == ENCTYPE_ABSOLUTE_SSI)
-                                   ? encoder.getCountsExtended()
-                                   : encoder.getCountsRaw();
+  const long safetyEncCounts =
+      (g_encType == ENCTYPE_ABSOLUTE_SSI) ? encoder.getCountsExtended()
+      : (g_encType == ENCTYPE_INCLINOMETER) ? encoder.getCountsDefault()
+                                           : encoder.getCountsRaw();
   {
     int32_t posDeg01 = 0;
     if (encoder.getPositionDeg01(posDeg01)) {

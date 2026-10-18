@@ -127,6 +127,12 @@ struct Rs485DispatcherConfig {
   // EncoderType (1=MOTOR_AXIS, 2=RING_OUTPUT, 3=ABSOLUTE_SSI).
   uint8_t*  encTypeU8 = nullptr;
 
+  // Anzahl Endschalter: 0=keine, 1=ein Kontakt (L||R), 2=zwei Kontakte.
+  uint8_t*  endstopCount = nullptr;
+
+  // Getriebespiel (Deg01), fuer manuelle Referenz ohne Homing.
+  int32_t*  backlashDeg01 = nullptr;
+
   // EncoderAxis (fuer SSI-Referenzpruefung bei ENCTYPE=3)
   EncoderAxis* encoderAxis = nullptr;
 

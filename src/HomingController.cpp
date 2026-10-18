@@ -54,10 +54,16 @@ void HomingController::start(int32_t lastKnownDeg01) {
   const uint32_t nowMs = millis();
 
   // Endstop-Debounce initialisieren (Startwerte als stabil annehmen)
-  _endLRaw = _board->readEndLeft();
-  _endRRaw = _board->readEndRight();
-  _endLStable = _endLRaw;
-  _endRStable = _endRRaw;
+  if (singleEndstopMode()) {
+    const bool c = _board->readEndContact();
+    _endLRaw = _endRRaw = c;
+    _endLStable = _endRStable = c;
+  } else {
+    _endLRaw = _board->readEndLeft();
+    _endRRaw = _board->readEndRight();
+    _endLStable = _endLRaw;
+    _endRStable = _endRRaw;
+  }
   _endLChangedMs = nowMs;
   _endRChangedMs = nowMs;
 
@@ -65,8 +71,63 @@ void HomingController::start(int32_t lastKnownDeg01) {
   // durchfahren, sonst wuerde Homing dort Null setzen (eine Umdrehung zu weit).
   if (lastKnownDeg01 >= 36000) {
     setState(HOME_UNWIND_SEEK_MIN, nowMs);
+  } else if (singleEndstopMode() && endL() &&
+             lastKnownDeg01 >= 18000 && lastKnownDeg01 < 36000) {
+    // Ein Kontakt, Start am rechten Anschlag: zuerst nach links freifahren.
+    setState(HOME_SINGLE_FREE_LEFT, nowMs);
   } else {
     setState(HOME_SEEK_MIN_FAST, nowMs);
+  }
+}
+
+bool HomingController::singleEndstopMode() const {
+  return _board && (_board->getEndstopCount() == 1);
+}
+
+bool HomingController::endL() const {
+  if (singleEndstopMode()) return (_endLStable || _endRStable);
+  return _endLStable;
+}
+
+bool HomingController::endR() const {
+  if (singleEndstopMode()) return (_endLStable || _endRStable);
+  return _endRStable;
+}
+
+int8_t HomingController::getEndstopSide() const {
+  switch (_state) {
+    case HOME_UNWIND_SEEK_MIN:
+    case HOME_UNWIND_OVERRUN:
+    case HOME_SEEK_MIN_FAST:
+    case HOME_SEEK_MIN_OVERRUN:
+    case HOME_BACKOFF_MIN_FIND_ACTIVE:
+    case HOME_BACKOFF_MIN_FAST:
+    case HOME_SEEK_MIN_SLOW_1:
+    case HOME_BACKOFF_MIN_SLOW:
+    case HOME_SEEK_MIN_SLOW_2:
+    case HOME_SINGLE_LEAVE_MIN: // noch linker Anschlag bis Kontakt frei
+    case HOME_RETURN_MIN_FAST:
+    case HOME_BACKOFF_MIN_RT_FAST:
+    case HOME_RETURN_MIN_SLOW_1:
+    case HOME_BACKOFF_MIN_RT_SLOW:
+    case HOME_RETURN_MIN_SLOW_2:
+    case HOME_BACKOFF_MIN_FINAL:
+    case HOME_GOTO_LOGICAL_ZERO:
+      return -1;
+
+    case HOME_SINGLE_FREE_LEFT: // Start am rechten Anschlag
+    case HOME_SEEK_MAX_FAST:
+    case HOME_SEEK_MAX_OVERRUN:
+    case HOME_BACKOFF_MAX_FIND_ACTIVE:
+    case HOME_BACKOFF_MAX_FAST:
+    case HOME_SEEK_MAX_SLOW_1:
+    case HOME_BACKOFF_MAX_SLOW:
+    case HOME_SEEK_MAX_SLOW_2:
+    case HOME_BACKOFF_MAX_FINAL:
+      return +1;
+
+    default:
+      return 0;
   }
 }
 
@@ -158,6 +219,21 @@ void HomingController::updateEndstopDebounce(uint32_t nowMs) {
   // wird der stabile Zustand umgeschaltet.
   const uint32_t debounceMs = 15;
 
+  if (singleEndstopMode()) {
+    const bool rawC = _board->readEndContact();
+    if (rawC != _endLRaw) {
+      _endLRaw = rawC;
+      _endLChangedMs = nowMs;
+    }
+    if ((nowMs - _endLChangedMs) >= debounceMs) {
+      _endLStable = _endLRaw;
+      _endRStable = _endLRaw;
+    }
+    _endRRaw = _endLRaw;
+    _endRChangedMs = _endLChangedMs;
+    return;
+  }
+
   const bool rawL = _board->readEndLeft();
   if (rawL != _endLRaw) {
     _endLRaw = rawL;
@@ -233,6 +309,19 @@ void HomingController::update(uint32_t nowMs) {
   updateEndstopDebounce(nowMs);
   const bool endMin = endL();
   const bool endMax = endR();
+
+  // ------------------------------------------------------------
+  // 0a) Ein-Kontakt: Start am rechten Anschlag -> nach links freifahren
+  // ------------------------------------------------------------
+  if (_state == HOME_SINGLE_FREE_LEFT) {
+    if (!endMin) {
+      motorStop();
+      setState(HOME_SEEK_MIN_FAST, nowMs);
+      return;
+    }
+    motorDrive(-pwmBack);
+    return;
+  }
 
   // ------------------------------------------------------------
   // 0) Multi-Turn UNWIND: erster END_MIN (~360°) nach links durchfahren
@@ -451,10 +540,28 @@ void HomingController::update(uint32_t nowMs) {
       // Linker Anschlag = 0deg
       _enc->setCountsZero();
 
-      setState(HOME_SEEK_MAX_FAST, nowMs);
+      // Ein Kontakt: erst vom Reed freifahren, sonst gilt er sofort als END_MAX.
+      if (singleEndstopMode()) {
+        setState(HOME_SINGLE_LEAVE_MIN, nowMs);
+      } else {
+        setState(HOME_SEEK_MAX_FAST, nowMs);
+      }
       return;
     }
     motorDrive(-pwmSlow);
+    return;
+  }
+
+  // ------------------------------------------------------------
+  // 5b) Ein-Kontakt: nach Nullsetzen nach rechts freifahren
+  // ------------------------------------------------------------
+  if (_state == HOME_SINGLE_LEAVE_MIN) {
+    if (!endMin) {
+      motorStop();
+      setState(HOME_SEEK_MAX_FAST, nowMs);
+      return;
+    }
+    motorDrive(+pwmBack);
     return;
   }
 

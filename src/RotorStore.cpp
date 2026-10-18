@@ -115,6 +115,7 @@ void RotorStore::packConfigFromRefs(RotorPersistConfig& out) const {
   if (r.encType) {
     if (*r.encType == ENCTYPE_MOTOR_AXIS) out.encTypeU8 = 1;
     else if (*r.encType == ENCTYPE_ABSOLUTE_SSI) out.encTypeU8 = 3;
+    else if (*r.encType == ENCTYPE_INCLINOMETER) out.encTypeU8 = 4;
     else out.encTypeU8 = 2;
   }
 
@@ -182,8 +183,13 @@ void RotorStore::packConfigFromRefs(RotorPersistConfig& out) const {
   if (r.antDp1) out.antDp1 = *r.antDp1 ? 1 : 0;
   if (r.antDp2) out.antDp2 = *r.antDp2 ? 1 : 0;
   if (r.antDp3) out.antDp3 = *r.antDp3 ? 1 : 0;
+  if (r.endstopCount) {
+    uint8_t c = *r.endstopCount;
+    if (c > 2) c = 2;
+    out.endstopCount = c;
+  }
 
-  out.flags = _amaxExplicit ? 0x01 : 0x00;
+  out.flags = (_amaxExplicit ? FRAM_CFG_F_AMAX_EXPLICIT : 0x00) | FRAM_CFG_F_ENDSTOP_COUNT;
 
   if (r.antName1) copyStr(out.antName1, *r.antName1);
   if (r.antName2) copyStr(out.antName2, *r.antName2);
@@ -199,6 +205,7 @@ void RotorStore::unpackConfigToRefs(const RotorPersistConfig& in) {
   if (r.encType) {
     if (in.encTypeU8 == 1) *r.encType = ENCTYPE_MOTOR_AXIS;
     else if (in.encTypeU8 == 3) *r.encType = ENCTYPE_ABSOLUTE_SSI;
+    else if (in.encTypeU8 == 4) *r.encType = ENCTYPE_INCLINOMETER;
     else *r.encType = ENCTYPE_RING_OUTPUT;
   }
 
@@ -267,7 +274,28 @@ void RotorStore::unpackConfigToRefs(const RotorPersistConfig& in) {
   if (r.antDp2) *r.antDp2 = (in.antDp2 != 0);
   if (r.antDp3) *r.antDp3 = (in.antDp3 != 0);
 
-  _amaxExplicit = (in.flags & 0x01) != 0;
+  _amaxExplicit = (in.flags & FRAM_CFG_F_AMAX_EXPLICIT) != 0;
+
+  if (r.endstopCount) {
+    const bool isAbs =
+        (r.encType && (*r.encType == ENCTYPE_ABSOLUTE_SSI ||
+                       *r.encType == ENCTYPE_INCLINOMETER));
+    if (in.flags & FRAM_CFG_F_ENDSTOP_COUNT) {
+      uint8_t c = in.endstopCount;
+      if (c > 2) c = 2;
+      // Typ 4: nur 0 oder 2 Endschalter
+      if (r.encType && *r.encType == ENCTYPE_INCLINOMETER && c == 1) c = 0;
+      *r.endstopCount = c;
+    } else {
+      // Alter FRAM ohne Flag: Default je Encoder-Typ
+      *r.endstopCount = isAbs ? 0 : 2;
+    }
+  }
+
+  // Typ 4: kein Wind auf dem gemeinsamen RS485
+  if (r.encType && *r.encType == ENCTYPE_INCLINOMETER && r.windEnable) {
+    *r.windEnable = false;
+  }
 
   if (r.antName1) *r.antName1 = String(in.antName1);
   if (r.antName2) *r.antName2 = String(in.antName2);
@@ -314,12 +342,26 @@ void RotorStore::applyLoadClamps() {
   if (r.homeExpectedCountsRing && *r.homeExpectedCountsRing <= 0) *r.homeExpectedCountsRing = 158000;
   if (r.homeExpectedCountsMotor && *r.homeExpectedCountsMotor <= 0) *r.homeExpectedCountsMotor = 28000;
 
+  if (r.endstopCount) {
+    if (*r.endstopCount > 2) *r.endstopCount = 2;
+    if (r.encType && *r.encType == ENCTYPE_INCLINOMETER && *r.endstopCount == 1) {
+      *r.endstopCount = 0;
+    }
+  }
+
   if (r.encType && r.axisMaxDeg01 && r.axisMinDeg01) {
     if (*r.encType == ENCTYPE_ABSOLUTE_SSI && !_amaxExplicit) {
       *r.axisMaxDeg01 = 36000;
     }
+    if (*r.encType == ENCTYPE_INCLINOMETER && !_amaxExplicit) {
+      *r.axisMaxDeg01 = 9000; // Default Elevation 0..90°
+    }
     if (*r.axisMaxDeg01 > 72000) *r.axisMaxDeg01 = 72000;
     if (*r.axisMaxDeg01 < *r.axisMinDeg01) *r.axisMaxDeg01 = *r.axisMinDeg01;
+  }
+
+  if (r.encType && *r.encType == ENCTYPE_INCLINOMETER && r.windEnable) {
+    *r.windEnable = false;
   }
 
   if (r.antDis1 && *r.antDis1 > 99999u) *r.antDis1 = 99999u;
@@ -349,6 +391,7 @@ bool RotorStore::migrateFromPreferences(Preferences& prefs) {
     uint8_t ect = prefs.getUChar("ect", 1);
     if (ect == 1) *r.encType = ENCTYPE_MOTOR_AXIS;
     else if (ect == 3) *r.encType = ENCTYPE_ABSOLUTE_SSI;
+    else if (ect == 4) *r.encType = ENCTYPE_INCLINOMETER;
     else *r.encType = ENCTYPE_RING_OUTPUT;
   }
   if (r.axisMinDeg01) *r.axisMinDeg01 = prefs.getInt("amin", *r.axisMinDeg01);
@@ -478,7 +521,7 @@ bool RotorStore::begin(TwoWire& wire, const RotorStoreRefs& refs) {
   const bool valid = sectionsOk && headerValid(h, crc);
 
   if (valid) {
-    _amaxExplicit = (_cfgCache.flags & 0x01) != 0;
+    _amaxExplicit = (_cfgCache.flags & FRAM_CFG_F_AMAX_EXPLICIT) != 0;
     unpackConfigToRefs(_cfgCache);
     applyLoadClamps();
     (void)readPosSection(); // optional; ungueltig = noch nie gehomed

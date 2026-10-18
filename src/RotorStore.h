@@ -36,6 +36,10 @@ static constexpr uint16_t FRAM_POS_VER     = 1;
 static constexpr uint8_t FRAM_POS_F_HOMVALID  = 0x01;
 static constexpr uint8_t FRAM_POS_F_MOVEACTIVE = 0x02;
 
+// RotorPersistConfig.flags
+static constexpr uint8_t FRAM_CFG_F_AMAX_EXPLICIT   = 0x01;
+static constexpr uint8_t FRAM_CFG_F_ENDSTOP_COUNT   = 0x02; // endstopCount explizit gespeichert
+
 #pragma pack(push, 1)
 struct RotorStoreHeader {
   uint32_t magic;
@@ -50,7 +54,7 @@ struct RotorPersistConfig {
   uint8_t  slaveId;
   uint8_t  rotorType;
   uint8_t  antSelect;
-  uint8_t  encTypeU8;          // 1/2/3
+  uint8_t  encTypeU8;          // 1/2/3/4
 
   int32_t  axisMinDeg01;
   int32_t  axisMaxDeg01;
@@ -116,8 +120,9 @@ struct RotorPersistConfig {
   uint8_t  antDp1;
   uint8_t  antDp2;
   uint8_t  antDp3;
-  uint8_t  flags;              // bit0: amaxExplicit (war in NVS vorhanden)
-  uint8_t  pad[2];
+  uint8_t  flags;              // bit0: amaxExplicit, bit1: endstopCount explizit
+  uint8_t  endstopCount;       // 0=keine, 1=ein Kontakt, 2=zwei Kontakte
+  uint8_t  pad[1];
 
   char     antName1[10];
   char     antName2[10];
@@ -237,6 +242,7 @@ struct RotorStoreRefs {
   bool*     antDp1 = nullptr;
   bool*     antDp2 = nullptr;
   bool*     antDp3 = nullptr;
+  uint8_t*  endstopCount = nullptr; // 0/1/2
 
   String*   antName1 = nullptr;
   String*   antName2 = nullptr;

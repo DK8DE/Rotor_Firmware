@@ -8,6 +8,9 @@
 // Vorwaertsdeklarationen (werden in dieser Datei spaeter definiert)
 static int32_t computeChecksumScaled100Local(uint8_t src, uint8_t dst, const String& params);
 static String  formatScaled100Local(int32_t scaled);
+static float parseFloatParam(const String& p);
+static uint32_t parseU32Param(const String& p);
+static bool parseBoolParam(const String& p);
 
 #include "HalBoard.h"
 #include "SafetyMonitor.h"
@@ -57,11 +60,24 @@ static bool isRotorReferencedLocal(const Rs485DispatcherConfig& cfg, HomingContr
   if (ect == (uint8_t)ENCTYPE_ABSOLUTE_SSI) {
     return cfg.encoderAxis && cfg.encoderAxis->isSsiValid();
   }
+  if (ect == (uint8_t)ENCTYPE_INCLINOMETER) {
+    return cfg.encoderAxis && cfg.encoderAxis->isInclinoValid();
+  }
   return homing && homing->isReferenced();
 }
 
 static bool isAbsoluteEncType(const Rs485DispatcherConfig& cfg) {
+  const uint8_t ect = safeU8(cfg.encTypeU8, 1);
+  return ect == (uint8_t)ENCTYPE_ABSOLUTE_SSI ||
+         ect == (uint8_t)ENCTYPE_INCLINOMETER;
+}
+
+static bool isSsiEncType(const Rs485DispatcherConfig& cfg) {
   return safeU8(cfg.encTypeU8, 1) == (uint8_t)ENCTYPE_ABSOLUTE_SSI;
+}
+
+static bool isInclinoEncType(const Rs485DispatcherConfig& cfg) {
+  return safeU8(cfg.encTypeU8, 1) == (uint8_t)ENCTYPE_INCLINOMETER;
 }
 
 static int32_t encTypeAxisMaxLimitDeg01(const Rs485DispatcherConfig& cfg) {
@@ -342,6 +358,8 @@ void Rs485Dispatcher::serialEventState(const char* tag) {
   Serial.print(_board->readEndLeft() ? 1 : 0);
   Serial.print(" ENDR=");
   Serial.print(_board->readEndRight() ? 1 : 0);
+  Serial.print(" ENDSTC=");
+  Serial.print((int)_board->getEndstopCount());
 
   Serial.println();
 }
@@ -687,6 +705,145 @@ String Rs485Dispatcher::formatDeg01ToString(int32_t deg01) const {
 }
 
 // ============================================================================
+// Inklinometer-Proxy (SETINC* / GETINC* → Serial2 #SET*/#GET*)
+// ============================================================================
+
+enum IncParamKind : uint8_t {
+  INC_PK_NONE = 0,       // nur GET, kein Parameter
+  INC_PK_BOOL01,         // 0/1
+  INC_PK_FLOAT,          // float (Komma/Punkt)
+  INC_PK_MOUNT,          // 0/90/180/270
+  INC_PK_DEC,            // 0/1/2
+  INC_PK_SHKTH,          // 1..63
+  INC_PK_SHKWN,          // 1..3600
+  INC_PK_SHKLM,          // 0..60
+  INC_PK_SHKERR_CLEAR,   // SET nur 0
+};
+
+struct IncCmdEntry {
+  const char* rotorSuffix;   // nach GETINC / SETINC, z.B. "CAL"
+  const char* sensorName;    // Sensor-Basis ohne GET/SET, z.B. "CALIB"
+  IncParamKind setKind;      // INC_PK_NONE = kein SET
+  bool getOk;
+};
+
+// Rotor-Suffix → Sensor-Name (GETINCxxx / SETINCxxx)
+static const IncCmdEntry kIncCmds[] = {
+  { "SWAPXY", "SWAPXY",   INC_PK_BOOL01,       true },
+  { "INVREF", "INVREF",   INC_PK_BOOL01,       true },
+  { "INVSEN", "INVSENS",  INC_PK_BOOL01,       true },
+  { "INVROT", "INVROT",   INC_PK_BOOL01,       true },
+  { "MOUNT",  "MOUNTROT", INC_PK_MOUNT,        true },
+  { "LIM180", "LIMIT180", INC_PK_BOOL01,       true },
+  { "CAL",    "CALIB",    INC_PK_FLOAT,        true },
+  { "FS1G",   "FS1G",     INC_PK_BOOL01,       true },
+  { "DEC",    "ELEVDEC",  INC_PK_DEC,          true },
+  { "FILT",   "FILTER",   INC_PK_FLOAT,        true },
+  { "SHKTH",  "SHOCKTHS", INC_PK_SHKTH,        true },
+  { "SHKWN",  "SHOCKWIN", INC_PK_SHKWN,        true },
+  { "SHKLM",  "SHOCKLIM", INC_PK_SHKLM,        true },
+  { "SHKCT",  "SHOCKCNT", INC_PK_NONE,         true },
+  { "SHKER",  "SHOCKERR", INC_PK_SHKERR_CLEAR, true },
+  { "WLAN",   "WIFI",     INC_PK_BOOL01,       true },
+  { "DBG",    "DEBUG",    INC_PK_BOOL01,       true },
+  { "STL",    "SETTLED",  INC_PK_NONE,         true },
+  { "SHK",    "SHOCK",    INC_PK_NONE,         true },
+};
+
+static const IncCmdEntry* findIncCmd(const char* suffix) {
+  if (!suffix) return nullptr;
+  for (size_t i = 0; i < (sizeof(kIncCmds) / sizeof(kIncCmds[0])); ++i) {
+    if (strcmp(kIncCmds[i].rotorSuffix, suffix) == 0) return &kIncCmds[i];
+  }
+  return nullptr;
+}
+
+static String formatInclinoGetValue(const String& raw) {
+  // Sensor liefert oft Punkt; Rotor-Protokoll nutzt Komma.
+  String s = raw;
+  s.trim();
+  s.replace(".", ",");
+  return s;
+}
+
+static bool buildInclinoSetTail(const IncCmdEntry& e, const String& params,
+                                String& outTail, String& outNakReason) {
+  outNakReason = "BADVAL";
+  char buf[48];
+
+  switch (e.setKind) {
+    case INC_PK_NONE:
+      outNakReason = "NOSUP";
+      return false;
+
+    case INC_PK_BOOL01: {
+      const bool v = parseBoolParam(params);
+      snprintf(buf, sizeof(buf), "SET%s,%u", e.sensorName, v ? 1u : 0u);
+      outTail = buf;
+      return true;
+    }
+
+    case INC_PK_FLOAT: {
+      const float v = parseFloatParam(params);
+      if (!isfinite(v)) return false;
+      // CALIB −180..180, FILTER 0.01..1 — Sensor validiert; hier nur Format.
+      snprintf(buf, sizeof(buf), "SET%s,%.4f", e.sensorName, (double)v);
+      outTail = buf;
+      return true;
+    }
+
+    case INC_PK_MOUNT: {
+      const uint32_t v = parseU32Param(params);
+      if (!(v == 0u || v == 90u || v == 180u || v == 270u)) return false;
+      snprintf(buf, sizeof(buf), "SET%s,%u", e.sensorName, (unsigned)v);
+      outTail = buf;
+      return true;
+    }
+
+    case INC_PK_DEC: {
+      const uint32_t v = parseU32Param(params);
+      if (v > 2u) return false;
+      snprintf(buf, sizeof(buf), "SET%s,%u", e.sensorName, (unsigned)v);
+      outTail = buf;
+      return true;
+    }
+
+    case INC_PK_SHKTH: {
+      const uint32_t v = parseU32Param(params);
+      if (v < 1u || v > 63u) return false;
+      snprintf(buf, sizeof(buf), "SET%s,%u", e.sensorName, (unsigned)v);
+      outTail = buf;
+      return true;
+    }
+
+    case INC_PK_SHKWN: {
+      const uint32_t v = parseU32Param(params);
+      if (v < 1u || v > 3600u) return false;
+      snprintf(buf, sizeof(buf), "SET%s,%u", e.sensorName, (unsigned)v);
+      outTail = buf;
+      return true;
+    }
+
+    case INC_PK_SHKLM: {
+      const uint32_t v = parseU32Param(params);
+      if (v > 60u) return false;
+      snprintf(buf, sizeof(buf), "SET%s,%u", e.sensorName, (unsigned)v);
+      outTail = buf;
+      return true;
+    }
+
+    case INC_PK_SHKERR_CLEAR: {
+      const uint32_t v = parseU32Param(params);
+      if (v != 0u) return false;
+      snprintf(buf, sizeof(buf), "SET%s,0", e.sensorName);
+      outTail = buf;
+      return true;
+    }
+  }
+  return false;
+}
+
+// ============================================================================
 // Private: Command Dispatcher
 // ============================================================================
 
@@ -705,6 +862,79 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   String cmd = f.cmd;
   cmd.trim();
   cmd.toUpperCase();
+
+  // ------------------------------------------------------------------------
+  // SETINC* / GETINC* — Proxy zum Inklinometer (nur Encoder-Typ 4)
+  // ------------------------------------------------------------------------
+  if (cmd.startsWith("GETINC") || cmd.startsWith("SETINC")) {
+    const bool isSet = cmd.startsWith("SETINC");
+    const String suffix = cmd.substring(isSet ? 6 : 6); // SETINC / GETINC beide Länge 6
+    const IncCmdEntry* ent = findIncCmd(suffix.c_str());
+    if (!ent) {
+      if (shouldReply) sendNak(f.master, cmd, "NOSUP");
+      return;
+    }
+    if (!isInclinoEncType(_cfg)) {
+      if (shouldReply) sendNak(f.master, cmd, "ENCTYPE");
+      return;
+    }
+    if (!_board || !_board->isInclinoHardwareAvailable()) {
+      if (shouldReply) sendNak(f.master, cmd, "NOHW");
+      return;
+    }
+
+    if (isSet) {
+      if (ent->setKind == INC_PK_NONE) {
+        if (shouldReply) sendNak(f.master, cmd, "NOSUP");
+        return;
+      }
+      String reqTail;
+      String nakReason;
+      if (!buildInclinoSetTail(*ent, f.params, reqTail, nakReason)) {
+        if (shouldReply) sendNak(f.master, cmd, nakReason);
+        return;
+      }
+      String payload;
+      const HalBoard::InclinoTxStatus st = _board->inclinoTransact(reqTail.c_str(), payload);
+      if (st == HalBoard::INCLINO_TX_OK) {
+        if (shouldReply) sendAck(f.master, cmd, "1");
+        serialEventState("SETINC");
+      } else if (st == HalBoard::INCLINO_TX_TIMEOUT) {
+        if (shouldReply) sendNak(f.master, cmd, "TIMEOUT");
+      } else if (st == HalBoard::INCLINO_TX_NACK) {
+        if (shouldReply) sendNak(f.master, cmd, "ERR");
+      } else if (st == HalBoard::INCLINO_TX_NOHW) {
+        if (shouldReply) sendNak(f.master, cmd, "NOHW");
+      } else {
+        if (shouldReply) sendNak(f.master, cmd, "ERR");
+      }
+      return;
+    }
+
+    // GET
+    if (!ent->getOk) {
+      if (shouldReply) sendNak(f.master, cmd, "NOSUP");
+      return;
+    }
+    {
+      char getTail[40];
+      snprintf(getTail, sizeof(getTail), "GET%s", ent->sensorName);
+      String payload;
+      const HalBoard::InclinoTxStatus st = _board->inclinoTransact(getTail, payload);
+      if (st == HalBoard::INCLINO_TX_OK) {
+        if (shouldReply) sendAck(f.master, cmd, formatInclinoGetValue(payload));
+      } else if (st == HalBoard::INCLINO_TX_TIMEOUT) {
+        if (shouldReply) sendNak(f.master, cmd, "TIMEOUT");
+      } else if (st == HalBoard::INCLINO_TX_NACK) {
+        if (shouldReply) sendNak(f.master, cmd, "ERR");
+      } else if (st == HalBoard::INCLINO_TX_NOHW) {
+        if (shouldReply) sendNak(f.master, cmd, "NOHW");
+      } else {
+        if (shouldReply) sendNak(f.master, cmd, "ERR");
+      }
+    }
+    return;
+  }
 
   // Deadman/Keepalive:
   // - Es soll NUR dann als Lebenszeichen zaehlen, wenn ein Frame an UNSERE
@@ -1607,6 +1837,10 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   }
 
   if (cmd == "SETWINDENABLE") {
+    if (isInclinoEncType(_cfg)) {
+      if (shouldReply) sendNak(f.master, "SETWINDENABLE", "ENCTYPE");
+      return;
+    }
     if (isAbsoluteEncType(_cfg)) {
       if (shouldReply) sendNak(f.master, "SETWINDENABLE", "NOHW");
       return;
@@ -2418,7 +2652,54 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     const uint32_t mode = parseU32Param(f.params);
     const bool startHoming = (mode >= 1);
 
+    if (startHoming && isInclinoEncType(_cfg)) {
+      // Typ 4: kein Homing — nur ACK wenn Inklinometer gueltig, sonst NAK.
+      if (!isRotorReferencedLocal(_cfg, _homing)) {
+        if (shouldReply) sendNak(f.master, "SETREF", "NOABS");
+        return;
+      }
+      if (_homing) _homing->setReferenced(true);
+      if (shouldReply) sendAck(f.master, "SETREF", "1");
+      serialEventState("SETREF_INCLINO");
+      return;
+    }
+
     if (startHoming && !isAbsoluteEncType(_cfg)) {
+      const uint8_t esc = safeU8(_cfg.endstopCount, 2);
+
+      if (esc == 0) {
+        // Keine Endschalter: manuelle Referenz (CPR aus SETENCCAX/SETENCCRI).
+        const uint8_t ect = safeU8(_cfg.encTypeU8, 1);
+        const int32_t cpr = (ect == (uint8_t)ENCTYPE_MOTOR_AXIS)
+            ? safeI32(_cfg.homeExpectedCountsMotor, 0)
+            : safeI32(_cfg.homeExpectedCountsRing, 0);
+        if (cpr <= 100) {
+          if (shouldReply) sendNak(f.master, "SETREF", "BADCPR");
+          return;
+        }
+        if (!_cfg.encoderAxis || !_homing) {
+          if (shouldReply) sendNak(f.master, "SETREF", "NOHW");
+          return;
+        }
+
+        _cfg.encoderAxis->setCountsPerRevActual(cpr);
+        _cfg.encoderAxis->setCountsZero();
+        if (_cfg.backlashDeg01) *_cfg.backlashDeg01 = 0;
+        _homing->setReferenced(true);
+
+        if (_cfg.store) {
+          int32_t deg01 = 0;
+          (void)_cfg.encoderAxis->getPositionDeg01(deg01);
+          _cfg.store->savePosHome(
+              ect, cpr, 0, 0,
+              (int32_t)_cfg.encoderAxis->getCountsDefault(), deg01);
+        }
+
+        if (shouldReply) sendAck(f.master, "SETREF", "1");
+        serialEventState("SETREF_MANUAL");
+        return;
+      }
+
       // Vor clearHomeValid: Runden-Hinweis sichern (2. Runde -> Unwind)
       _homingLastKnownDeg01 = resolveHomingLastDeg01();
       // FRAM-POS: gespeicherte Referenz verwerfen, volles Homing erzwingen
@@ -2460,7 +2741,9 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
       return;
     }
 
-    if (!isRotorReferencedLocal(_cfg, _homing)) {
+    // Ohne Endschalter: JOG auch unreferenziert (CPR-Einmessfahrt erlaubt).
+    const bool allowUnrefJog = (safeU8(_cfg.endstopCount, 2) == 0);
+    if (!isRotorReferencedLocal(_cfg, _homing) && !allowUnrefJog) {
       if (shouldReply) sendNak(f.master, "JOG", "NOREF");
       serialEventState("JOG_NOREF");
       return;
@@ -2942,6 +3225,39 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     return;
   }
 
+  // GETENDSTC / SETENDSTC — Anzahl Endschalter (0/1/2)
+  if (cmd == "GETENDSTC") {
+    uint8_t v = safeU8(_cfg.endstopCount, 2);
+    if (v > 2) v = 2;
+    if (shouldReply) sendAck(f.master, "GETENDSTC", String((int)v));
+    return;
+  }
+
+  if (cmd == "SETENDSTC") {
+    const uint8_t nv = parseU8Param(f.params);
+    if (nv > 2) {
+      if (shouldReply) sendNak(f.master, "SETENDSTC", "BADVAL");
+      return;
+    }
+    // Typ 4: nur 0 oder 2 Endschalter (kein Ein-Kontakt-Modus)
+    if (isInclinoEncType(_cfg) && nv == 1) {
+      if (shouldReply) sendNak(f.master, "SETENDSTC", "BADVAL");
+      return;
+    }
+
+    persistPutU8("esc", _cfg.endstopCount, nv);
+    if (_board) {
+      _board->setEndstopCount(nv);
+    }
+    if (_safety) {
+      // Count 0: Endschalter-Sperre aus; sonst an (wie g_restrictEndstops Default).
+      _safety->setRestrictEndstops(nv > 0);
+    }
+    if (shouldReply) sendAck(f.master, "SETENDSTC", "1");
+    serialEventState("SETENDSTC");
+    return;
+  }
+
   if (cmd == "GETHOMETIMEOUT") {
     const uint32_t v = safeU32(_cfg.homeTimeoutMs, 0);
     if (shouldReply) sendAck(f.master, "GETHOMETIMEOUT", String(v));
@@ -3264,16 +3580,17 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   // - 1 = ENCTYPE_MOTOR_AXIS
   // - 2 = ENCTYPE_RING_OUTPUT
   // - 3 = ENCTYPE_ABSOLUTE_SSI
+  // - 4 = ENCTYPE_INCLINOMETER
   if (cmd == "GETENCTYPE") {
     uint8_t v = safeU8(_cfg.encTypeU8, 1);
-    if (v != 1 && v != 2 && v != 3) v = 1;
+    if (v != 1 && v != 2 && v != 3 && v != 4) v = 1;
     if (shouldReply) sendAck(f.master, "GETENCTYPE", String((int)v));
     return;
   }
 
   if (cmd == "SETENCTYPE") {
     const uint8_t nv = parseU8Param(f.params);
-    if (nv != 1 && nv != 2 && nv != 3) {
+    if (nv != 1 && nv != 2 && nv != 3 && nv != 4) {
       if (shouldReply) sendNak(f.master, "SETENCTYPE", "BADVAL");
       return;
     }
@@ -3306,9 +3623,15 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     }
     const int32_t old = safeI32(_cfg.homeExpectedCountsRing, 0);
     persistPutI32("ecr", _cfg.homeExpectedCountsRing, nv);
+    // Ohne Endschalter: CPR live uebernehmen, kein Neustart.
+    const bool noEndstops = (safeU8(_cfg.endstopCount, 2) == 0);
+    if (noEndstops && _cfg.encoderAxis &&
+        safeU8(_cfg.encTypeU8, 1) == (uint8_t)ENCTYPE_RING_OUTPUT) {
+      _cfg.encoderAxis->setCountsPerRevActual(nv);
+    }
     if (shouldReply) sendAck(f.master, "SETENCCRI", "1");
     serialEventState("SETENCCRI");
-    if (old != nv) {
+    if (old != nv && !noEndstops) {
       requestRestart(250);
     }
     return;
@@ -3329,30 +3652,55 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     }
     const int32_t old = safeI32(_cfg.homeExpectedCountsMotor, 0);
     persistPutI32("ecm", _cfg.homeExpectedCountsMotor, nv);
+    // Ohne Endschalter: CPR live uebernehmen, kein Neustart.
+    const bool noEndstops = (safeU8(_cfg.endstopCount, 2) == 0);
+    if (noEndstops && _cfg.encoderAxis &&
+        safeU8(_cfg.encTypeU8, 1) == (uint8_t)ENCTYPE_MOTOR_AXIS) {
+      _cfg.encoderAxis->setCountsPerRevActual(nv);
+    }
     if (shouldReply) sendAck(f.master, "SETENCCAX", "1");
     serialEventState("SETENCCAX");
-    if (old != nv) {
+    if (old != nv && !noEndstops) {
       requestRestart(250);
     }
     return;
   }
 
-  // SETENCZERO — SSI-Hardware-Zero (nur ENCTYPE=3)
-  if (cmd == "SETENCZERO") {
-    if (!isAbsoluteEncType(_cfg)) {
-      if (shouldReply) sendNak(f.master, "SETENCZERO", "NOTSSI");
+  // GETENCCOUNT — aktuelle Encoder-Counts (Typ 1/2/3)
+  if (cmd == "GETENCCOUNT") {
+    if (!_cfg.encoderAxis) {
+      if (shouldReply) sendNak(f.master, "GETENCCOUNT", "NOHW");
       return;
     }
-    if (!_cfg.encoderAxis || !_cfg.encoderAxis->setEncZero()) {
+    const long c = _cfg.encoderAxis->getCountsDefault();
+    if (shouldReply) sendAck(f.master, "GETENCCOUNT", String((long)c));
+    return;
+  }
+
+  // SETENCZERO — Typ 1/2: Soft-Zero (Counts=0); Typ 3: SSI-Hardware-Zero; Typ 4: NAK
+  if (cmd == "SETENCZERO") {
+    if (!_cfg.encoderAxis) {
       if (shouldReply) sendNak(f.master, "SETENCZERO", "NOHW");
       return;
     }
-    // Turn-Zaehler mit zuruecksetzen und in FRAM persistieren
-    _cfg.encoderAxis->loadSsiTurn(0);
-    if (_cfg.store) {
-      int32_t deg01 = 0;
-      if (!_cfg.encoderAxis->getPositionDeg01(deg01)) deg01 = 0;
-      _cfg.store->saveSsiTurn(0, deg01);
+    if (isInclinoEncType(_cfg)) {
+      if (shouldReply) sendNak(f.master, "SETENCZERO", "ENCTYPE");
+      return;
+    }
+    if (isSsiEncType(_cfg)) {
+      if (!_cfg.encoderAxis->setEncZero()) {
+        if (shouldReply) sendNak(f.master, "SETENCZERO", "NOHW");
+        return;
+      }
+      // Turn-Zaehler mit zuruecksetzen und in FRAM persistieren
+      _cfg.encoderAxis->loadSsiTurn(0);
+      if (_cfg.store) {
+        int32_t deg01 = 0;
+        if (!_cfg.encoderAxis->getPositionDeg01(deg01)) deg01 = 0;
+        _cfg.store->saveSsiTurn(0, deg01);
+      }
+    } else {
+      _cfg.encoderAxis->setCountsZero();
     }
     if (shouldReply) sendAck(f.master, "SETENCZERO", "1");
     serialEventState("SETENCZERO");
@@ -3361,7 +3709,7 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
 
   // GETENCTURN / SETENCTURN — SSI-Umdrehungszähler (0/1) für Bereich >360°
   if (cmd == "GETENCTURN") {
-    if (!isAbsoluteEncType(_cfg) || !_cfg.encoderAxis) {
+    if (!isSsiEncType(_cfg) || !_cfg.encoderAxis) {
       if (shouldReply) sendNak(f.master, "GETENCTURN", "NOTSSI");
       return;
     }
@@ -3370,7 +3718,7 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   }
 
   if (cmd == "SETENCTURN") {
-    if (!isAbsoluteEncType(_cfg) || !_cfg.encoderAxis) {
+    if (!isSsiEncType(_cfg) || !_cfg.encoderAxis) {
       if (shouldReply) sendNak(f.master, "SETENCTURN", "NOTSSI");
       return;
     }

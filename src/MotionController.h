@@ -209,6 +209,12 @@ private:
   // PWM-Slew mit explizit vorgegebener Slew-Rate (z.B. fuer kurze "Losbrechhilfe" in der Feinzone).
   // slewPerSec: % pro Sekunde
   float applyPwmSlewCustom(float targetDuty, float lastDuty, uint32_t dtMs, float slewPerSec) const;
+  // Wegbasierter PWM-Begrenzer fuer das Grobprofil (KEINE Zeitkonstante):
+  // Die PWM darf sich nur im Verhaeltnis zum zurueckgelegten Weg aendern, mit der Steigung
+  // der Rampe (pwmMax - pwmMin) / rampDist. Haengt damit nur von PWM-Werten, Rampenlaenge
+  // und Weg ab - nicht von Zeit, Drehzahl oder Zykluszeit.
+  float applyProfileLimit_(float targetDuty, float travelDeg, float slopePerDeg,
+                           float pwmMinAbs) const;
 // PWM-Max (z.B. via RS485 SETPWM) soll waehrend der Fahrt nicht sprunghaft aendern.
   // Darum glaetten wir den effektiven PWM-Max intern mit einer Slew-Rate.
   float updatePwmMaxAbsEffective(uint32_t dtMs);
@@ -377,6 +383,9 @@ uint32_t _brakeHoldStartMs = 0;
   // PWM
   float _lastAppliedDuty = 0.0f;
   float _autoPwmSlewPerSec = 0.0f;
+  // Letzte Encoder-Position (Profilbegrenzer: zurueckgelegter Weg zwischen zwei update()-Aufrufen)
+  int32_t _profLastPosDeg01 = 0;
+  bool _profLastPosValid = false;
 
   // Geglaetteter PWM-Max (%). Verhindert harte Spruenge, wenn z.B. per RS485 SETPWM waehrend der Fahrt
   // die maximale PWM geaendert wird.

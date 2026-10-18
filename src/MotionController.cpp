@@ -5,7 +5,54 @@
 namespace {
 // Muss zu fineShortHybridMove in update() passen: Feinfenster + Rand (0,01deg-Einheiten).
 constexpr int32_t kFineShortHybridExtraDeg01 = 160;
+// Wegbasierter Profilbegrenzer: erlaubte PWM-Aenderung pro Grad Fahrweg als Vielfaches der
+// Rampensteigung (pwmMax - pwmMin) / rampDist. Reiner Sicherheitsrahmen um das
+// positionsgefuehrte Profil; im Normalbetrieb greift er nicht.
+constexpr float kProfileUpFactor = 1.5f;
+constexpr float kProfileDownFactor = 4.0f;
+// JOG-Hochrampe: Weg (Grad) fuer den Soft-Start von Creep-PWM auf Min-PWM.
+constexpr float kJogSoftDistDeg = 1.5f;
 } // namespace
+
+float MotionController::applyProfileLimit_(float targetDuty, float travelDeg, float slopePerDeg,
+                                           float pwmMinAbs) const {
+  const float last = _lastAppliedDuty;
+  const float lastAbs = fabsf(last);
+  const float tgtAbs = fabsf(targetDuty);
+
+  // Am Ziel / kein Vorschub mehr gefordert: nicht weiter antreiben.
+  if (targetDuty == 0.0f) return 0.0f;
+
+  // Unterhalb der Mindest-PWM bewegt sich der Motor ohnehin nicht (main.cpp hebt auf Min-PWM):
+  // direkt auf Min-PWM-Niveau, alles darueber wegbasiert.
+  if (lastAbs < pwmMinAbs) {
+    const float a = (tgtAbs < pwmMinAbs) ? tgtAbs : pwmMinAbs;
+    return (targetDuty > 0.0f) ? a : -a;
+  }
+
+  const float upStep = kProfileUpFactor * slopePerDeg * travelDeg;
+  const float downStep = kProfileDownFactor * slopePerDeg * travelDeg;
+
+  const bool signDiffer = (last != 0.0f) && ((last > 0.0f) != (targetDuty > 0.0f));
+  if (signDiffer) {
+    // Umkehr bei Min-PWM-Niveau (niedrigste Energie): direkt in die neue Richtung.
+    if (lastAbs <= pwmMinAbs + 2.0f) return targetDuty;
+    // Sonst erst auf Null-Niveau abbauen (wegbasiert), Umkehr folgt bei Min-PWM.
+    float mag = lastAbs - downStep;
+    if (mag < pwmMinAbs) mag = pwmMinAbs;
+    return (last > 0.0f) ? mag : -mag;
+  }
+
+  float mag;
+  if (tgtAbs >= lastAbs) {
+    mag = lastAbs + upStep;
+    if (mag > tgtAbs) mag = tgtAbs;
+  } else {
+    mag = lastAbs - downStep;
+    if (mag < tgtAbs) mag = tgtAbs;
+  }
+  return (targetDuty > 0.0f) ? mag : -mag;
+}
 
 // ============================================================================
 // Konstruktor
@@ -28,6 +75,8 @@ int32_t MotionController::readBacklashDeg01_() const {
 
 int32_t MotionController::encoderDeg01PerCount_() const {
   if (!_encoder) return 1;
+  // Typ 4: synthetische Counts = Deg01 → 1 Count = 0,01°
+  if (_encoder->isInclinometer()) return 1;
   const int32_t cpr = _encoder->getCountsPerRevActual();
   if (cpr <= 0) return 1;
   int32_t d = (int32_t)(36000LL / (int64_t)cpr);
@@ -106,7 +155,8 @@ long MotionController::kickDetectCounts_() const {
 }
 
 bool MotionController::isAbsoluteSsiMotion_() const {
-  return _encoder && (_encoder->getEncoderType() == ENCTYPE_ABSOLUTE_SSI);
+  // SSI und Inklinometer: Absolutlage (kein Homing), Counts ohne PCNT-Skalierung.
+  return _encoder && _encoder->isAbsoluteType();
 }
 
 long MotionController::motionCountsNow_() const {
@@ -139,10 +189,6 @@ bool MotionController::applyCloserTargetRamp_(int32_t tgtOutDeg01, int32_t curDe
                                               int8_t desiredDirNew, int32_t absNewOut,
                                               int8_t moveDirOut, uint32_t nowMs) {
   const int32_t fineWinDeg01 = effectiveFineWindowDeg01_();
-  if (fineWinDeg01 > 0 && absNewOut <= fineWinDeg01) {
-    // Im Feinfenster: kein Retarget-Eingriff noetig
-    return false;
-  }
 
   float rampDistDeg = (_cfg.rampDistDeg) ? (*_cfg.rampDistDeg) : 0.0f;
   if (!isfinite(rampDistDeg) || rampDistDeg < 0.5f) rampDistDeg = 0.5f;
@@ -155,6 +201,14 @@ bool MotionController::applyCloserTargetRamp_(int32_t tgtOutDeg01, int32_t curDe
   float finePwm = (_cfg.finePwmAbs) ? (*_cfg.finePwmAbs) : 12.0f;
   if (finePwm < 0.0f) finePwm = -finePwm;
   if (kickM > finePwm) finePwm = kickM;
+
+  // Im Feinfenster und bereits langsam (Fein-/Min-PWM): kein Retarget-Eingriff noetig.
+  // Faehrt der Rotor dagegen noch schnell (PWM > Fein-PWM), darf ein Ziel im Feinfenster
+  // NICHT direkt uebernommen werden: die Feinphase wuerde die PWM sofort auf Fein-PWM
+  // kappen (abrupter Abfall, Ueberschwingen). Dann greift unten die virtuelle Bremse.
+  if (fineWinDeg01 > 0 && absNewOut <= fineWinDeg01 && dutyAbs <= finePwm + 2.0f) {
+    return false;
+  }
 
   const float absNewDeg = (float)absNewOut / 100.0f;
 
@@ -172,7 +226,8 @@ bool MotionController::applyCloserTargetRamp_(int32_t tgtOutDeg01, int32_t curDe
   //
   // Wenn absNew < rampDist und Motor bereits langsam:
   //   -> Ziel direkt setzen + Ausroll-Rampe von |Duty| auf finePwm.
-  if (absNewDeg < rampDistDeg && dutyAbs > finePwm + 2.0f) {
+  const bool newInFineWindow = (fineWinDeg01 > 0 && absNewOut <= fineWinDeg01);
+  if ((absNewDeg < rampDistDeg || newInFineWindow) && dutyAbs > finePwm + 2.0f) {
     armVirtualBrakeRetarget_(tgtOutDeg01, nowMs);
     return true;
   }
@@ -261,6 +316,16 @@ bool MotionController::commitOutTargetDeg01_(int32_t tgtOutDeg01, int32_t curEnc
   {
     const int32_t e0 = computeErrorDeg01(finalTgt, curEncDeg01);
     _posInitialAbsErrDeg01 = (e0 < 0) ? -e0 : e0;
+  }
+
+  // Laeuft gerade noch der Anlauf-KICK (Rotor praktisch noch in Ruhe) und das neue Ziel
+  // liegt in Gegenrichtung, muss der KICK in die neue Richtung ziehen, sonst faehrt er
+  // erst in die alte Richtung los.
+  if (_kickActive && desiredDirNew != 0 && _kickDir != desiredDirNew) {
+    _kickDir = desiredDirNew;
+    _kickDriveStarted = false;
+    _kickDriveStartMs = 0;
+    _kickDriveStartCounts = 0;
   }
   return true;
 }
@@ -437,6 +502,7 @@ void MotionController::clearJogState_() {
 }
 
 void MotionController::resetControllerState(uint32_t nowMs) {
+  _profLastPosValid = false;
   _posActive = false;
   _targetDeg01 = 0;
   _posStartMs = 0;
@@ -868,14 +934,34 @@ void MotionController::resumeJogAccelFromDuty_(int32_t curOutDeg01, float dutyAb
                                                float rampDistDeg, float pwmMin) {
   _jogDecel = false;
   _jogPendingDir = 0;
-  float span = pwmMax - pwmMin;
-  float alpha = 0.0f;
-  if (span > 0.1f) {
-    alpha = (dutyAbs - pwmMin) / span;
+
+  // Exakte Umkehrung des Hochrampen-Profils aus updateJog_():
+  //   traveled < soft : PWM = creep + a * (pwmMin - creep), a = traveled / soft
+  //   sonst           : PWM = pwmMin + a * (pwmMax - pwmMin), a = (traveled - soft) / (ramp - soft)
+  // So setzt die Hochrampe genau bei der aktuellen PWM wieder an (kein Sprung).
+  const float softDistDeg = kJogSoftDistDeg;
+  float denom = rampDistDeg - softDistDeg;
+  if (denom < 0.5f) denom = 0.5f;
+  float creepPwm = pwmMin * 0.25f;
+  if (creepPwm < 5.0f) creepPwm = 5.0f;
+  if (creepPwm > pwmMin) creepPwm = pwmMin;
+
+  float traveledDeg = 0.0f;
+  if (dutyAbs >= pwmMin) {
+    const float span = pwmMax - pwmMin;
+    float alpha = 0.0f;
+    if (span > 0.1f) alpha = (dutyAbs - pwmMin) / span;
+    if (alpha < 0.0f) alpha = 0.0f;
+    if (alpha > 1.0f) alpha = 1.0f;
+    traveledDeg = softDistDeg + alpha * denom;
+  } else {
+    const float spanC = pwmMin - creepPwm;
+    float a = 0.0f;
+    if (spanC > 0.1f) a = (dutyAbs - creepPwm) / spanC;
+    if (a < 0.0f) a = 0.0f;
+    if (a > 1.0f) a = 1.0f;
+    traveledDeg = a * softDistDeg;
   }
-  if (alpha < 0.0f) alpha = 0.0f;
-  if (alpha > 1.0f) alpha = 1.0f;
-  const float traveledDeg = alpha * rampDistDeg;
   _jogRampStartDeg01 = curOutDeg01 - (int32_t)_jogDir * (int32_t)lroundf(traveledDeg * 100.0f);
 }
 
@@ -884,12 +970,26 @@ bool MotionController::commandJog(uint8_t dir, uint32_t nowMs) {
   bool referenced = (_homing && _homing->isReferenced());
   if (_encoder->getEncoderType() == ENCTYPE_ABSOLUTE_SSI) {
     referenced = _encoder->isSsiValid();
+  } else if (_encoder->isInclinometer()) {
+    referenced = _encoder->isInclinoValid();
   }
-  if (!referenced) return false;
+  // Ohne Endschalter: JOG auch unreferenziert (CPR-Einmessfahrt).
+  const bool allowUnrefJog = (_board && _board->getEndstopCount() == 0);
+  if (!referenced && !allowUnrefJog) return false;
   if (!(dir == 1 || dir == 2)) return false;
 
-  // JOG und Positionsfahrt schliessen sich aus
+  // JOG und Positionsfahrt schliessen sich aus.
+  // Laeuft der Rotor dabei noch (Positionsfahrt, Bremsrampe, Feinphase), wird die aktuelle
+  // PWM + Richtung uebernommen: gleiche Richtung -> ohne Bremsen weiter (Hochrampe setzt bei
+  // der aktuellen PWM an), Gegenrichtung -> JOG-Bremsrampe, dann umkehren.
+  // (resetControllerState() setzt die PWM sonst auf 0 = abruptes Anhalten.)
+  float carryDuty = 0.0f;
+  int8_t carryDir = 0;
   if (_posActive) {
+    if (fabsf(_lastAppliedDuty) > 2.0f) {
+      carryDuty = _lastAppliedDuty;
+      carryDir = (carryDuty > 0.0f) ? +1 : -1;
+    }
     resetControllerState(nowMs);
   }
 
@@ -906,6 +1006,21 @@ bool MotionController::commandJog(uint8_t dir, uint32_t nowMs) {
   int32_t curEnc = 0;
   _encoder->getPositionDeg01(curEnc);
   const int32_t curOut = encoderDeg01ToOutputDeg01_(curEnc);
+
+  if (!_jogActive && carryDir != 0) {
+    // Laufende Positionsfahrt in JOG uebernehmen (PWM bleibt erhalten).
+    _jogActive = true;
+    _jogDir = carryDir;
+    _jogPendingDir = 0;
+    _jogDecel = false;
+    _lastAppliedDuty = carryDuty;
+    _posStartMs = nowMs;
+    _haveLastCounts = false;
+    _speedMeasDegPerSec = 0.0f;
+    _lastSpeedSampleMs = nowMs;
+    resumeJogAccelFromDuty_(curOut, fabsf(carryDuty), pwmMax, rampDistDeg, pwmMin);
+  }
+
   const float dutyAbs = fabsf(_lastAppliedDuty);
 
   if (!_jogActive) {
@@ -1065,7 +1180,7 @@ float MotionController::updateJog_(uint32_t nowMs, uint32_t dtMs) {
     if (traveled01 < 0) traveled01 = 0;
     float traveledDeg = (float)traveled01 / 100.0f;
 
-    const float softDistDeg = 1.5f;
+    const float softDistDeg = kJogSoftDistDeg;
     float dutyAbs = 0.0f;
     float creepPwm = pwmMin * 0.25f;
     if (creepPwm < 5.0f) creepPwm = 5.0f;
@@ -1241,6 +1356,8 @@ bool MotionController::commandSetPosDeg01(int32_t tgtDeg01, uint32_t nowMs) {
   bool referenced = (_homing && _homing->isReferenced());
   if (_encoder->getEncoderType() == ENCTYPE_ABSOLUTE_SSI) {
     referenced = _encoder->isSsiValid();
+  } else if (_encoder->isInclinometer()) {
+    referenced = _encoder->isInclinoValid();
   }
   if (!referenced) return false;
 
@@ -1705,6 +1822,7 @@ _brakeHoldStartMs = 0;
   // Ziel in gleicher Richtung verlaengern waehrend _decelPhaseActive:
   // _rampStartDeg01 = Ist; Hochlauf in update() von |lastAppliedDuty| bis pwmMax (Anker), nicht von pwmMinAbs.
   // SSI: _rampStartDeg01 bei Decel nicht neu setzen (Quantisierung wuerde Rampe staendig resetten).
+  const float prevRampUpAnchorAbs = _pwmRampUpAnchorAbs;
   _pwmRampUpAnchorAbs = -1.0f;
   {
     float pwmMaxCfg = (_cfg.pwmMaxAbs) ? fabsf(*_cfg.pwmMaxAbs) : 100.0f;
@@ -1733,6 +1851,10 @@ _brakeHoldStartMs = 0;
         if (anchor >= kickM) {
           _pwmRampUpAnchorAbs = anchor;
         }
+      } else {
+        // Ziel praktisch unveraendert: laufende Abbremsrampe samt Hochlauf-Anker
+        // unveraendert lassen (Anker-Verlust wuerde pwmUp absenken -> PWM-Sprung).
+        _pwmRampUpAnchorAbs = prevRampUpAnchorAbs;
       }
     } else if (_posActive && desiredDirNew != 0 && desiredDirNew == curDir) {
       // Hochlauf-Verlaengerung: Rampe von aktuellem Duty (Anker) neu starten.
@@ -1842,6 +1964,17 @@ float MotionController::update(uint32_t nowMs, uint32_t dtMs) {
   _encoder->getPositionDeg01(curDeg01);
 
   advanceOutMapFlank_(curDeg01);
+
+  // Fahrweg seit dem letzten update()-Aufruf (Grad) — Grundlage des wegbasierten
+  // PWM-Begrenzers (keine Zeitkonstanten).
+  float travelDeg = 0.0f;
+  if (_profLastPosValid) {
+    int32_t dTravel01 = computeDeltaDeg01(curDeg01, _profLastPosDeg01);
+    if (dTravel01 < 0) dTravel01 = -dTravel01;
+    travelDeg = (float)dTravel01 / 100.0f;
+  }
+  _profLastPosDeg01 = curDeg01;
+  _profLastPosValid = true;
 
   const long countsNow = motionCountsNow_();
   // Fuer Stillstand/KICK benutzen wir bewusst RAW-Counts.
@@ -1973,6 +2106,23 @@ float MotionController::update(uint32_t nowMs, uint32_t dtMs) {
     // damit bei langsamer Fahrt (z.B. 60% PWM) nicht endlos ausgerollt wird.
     float brakeDistDeg = rampDistDeg;
     if (!isfinite(brakeDistDeg) || brakeDistDeg < 0.5f) brakeDistDeg = 0.5f;
+    if (_brakeReason != 5) {
+      // Bremsweg nur so lang wie fuer die aktuelle PWM noetig: gleiche Steigung wie die
+      // normale Abbremsrampe (pwmMax -> 0 ueber rampDist), also Weg = rampDist * (PWM/pwmMax).
+      // Mit voller rampDist haette die Bremse bei PWM < pwmMax erst ein Plateau (konstante
+      // PWM) gefahren und waere deutlich weiter ueber das Ziel hinausgeschossen.
+      float pwmMaxB = pwmMaxEff;
+      if (!isfinite(pwmMaxB) || pwmMaxB < 5.0f) pwmMaxB = 100.0f;
+      float kickMinB = (_cfg.pwmKickMinAbs) ? (*_cfg.pwmKickMinAbs) : 0.0f;
+      if (kickMinB < 0.0f) kickMinB = -kickMinB;
+      float dutyRefB = fabsf(_lastAppliedDuty);
+      if (dutyRefB < kickMinB) dutyRefB = kickMinB;
+      float fracB = dutyRefB / pwmMaxB;
+      if (fracB > 1.0f) fracB = 1.0f;
+      brakeDistDeg = rampDistDeg * fracB;
+      if (brakeDistDeg < 0.25f) brakeDistDeg = 0.25f;
+      if (brakeDistDeg > rampDistDeg) brakeDistDeg = rampDistDeg;
+    }
     if (_brakeReason == 5) {
       float pwmMax = (_cfg.pwmMaxAbs) ? fabsf(*_cfg.pwmMaxAbs) : 100.0f;
       if (!isfinite(pwmMax) || pwmMax < 1.0f) pwmMax = 100.0f;
@@ -2290,13 +2440,9 @@ const float errDeg = (float)errDeg01 / 100.0f;
           // ------------------------------------------------------------
           // Slew / Ausgabe
           // ------------------------------------------------------------
-          float dutyOut = 0.0f;
-          if (_kickSoftMode) {
-            dutyOut = applyPwmSlew(kickTarget, _lastAppliedDuty, dtMs);
-          } else {
-            // schnell auf kickMin (Losbrechen), aber nicht darueber
-            dutyOut = applyPwmSlewCustom(kickTarget, _lastAppliedDuty, dtMs, 400.0f);
-          }
+          // Der KICK ist der Schritt auf Min-PWM (Rotor steht, kein Weg als Referenz; unter
+          // Min-PWM bewegt sich der Motor ohnehin nicht): direkt auf kickMin, ohne Zeitrampe.
+          const float dutyOut = kickTarget;
           _lastAppliedDuty = dutyOut;
 
           // Erst wenn wir wirklich mindestens kickMin "gezogen" haben, starten wir die
@@ -2571,6 +2717,11 @@ float pwmMinAbs = kickMinAbs;
 if (pwmMinAbs < 0.0f) pwmMinAbs = 0.0f;
 if (pwmMinAbs > pwmMax) pwmMinAbs = pwmMax;
 
+// Rampensteigung (% PWM pro Grad Fahrweg) fuer den wegbasierten Begrenzer.
+// Haengt nur von pwmMax, Min-PWM und Rampenlaenge ab (aendert sich also mit SETPWM/minPwm mit).
+float profileSlopePerDeg = (pwmMax - pwmMinAbs) / ((rampDistDeg > 0.05f) ? rampDistDeg : 0.05f);
+if (profileSlopePerDeg < 1.0f) profileSlopePerDeg = 1.0f;
+
 // Ramp-Up (Start -> pwmMax)
 // WICHTIG: Bei sehr kurzen Fahrten kann es passieren, dass die Start-Rampe
 // am Rand des Feinfensters (remainingDeg ~= fineWin) noch NICHT bis zur Fein-PWM
@@ -2760,6 +2911,22 @@ _speedCmdRampDegPerSec = 0.0f;
     } else {
       dutyOutFine = uCmdFine;
     }
+
+    // Kommt die PWM noch deutlich ueber Fein-PWM an (z.B. Grobrampe konnte nicht schnell
+    // genug abbauen, oder Ziel wurde knapp vor dem Rotor gesetzt), darf der Anteil UEBER
+    // Fein-PWM nicht schlagartig wegfallen: wegbasiert (Rampensteigung x Faktor, keine Zeit)
+    // auf Fein-PWM abbauen. Unterhalb/gleich Fein-PWM bleibt das Verhalten unveraendert
+    // (Creep, harter Stopp).
+    {
+      const float lastAbs = fabsf(_lastAppliedDuty);
+      if (lastAbs > finePwmAbs + 1.0f) {
+        const float lastSign = (_lastAppliedDuty > 0.0f) ? 1.0f : -1.0f;
+        const float stepFine = kProfileDownFactor * profileSlopePerDeg * travelDeg;
+        float magFine = lastAbs - stepFine;
+        if (magFine < finePwmAbs) magFine = finePwmAbs;
+        dutyOutFine = lastSign * magFine;
+      }
+    }
     _lastAppliedDuty = dutyOutFine;
 
     _iTermPwm = 0.0f;
@@ -2770,8 +2937,19 @@ _speedCmdRampDegPerSec = 0.0f;
     return dutyOutFine;
   }
 
-  // PWM-Slew (normal)
-  float dutyOut = applyPwmSlew(uCmd, _lastAppliedDuty, dtMs);
+  // Ausgabe:
+  // - Bremsfahrt: wie bisher (schnelle Brems-Slew, Profil ist ohnehin wegbasiert).
+  // - Normale Grobfahrt: das Profil ist positionsgefuehrt (pwmUp/pwmDown ueber Weg). Die
+  //   alte Zeit-Slew (20 %/s) hat die Rampe unabhaengig von PWM-Werten/Drehzahl verzerrt
+  //   (Abbremsen hinkte hinterher -> Feinphase kappte hart). Stattdessen begrenzt der
+  //   wegbasierte Begrenzer nur Sprunghaftes (neues Ziel, Richtungswechsel) relativ zur
+  //   Rampensteigung - ohne Zeitkonstante.
+  float dutyOut;
+  if (brakingNow) {
+    dutyOut = applyPwmSlew(uCmd, _lastAppliedDuty, dtMs);
+  } else {
+    dutyOut = applyProfileLimit_(uCmd, travelDeg, profileSlopePerDeg, pwmMinAbs);
+  }
   _lastAppliedDuty = dutyOut;
 
   return dutyOut;

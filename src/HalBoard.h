@@ -52,17 +52,39 @@ class HalBoard {
 public:
   void begin();
 
-  // Pin-Profil nach NVS-Laden (EncoderType): Typ 1/2 = OE/Endschalter/Wind;
-  // Typ 3 = SSI (Pin 4 HIGH), kein Anemometer auf 8/9.
+  // Pin-Profil nach NVS-Laden (EncoderType):
+  // Typ 1/2 = OE/Endschalter/Wind; Typ 3 = SSI (Pin 4 HIGH), kein Bus auf 8/9;
+  // Typ 4 = Inklinometer auf Wind-Pins (Serial2 @115200), kein Wind.
   void applyHardwareProfile(EncoderType encType);
 
   bool isWindHardwareAvailable() const { return _windHardwareAvailable; }
+  bool isInclinoHardwareAvailable() const { return _inclinoHardwareAvailable; }
 
   // Startet den Hintergrund-Task fuer den Windsensor erst dann,
   // wenn die Preferences bereits geladen und die initialen Offsets/Enable-Zustaende
   // gesetzt wurden. Dadurch sprechen waehrend setup() noch keine parallelen
   // Sensorzugriffe mit Serial2 dazwischen.
   void startWindTask();
+
+  // Inklinometer-Poll-Task (nur Typ 4; gegenseitig ausschliessend zum Wind-Task).
+  void startInclinoTask();
+
+  // Letzter frischer Winkel (Deg01 = Grad*100). false wenn stale/ungueltig.
+  bool getInclinoDeg01(int32_t& outDeg01) const;
+  bool isInclinoValid() const;
+
+  // Proxy-Transaktion auf dem Inklinometer-Bus (Serial2).
+  // reqTail z.B. "GETSWAPXY" oder "SETCALIB,-2.50" (ohne #/$).
+  // outValue = Payload nach dem Komma aus #ACK_<cmd>,<payload>$
+  enum InclinoTxStatus : uint8_t {
+    INCLINO_TX_OK = 0,
+    INCLINO_TX_NOHW = 1,
+    INCLINO_TX_TIMEOUT = 2,
+    INCLINO_TX_NACK = 3,
+    INCLINO_TX_BAD = 4,
+  };
+  InclinoTxStatus inclinoTransact(const char* reqTail, String& outValue,
+                                  uint32_t timeoutMs = 100);
 
   // ------------------------------------------------------------
   // Wind- & Richtungsmesser (RS485)
@@ -96,9 +118,15 @@ public:
   // LED aktiv LOW
   void setLed(bool on);
 
-  // Endschalter aktiv LOW (gedrueckt = LOW)
+  // Endschalter aktiv LOW (gedrueckt = LOW) — Roh-Pins (Diagnose)
   bool readEndLeft() const;
   bool readEndRight() const;
+
+  // Anzahl Endschalter: 0=keine, 1=ein Kontakt (L ODER R), 2=zwei Kontakte
+  void setEndstopCount(uint8_t count);
+  uint8_t getEndstopCount() const { return _endstopCount; }
+  // Bei Modus 1: Kontakt an beliebigem Eingang (L || R)
+  bool readEndContact() const;
 
   // Service-Taster: true = gedrueckt (aktiv LOW)
   bool readServiceLeft() const;
@@ -115,6 +143,14 @@ private:
   static void windTaskTrampoline(void* arg);
   void windTaskLoop();
   void windTaskStep(uint32_t nowMs);
+
+  // ------------------------------------------------------------
+  // Inklinometer-Task intern (Serial2, #GETDG$)
+  // ------------------------------------------------------------
+  static void inclinoTaskTrampoline(void* arg);
+  void inclinoTaskLoop();
+  void inclinoTaskStep(uint32_t nowMs);
+  bool inclinoPollOnce(uint32_t nowMs);
 
   // Schneller Cache fuer Leser aus loop()/RS485.
   void setWindCacheZero(uint32_t nowMs, bool valid, bool clearAutoDisabled);
@@ -150,4 +186,19 @@ private:
   uint8_t  _windBeaufort = 0;
   float    _windSpeedOffsetKmh = 0.0f;
   float    _windDirOffsetDeg = 0.0f;
+
+  // ------------------------------------------------------------
+  // Inklinometer (Cache) — gleicher UART/Pins wie Wind
+  // ------------------------------------------------------------
+  bool     _inclinoHardwareAvailable = false;
+  bool     _inclinoInit = false;
+  TaskHandle_t _inclinoTaskHandle = nullptr;
+  SemaphoreHandle_t _inclinoBusMutex = nullptr;
+  portMUX_TYPE _inclinoStateMux = portMUX_INITIALIZER_UNLOCKED;
+  bool     _inclinoValid = false;
+  int32_t  _inclinoDeg01 = 0;
+  uint32_t _inclinoLastOkMs = 0;
+
+  // 0=keine, 1=ein Kontakt (L||R), 2=zwei Kontakte (Default)
+  uint8_t  _endstopCount = 2;
 };

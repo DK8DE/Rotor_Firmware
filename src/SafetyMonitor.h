@@ -205,6 +205,11 @@ public:
   void setRestrictEndstops(bool on);
   bool getRestrictEndstops() const { return _cfg.restrictEndstops; }
 
+  // Bei endstopCount==1: welcher Anschlag der gemeinsame Kontakt gerade bedeutet.
+  // -1 = links/MIN, +1 = rechts/MAX, 0 = unbekannt (Kontakt wird ignoriert).
+  void setEndstopSide(int8_t side);
+  int8_t getEndstopSide() const { return _endstopSide; }
+
   // Endschalter-Ueberfahren gezielt erlauben (Homing-Sonderfall)
   void setAllowPushIntoEndMin(bool on);
   void setAllowPushIntoEndMax(bool on);
@@ -341,6 +346,9 @@ private:
   bool _endRStable = false;
   uint32_t _endLChangeMs = 0;
   uint32_t _endRChangeMs = 0;
+  // Ein-Kontakt-Modus: Seitenhinweis von aussen (Homing-State / Position)
+  int8_t _endstopSide = 0;
+  bool _endContactStable = false; // entprellter ODER-Kontakt (nur Modus 1)
 
   // IS Filter Ringbuffer (max 32)
   uint32_t _buf1[32] = {0};

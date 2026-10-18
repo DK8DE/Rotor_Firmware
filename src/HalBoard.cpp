@@ -1,6 +1,8 @@
 #include "HalBoard.h"
 
 #include <Wire.h>
+#include <math.h>
+#include <cstring>
 
 // ------------------------------------------------------------
 // Wind-Sensor Poll-Interval
@@ -24,6 +26,15 @@ static const uint32_t WIND_RETRY_INTERVAL_MS = 10000;
 static const BaseType_t WIND_TASK_PRIORITY = 1;
 static const uint32_t WIND_TASK_STACK_WORDS = 4096;
 static const BaseType_t WIND_TASK_CORE = 0;
+
+// Inklinometer (IIS2ICLX) am Wind-RS485: #GETDG$ @ 115200 8N1
+static const uint32_t INCLINO_POLL_INTERVAL_MS = 80;
+static const uint32_t INCLINO_STALE_MS = 500;
+static const uint32_t INCLINO_REPLY_TIMEOUT_MS = 80;
+static const uint32_t INCLINO_TRANSACT_TIMEOUT_MS = 100;
+static const BaseType_t INCLINO_TASK_PRIORITY = 1;
+static const uint32_t INCLINO_TASK_STACK_WORDS = 4096;
+static const BaseType_t INCLINO_TASK_CORE = 0;
 
 void HalBoard::begin() {
   // I2C-Bus vorbereiten (Bausteine folgen spaeter)
@@ -70,18 +81,45 @@ void HalBoard::begin() {
   if (_windSensorMutex == nullptr) {
     _windSensorMutex = xSemaphoreCreateMutex();
   }
+  if (_inclinoBusMutex == nullptr) {
+    _inclinoBusMutex = xSemaphoreCreateMutex();
+  }
 }
 
 void HalBoard::applyHardwareProfile(EncoderType encType) {
   if (encType == ENCTYPE_ABSOLUTE_SSI) {
     _windHardwareAvailable = false;
     _windInit = false;
+    _inclinoHardwareAvailable = false;
+    _inclinoInit = false;
 
     pinMode(PIN_OE_INVERTER, OUTPUT);
     digitalWrite(PIN_OE_INVERTER, HIGH);
     return;
   }
 
+  if (encType == ENCTYPE_INCLINOMETER) {
+    // Wind und Inklinometer teilen Serial2 / Pins 8+9 — gegenseitig ausschliessend.
+    _windHardwareAvailable = false;
+    _windInit = false;
+    _inclinoHardwareAvailable = true;
+
+    pinMode(PIN_END_LEFT, INPUT);
+    pinMode(PIN_END_RIGHT, INPUT);
+
+    pinMode(PIN_WIND_RS485_RX, INPUT_PULLUP);
+
+    pinMode(PIN_OE_INVERTER, OUTPUT);
+    digitalWrite(PIN_OE_INVERTER, LOW);
+
+    Serial2.begin(115200, SERIAL_8N1, PIN_WIND_RS485_RX, PIN_WIND_RS485_TX);
+    Serial2.setTimeout(INCLINO_REPLY_TIMEOUT_MS);
+    _inclinoInit = true;
+    return;
+  }
+
+  _inclinoHardwareAvailable = false;
+  _inclinoInit = false;
   _windHardwareAvailable = true;
 
   pinMode(PIN_END_LEFT, INPUT);
@@ -351,6 +389,175 @@ void HalBoard::updateWind(uint32_t nowMs) {
   (void)nowMs;
 }
 
+// ------------------------------------------------------------
+// Inklinometer (Serial2 @115200, #GETDG$)
+// ------------------------------------------------------------
+
+void HalBoard::startInclinoTask() {
+  if (!_inclinoInit) return;
+  if (_inclinoTaskHandle != nullptr) return;
+
+  portENTER_CRITICAL(&_inclinoStateMux);
+  _inclinoValid = false;
+  _inclinoDeg01 = 0;
+  _inclinoLastOkMs = 0;
+  portEXIT_CRITICAL(&_inclinoStateMux);
+
+  xTaskCreatePinnedToCore(
+    HalBoard::inclinoTaskTrampoline,
+    "inclino_task",
+    INCLINO_TASK_STACK_WORDS,
+    this,
+    INCLINO_TASK_PRIORITY,
+    &_inclinoTaskHandle,
+    INCLINO_TASK_CORE
+  );
+}
+
+void HalBoard::inclinoTaskTrampoline(void* arg) {
+  HalBoard* self = static_cast<HalBoard*>(arg);
+  if (self) {
+    self->inclinoTaskLoop();
+  }
+  vTaskDelete(nullptr);
+}
+
+void HalBoard::inclinoTaskLoop() {
+  TickType_t lastWake = xTaskGetTickCount();
+  for (;;) {
+    const uint32_t nowMs = millis();
+    inclinoTaskStep(nowMs);
+    vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(INCLINO_POLL_INTERVAL_MS));
+  }
+}
+
+HalBoard::InclinoTxStatus HalBoard::inclinoTransact(const char* reqTail, String& outValue,
+                                                    uint32_t timeoutMs) {
+  outValue = "";
+  if (!_inclinoInit || !reqTail || !reqTail[0]) {
+    return INCLINO_TX_NOHW;
+  }
+  if (timeoutMs == 0) timeoutMs = INCLINO_TRANSACT_TIMEOUT_MS;
+
+  // Erwarteter ACK-Name = Token vor dem ersten Komma in reqTail
+  String ackName;
+  {
+    const char* comma = strchr(reqTail, ',');
+    if (comma) {
+      ackName = String(reqTail).substring(0, (unsigned)(comma - reqTail));
+    } else {
+      ackName = String(reqTail);
+    }
+  }
+  const String ackPrefix = String("#ACK_") + ackName + ",";
+  const String nackPrefix = String("#NACK_") + ackName;
+
+  if (_inclinoBusMutex) {
+    xSemaphoreTake(_inclinoBusMutex, portMAX_DELAY);
+  }
+
+  while (Serial2.available() > 0) {
+    (void)Serial2.read();
+  }
+  Serial2.print('#');
+  Serial2.print(reqTail);
+  Serial2.print('$');
+  Serial2.flush();
+
+  const uint32_t t0 = millis();
+  String line;
+  line.reserve(64);
+  InclinoTxStatus st = INCLINO_TX_TIMEOUT;
+
+  while ((uint32_t)(millis() - t0) < timeoutMs) {
+    while (Serial2.available() > 0) {
+      const char c = (char)Serial2.read();
+      if (c == '$') {
+        if (line.indexOf(nackPrefix) >= 0) {
+          st = INCLINO_TX_NACK;
+        } else {
+          const int ackPos = line.indexOf(ackPrefix);
+          if (ackPos >= 0) {
+            outValue = line.substring(ackPos + ackPrefix.length());
+            outValue.trim();
+            st = INCLINO_TX_OK;
+          } else {
+            st = INCLINO_TX_BAD;
+          }
+        }
+        goto inclino_tx_done;
+      }
+      if (c == '\r' || c == '\n') continue;
+      if (line.length() < 96) line += c;
+    }
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
+
+inclino_tx_done:
+  if (_inclinoBusMutex) {
+    xSemaphoreGive(_inclinoBusMutex);
+  }
+  return st;
+}
+
+bool HalBoard::inclinoPollOnce(uint32_t nowMs) {
+  if (!_inclinoInit) return false;
+
+  String payload;
+  const InclinoTxStatus st =
+      inclinoTransact("GETDG", payload, INCLINO_REPLY_TIMEOUT_MS);
+  if (st != INCLINO_TX_OK) return false;
+
+  payload.replace(",", ".");
+  const float deg = payload.toFloat();
+  if (!isfinite(deg)) return false;
+
+  const int32_t deg01 = (int32_t)lroundf(deg * 100.0f);
+  portENTER_CRITICAL(&_inclinoStateMux);
+  _inclinoDeg01 = deg01;
+  _inclinoValid = true;
+  _inclinoLastOkMs = nowMs;
+  portEXIT_CRITICAL(&_inclinoStateMux);
+  return true;
+}
+
+void HalBoard::inclinoTaskStep(uint32_t nowMs) {
+  if (!_inclinoInit) return;
+  (void)inclinoPollOnce(nowMs);
+
+  // Stale markieren, falls zu lange kein OK
+  portENTER_CRITICAL(&_inclinoStateMux);
+  if (_inclinoValid && _inclinoLastOkMs != 0U &&
+      (uint32_t)(nowMs - _inclinoLastOkMs) > INCLINO_STALE_MS) {
+    _inclinoValid = false;
+  }
+  portEXIT_CRITICAL(&_inclinoStateMux);
+}
+
+bool HalBoard::getInclinoDeg01(int32_t& outDeg01) const {
+  bool valid = false;
+  int32_t deg01 = 0;
+  uint32_t lastOkMs = 0;
+
+  portENTER_CRITICAL(const_cast<portMUX_TYPE*>(&_inclinoStateMux));
+  valid = _inclinoValid;
+  deg01 = _inclinoDeg01;
+  lastOkMs = _inclinoLastOkMs;
+  portEXIT_CRITICAL(const_cast<portMUX_TYPE*>(&_inclinoStateMux));
+
+  if (!valid || lastOkMs == 0U) return false;
+  const uint32_t nowMs = millis();
+  if ((uint32_t)(nowMs - lastOkMs) > INCLINO_STALE_MS) return false;
+
+  outDeg01 = deg01;
+  return true;
+}
+
+bool HalBoard::isInclinoValid() const {
+  int32_t dummy = 0;
+  return getInclinoDeg01(dummy);
+}
+
 bool HalBoard::getWindEnable() const {
   bool configuredEnable = true;
   bool autoDisabled = false;
@@ -472,6 +679,15 @@ bool HalBoard::readEndLeft() const {
 bool HalBoard::readEndRight() const {
   // aktiv LOW (gedrueckt = LOW)
   return (digitalRead(PIN_END_RIGHT) == LOW);
+}
+
+void HalBoard::setEndstopCount(uint8_t count) {
+  if (count > 2) count = 2;
+  _endstopCount = count;
+}
+
+bool HalBoard::readEndContact() const {
+  return readEndLeft() || readEndRight();
 }
 
 bool HalBoard::readServiceLeft() const {

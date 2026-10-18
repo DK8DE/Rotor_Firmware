@@ -6,7 +6,7 @@
 /*
   EncoderAxis
   ----------
-  Kapselt UltraEncoderPCNT (Typ 1/2) oder TWK_KBE58_SSI (Typ 3) und stellt bereit:
+  Kapselt UltraEncoderPCNT (Typ 1/2), TWK_KBE58_SSI (Typ 3) oder Inklinometer (Typ 4):
   - Raw Counts (Steps) und korrigierte Counts (Steps) (bei Z-Korrektur)
   - Grad-Umrechnung auf Basis countsPerRevActual
     - Typ 1/2: logisch 0..axisMaxDeg01 (Default 360°); die beim Homing gelernten
@@ -15,22 +15,25 @@
       nutzt so seinen realen mechanischen Hub vollstaendig aus.
     - Typ 3 (SSI): logisch 0..axisMaxDeg01 (Default 360°, bis 720° mit Turn-Zähler 0/1);
       liefert einen echten Absolutwert, axisMaxDeg01 wirkt hier nur als Clamp.
+    - Typ 4 (Inklinometer): Absolutwinkel vom Sensor am Wind-RS485; Default 0..90°.
   - Z-Statistik (Pulse count, dz_steps, dz_us, z_error, offset)
-  - Konfiguration fuer Ringencoder (OUTPUT), Motorencoder (MOTOR), SSI-Absolut (SSI)
+  - Konfiguration fuer Ringencoder (OUTPUT), Motorencoder (MOTOR), SSI, Inklinometer
 */
 
 // WICHTIG (RS485-Protokoll):
-// - ENCTYPE_MOTOR_AXIS  = 1
-// - ENCTYPE_RING_OUTPUT = 2
-// - ENCTYPE_ABSOLUTE_SSI = 3
+// - ENCTYPE_MOTOR_AXIS     = 1
+// - ENCTYPE_RING_OUTPUT    = 2
+// - ENCTYPE_ABSOLUTE_SSI   = 3
+// - ENCTYPE_INCLINOMETER   = 4  (Inklinometer am Wind-RS485, Elevation)
 // Hintergrund:
 // - Der EncoderType ist per RS485/EEPROM konfigurierbar.
 // - Die Mapping-Werte sind absichtlich NICHT 0/1, damit ein alter/ungesetzter
 //   Wert (0) im EEPROM/NVS eindeutig erkannt werden kann.
 enum EncoderType : uint8_t {
-  ENCTYPE_MOTOR_AXIS   = 1,  // Encoder auf Motorachse
-  ENCTYPE_RING_OUTPUT  = 2,  // Encoder auf Abtrieb/Ring
-  ENCTYPE_ABSOLUTE_SSI = 3   // TWK KBE58 SSI-Absolutencoder (kein A/B/Z)
+  ENCTYPE_MOTOR_AXIS    = 1,  // Encoder auf Motorachse
+  ENCTYPE_RING_OUTPUT   = 2,  // Encoder auf Abtrieb/Ring
+  ENCTYPE_ABSOLUTE_SSI  = 3,  // TWK KBE58 SSI-Absolutencoder (kein A/B/Z)
+  ENCTYPE_INCLINOMETER  = 4   // Inklinometer IIS2ICLX (Serial2 / Wind-Bus)
 };
 
 struct EncoderAxisConfig {
@@ -75,8 +78,12 @@ struct EncoderAxisConfig {
   uint16_t ssiAngleScaleNum = 1;
   uint16_t ssiAngleScaleDen = 1;
 
-  // Umrechnung (wird durch Homing gelernt bei Typ 1/2; bei Typ 3 fest 4096)
+  // Umrechnung (wird durch Homing gelernt bei Typ 1/2; bei Typ 3 fest 4096;
+  // Typ 4: synthetisch 1 Count = 0,01°)
   int32_t countsPerRevActual = 0;
+
+  // Typ 4: HalBoard fuer Inklinometer-Cache (nicht owned)
+  class HalBoard* inclinoBoard = nullptr;
 
   // Bereichs-Offset (Deg01) — nur Typ 1/2 (Endschalter-Versatz)
   int32_t rangeDegOffsetDeg01 = 0;
@@ -108,7 +115,14 @@ public:
   void update();
 
   bool isAbsoluteSsi() const { return _cfg.encType == ENCTYPE_ABSOLUTE_SSI; }
+  bool isInclinometer() const { return _cfg.encType == ENCTYPE_INCLINOMETER; }
+  bool isAbsoluteType() const {
+    return _cfg.encType == ENCTYPE_ABSOLUTE_SSI ||
+           _cfg.encType == ENCTYPE_INCLINOMETER;
+  }
   bool isSsiValid() const { return _ssiValid; }
+  // Typ 4: frischer Inklinometer-Winkel (HalBoard-Cache)
+  bool isInclinoValid() const;
 
   EncoderAxisConfig getConfig() const { return _cfg; }
   void setCountsPerRevActual(int32_t cpr);
@@ -157,6 +171,7 @@ public:
 private:
   bool beginPcnt();
   bool beginSsi();
+  bool beginInclino();
 
   void applySsiPosition_(uint32_t newPos);
   void markSsiTurnDirty_();
