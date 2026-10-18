@@ -1,6 +1,6 @@
 # Rotor_Firmware
 
-**Version: 1.7.1**
+**Version: 1.8.1**
 
 Firmware für einen motorisierten Antennenrotor auf Basis des ESP32-S3 (PlatformIO/Arduino).
 
@@ -31,8 +31,8 @@ Die Firmware läuft auf der Steuerhardware und bietet unter anderem:
 
 Die Firmware-Versionsnummer (Semantic Versioning: `MAJOR.MINOR.PATCH`) wird an **einer** zentralen Stelle gepflegt: [`src/Version.h`](src/Version.h).
 
-- Wird beim Boot unabhängig von `g_debug` einmal über USB-Serial ausgegeben (`Rotor_Firmware v1.7.1`).
-- Über RS485 per **`GETVERSION`** abfragbar (`ACK_GETVERSION:1.7.1`).
+- Wird beim Boot unabhängig von `g_debug` einmal über USB-Serial ausgegeben (`Rotor_Firmware v1.8.1`).
+- Über RS485 per **`GETVERSION`** abfragbar (`ACK_GETVERSION:1.8.1`).
 - `build.ps1` liest die Version aus `src/Version.h` und übernimmt sie in `IMGs/manifest.json` (Feld `version`).
 
 ### Version setzen (`build.ps1 -Version`)
@@ -40,12 +40,12 @@ Die Firmware-Versionsnummer (Semantic Versioning: `MAJOR.MINOR.PATCH`) wird an *
 Die Version wird **nicht** manuell in `src/Version.h` editiert, sondern über den Build-Skript-Parameter `-Version` gesetzt:
 
 ```powershell
-.\build.ps1 -Version "1.7.1"
+.\build.ps1 -Version "1.8.1"
 ```
 
 Das erledigt automatisch:
 
-1. `src/Version.h` wird auf `1.7.1` aktualisiert (`FW_VERSION_MAJOR/MINOR/PATCH`).
+1. `src/Version.h` wird auf `1.8.1` aktualisiert (`FW_VERSION_MAJOR/MINOR/PATCH`).
 2. **`README.md` wird automatisch mitaktualisiert** — alle Stellen, die die alte Versionsnummer enthalten (Badge oben, Beispiele im Versionierungs-Abschnitt), werden auf die neue Version umgeschrieben.
 3. Firmware wird gebaut, `IMGs/` aktualisiert und (ohne `-SkipUpload`) geflasht.
 
@@ -55,7 +55,7 @@ Auch ohne `-Version`-Parameter gleicht `build.ps1` bei jedem Lauf die `README.md
 
 ```powershell
 git add src/Version.h README.md
-git commit -m "Version 1.7.1"
+git commit -m "Version 1.8.1"
 git push
 ```
 
@@ -115,7 +115,7 @@ Für reproduzierbare Ergebnisse sollten Firmware, Controller und PC-Software zue
 .\build.ps1 -Clean -SkipUpload
 
 # Version setzen (aktualisiert src/Version.h + README.md), dann bauen/flashen
-.\build.ps1 -Version "1.7.1"
+.\build.ps1 -Version "1.8.1"
 ```
 
 Details zur Versionsvergabe und zum automatischen GitHub-Release: siehe [Versionierung](#versionierung).
@@ -185,7 +185,9 @@ Winkelangaben typisch als Grad mit Komma (`12,50` = 12,50°). Intern: Deg01 (= G
 | `STOP` | Bewegung stoppen |
 | `GETREF` / `SETREF` | Referenzstatus / Fehler quittieren; `SETREF:1` startet das Endschalter-Homing (Typ 1/2) |
 | `GETERR` / `GETWARN` | Fehler- / Warncodes |
-| `GETHOMING` | Homing aktiv? |
+| `GETHOMING` | Homing aktiv? (`1`/`0`) |
+| `GETMOVE` | Rotor bewegt sich? (`1` bei Positionsfahrt, JOG oder Homing, sonst `0`) |
+| `GETARRTOL` / `SETARRTOL:<grad>` | Ankunftstoleranz (NVS `atol`); steuert Zielfenster und Fine-Deadband |
 
 ### Achse / Feinjustage
 
@@ -213,7 +215,7 @@ Winkelangaben typisch als Grad mit Komma (`12,50` = 12,50°). Intern: Deg01 (= G
 
 | Kommando | Beschreibung |
 |----------|--------------|
-| `GETVERSION` | Firmware-Version (z. B. `1.7.1`), siehe [Versionierung](#versionierung) |
+| `GETVERSION` | Firmware-Version (z. B. `1.8.1`), siehe [Versionierung](#versionierung) |
 | `GETWLAN` / `SETWLAN:0` / `SETWLAN:1` | SoftAP-Web-UI: `1` = Hotspot `Rotor_<UID>` an (Passwort `Rotorconfig`, UI `admin`/`Rotorconfig` @ 192.168.4.1), `0` = aus. Nicht persistent — nach Reboot immer aus. HTTP-OTA unter Tab Update. Hinweis: WiFi kann die Strommessung (ADC2) beeinträchtigen. |
 | `GETID` / `SETID` | Slave-ID |
 | `SETROTORID` | ID nur per Broadcast `255` setzen |
@@ -237,6 +239,7 @@ Absolutwinkel vom [Inklinometer_IIS2ICLXTR](https://github.com/DK8DE/Inklinomete
 - Default Achse **0..90°** (`amax=9000`), sofern `amax` nicht explizit gesetzt
 - Endschalter: `SETENDSTC:0` oder `:2` (`:1` → NAK `BADVAL`)
 - Stall nutzt synthetische Counts (1 Count = 0,01°)
+- Ankunft wegen Sensorlag (~80 ms Poll): `SETARRTOL` / `GETARRTOL` steuern Ankunft **und** Fine-Rueckfahrt-Deadband (NVS `atol`, z. B. `SETARRTOL:1,00`). Hold mindestens ~250 ms, Fine-Window ohne SSI-Kuerzung — verhindert Pendeln am Zielende
 - Konfiguration des Sensors: Master-Befehle `SETINC*` / `GETINC*` (siehe unten); Werte liegen im **NVS des Inklinometers**, nicht im Rotor-FRAM
 
 ### Inklinometer-Konfiguration (SETINC / GETINC)

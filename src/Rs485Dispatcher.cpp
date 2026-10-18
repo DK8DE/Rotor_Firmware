@@ -1226,6 +1226,17 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   }
 
   // ------------------------------------------------------------------------
+  // GETMOVE (Rotor bewegt sich gerade — Positionsfahrt, JOG oder Homing)
+  // ------------------------------------------------------------------------
+  if (cmd == "GETMOVE") {
+    const bool moving =
+        (_motion && _motion->isMotionActive()) ||
+        (_homing && _homing->isActive());
+    if (shouldReply) sendAck(f.master, "GETMOVE", moving ? "1" : "0");
+    return;
+  }
+
+  // ------------------------------------------------------------------------
   // GETPOSDG (Keepalive + Positionsrueckmeldung)
   // ------------------------------------------------------------------------
   if (cmd == "GETPOSDG") {

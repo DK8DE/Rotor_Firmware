@@ -113,6 +113,12 @@ int32_t MotionController::effectiveArriveTolDeg01_() const {
 }
 
 int32_t MotionController::effectiveInPosTolDeg01_() const {
+  // Typ 4: SETARRTOL auch fuer In-Pos / Fine-Rueckfahrt — sonst wuerde
+  // isAbsoluteSsiMotion_() fest Count+1 (=0,02°) liefern und die konfigurierte
+  // Toleranz (z.B. SETARRTOL:1,00) fuer das Deadband "vergessen".
+  if (_encoder && _encoder->isInclinometer()) {
+    return effectiveArriveTolDeg01_();
+  }
   // Fuer SSI: voller Count (ceil) als Ankunftstoleranz im update()-inPosTol-Check.
   // Motor muss das Ziel UEBERschiessen (auf Overshoot-Seite stoppen) — dadurch kein
   // Kurzschluss bei Zielen zwischen zwei Counts (waere mit halber Count-Toleranz passiert).
@@ -125,6 +131,8 @@ int32_t MotionController::effectiveInPosTolDeg01_() const {
 int32_t MotionController::effectiveFineWindowDeg01_() const {
   int32_t fw = (_cfg.fineWindowDeg01) ? (*_cfg.fineWindowDeg01) : 0;
   if (fw < 0) fw = -fw;
+  // Typ 4: volle Fine-Window (kein SSI-/4) — frueherer Creep bei Sensorlag (~80ms).
+  if (_encoder && _encoder->isInclinometer()) return fw;
   if (!isAbsoluteSsiMotion_() || fw <= 0) return fw;
   fw /= 4;
   const int32_t perCount = encoderDeg01PerCount_();
@@ -134,6 +142,11 @@ int32_t MotionController::effectiveFineWindowDeg01_() const {
 
 uint32_t MotionController::effectiveArriveHoldMs_() const {
   uint32_t ms = (_cfg.arriveHoldMs) ? (*_cfg.arriveHoldMs) : 200u;
+  // Typ 4: ohne SSI-/4, Floor 250ms (~3 Polls) — Stillstand erst nach frischen Winkeln.
+  if (_encoder && _encoder->isInclinometer()) {
+    if (ms < 250u) ms = 250u;
+    return ms;
+  }
   if (!isAbsoluteSsiMotion_()) return ms;
   ms /= 4;
   if (ms < 25u) ms = 25u;
