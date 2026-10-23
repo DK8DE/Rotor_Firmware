@@ -402,13 +402,13 @@ void EncoderAxis::setCounts(long newCounts) {
   _enc->resetZHistory();
 }
 
-bool EncoderAxis::getPositionDeg01(int32_t& outDeg01) const {
+bool EncoderAxis::getPositionDeg01(int32_t& outDeg01, bool clampToAxis) const {
   if (_cfg.encType == ENCTYPE_INCLINOMETER) {
     if (!_cfg.inclinoBoard) return false;
     int32_t deg01 = 0;
     if (!_cfg.inclinoBoard->getInclinoDeg01(deg01)) return false;
     const int32_t amax = (_cfg.axisMaxDeg01 > 0) ? _cfg.axisMaxDeg01 : 9000;
-    outDeg01 = clampI32(deg01, 0, amax);
+    outDeg01 = clampToAxis ? clampI32(deg01, 0, amax) : deg01;
     return true;
   }
 
@@ -422,8 +422,7 @@ bool EncoderAxis::getPositionDeg01(int32_t& outDeg01) const {
       deg01 += 36000;
     }
     const int32_t amax = (_cfg.axisMaxDeg01 > 0) ? _cfg.axisMaxDeg01 : 36000;
-    deg01 = clampI32(deg01, 0, amax);
-    outDeg01 = deg01;
+    outDeg01 = clampToAxis ? clampI32(deg01, 0, amax) : deg01;
     return true;
   }
 
@@ -440,6 +439,7 @@ bool EncoderAxis::getPositionDeg01(int32_t& outDeg01) const {
 
   const int32_t halfOff = off / 2;
   const int32_t totalDeg01 = spanBaseDeg01 + off;
+  if (totalDeg01 <= 0) return false;
 
   const long c = getCountsDefault();
 
@@ -447,7 +447,9 @@ bool EncoderAxis::getPositionDeg01(int32_t& outDeg01) const {
   int32_t physDeg01 = (int32_t)(num / (int64_t)cprActual);
   int32_t logDeg01 = physDeg01 - halfOff;
 
-  logDeg01 = clampI32(logDeg01, 0, amax);
+  if (clampToAxis) {
+    logDeg01 = clampI32(logDeg01, 0, amax);
+  }
 
   outDeg01 = logDeg01;
   return true;

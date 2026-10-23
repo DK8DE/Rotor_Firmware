@@ -1,8 +1,10 @@
 #include "Rs485Dispatcher.h"
 #include "Version.h"
 
+#include <cmath>
 #include <math.h>
 #include <cstring>
+#include <Preferences.h>
 #include "RotorStore.h"
 
 // Vorwaertsdeklarationen (werden in dieser Datei spaeter definiert)
@@ -259,17 +261,21 @@ void Rs485Dispatcher::onFrame(const Rs485Frame& f, uint32_t nowMs) {
   //    verworfen und der Master sieht "kein ACK").
   if (!f.valid) {
     const uint8_t own = safeU8(_cfg.ownSlaveId, 0);
-    if (f.cmd.length() > 0 && f.slave == own) {
+    const bool forUs = (f.slave == own) || isIdAliasActive(f.slave, nowMs);
+    if (f.cmd.length() > 0 && forUs) {
+      _replySrc = f.slave;
       const int32_t expScaled = computeChecksumScaled100Local(f.master, f.slave, f.params);
       const String expStr = formatScaled100Local(expScaled);
       // Format: NAK_<CMD>:BADCHK:<expected>
       sendNak(f.master, f.cmd, String("BADCHK:") + expStr);
+      _replySrc = 0;
     }
     return;
   }
 
   // 3) Dispatch
   handleCommand(f, nowMs);
+  _replySrc = 0;
 }
 
 void Rs485Dispatcher::sendErrBroadcast(uint8_t errCode) {
@@ -302,16 +308,63 @@ void Rs485Dispatcher::processErrBroadcastRetry(uint32_t nowMs) {
 // Private: Senden
 // ============================================================================
 
+bool Rs485Dispatcher::isIdAliasActive(uint8_t id, uint32_t nowMs) const {
+  if (_idAliasPrev == 0 || _idAliasUntilMs == 0) return false;
+  if (id != _idAliasPrev) return false;
+  return (int32_t)(nowMs - _idAliasUntilMs) < 0;
+}
+
+void Rs485Dispatcher::armIdAlias(uint8_t oldId, uint32_t nowMs) {
+  if (oldId == 0 || oldId == 255) return;
+  _idAliasPrev = oldId;
+  _idAliasUntilMs = nowMs + 5000u; // 5 s: Master kann noch an alte ID senden
+}
+
 void Rs485Dispatcher::sendAck(uint8_t master, const String& cmd, const String& params) {
+  if (_localCapture) {
+    _localWasNak = false;
+    _localParams = params;
+    return;
+  }
   if (!_rs485) return;
-  const uint8_t ownId = safeU8(_cfg.ownSlaveId, 0);
-  _rs485->sendFrame(ownId, master, "ACK_" + cmd, params);
+  const uint8_t src = _replySrc ? _replySrc : safeU8(_cfg.ownSlaveId, 0);
+  _rs485->sendFrame(src, master, "ACK_" + cmd, params);
 }
 
 void Rs485Dispatcher::sendNak(uint8_t master, const String& cmd, const String& params) {
+  if (_localCapture) {
+    _localWasNak = true;
+    _localParams = params;
+    return;
+  }
   if (!_rs485) return;
-  const uint8_t ownId = safeU8(_cfg.ownSlaveId, 0);
-  _rs485->sendFrame(ownId, master, "NAK_" + cmd, params);
+  const uint8_t src = _replySrc ? _replySrc : safeU8(_cfg.ownSlaveId, 0);
+  _rs485->sendFrame(src, master, "NAK_" + cmd, params);
+}
+
+bool Rs485Dispatcher::dispatchLocal(const char* cmd, const char* params, String& outParams, uint32_t nowMs) {
+  outParams = "";
+  if (!cmd || !cmd[0]) {
+    outParams = "PARAM";
+    return false;
+  }
+
+  Rs485Frame f;
+  f.master = 1;
+  f.slave = safeU8(_cfg.ownSlaveId, 0);
+  f.cmd = String(cmd);
+  f.params = params ? String(params) : String();
+  f.valid = true;
+
+  _localCapture = true;
+  _localWasNak = true; // default: kein Reply = Fehler
+  _localParams = "NORESP";
+  handleCommand(f, nowMs);
+  outParams = _localParams;
+  const bool ok = !_localWasNak;
+  _localCapture = false;
+  _localParams = "";
+  return ok;
 }
 
 // ============================================================================
@@ -785,7 +838,7 @@ static bool buildInclinoSetTail(const IncCmdEntry& e, const String& params,
 
     case INC_PK_FLOAT: {
       const float v = parseFloatParam(params);
-      if (!isfinite(v)) return false;
+      if (!std::isfinite(v)) return false;
       // CALIB −180..180, FILTER 0.01..1 — Sensor validiert; hier nur Format.
       snprintf(buf, sizeof(buf), "SET%s,%.4f", e.sensorName, (double)v);
       outTail = buf;
@@ -852,11 +905,16 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   if (!_rs485 || !_safety || !_homing || !_motion) return;
 
   const uint8_t ownId = safeU8(_cfg.ownSlaveId, 0);
+  const bool viaAlias = isIdAliasActive(f.slave, nowMs);
 
-  // Adressierung: nur reagieren, wenn das Frame fuer uns ist.
-  if (!((f.slave == ownId) || (f.slave == 255))) return;
+  // Adressierung: eigene ID, Broadcast 255, oder kurz die vorherige ID nach ID-Wechsel.
+  if (!((f.slave == ownId) || (f.slave == 255) || viaAlias)) return;
+
+  // Gerichtete Antworten mit der adressierten SRC (wichtig bei Alias = alte ID).
+  _replySrc = (f.slave != 255) ? f.slave : ownId;
 
   // Broadcast: zur Sicherheit NICHT antworten (sonst Kollision, wenn spaeter mehrere Slaves existieren)
+  // Ausnahme: SETROTORID sendet gezielt ACK von der alten ID (siehe unten).
   const bool shouldReply = (f.slave != 255);
 
   String cmd = f.cmd;
@@ -944,7 +1002,7 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   //   Bewegung unbegrenzt lauffaehig halten koennten.
   // - Auch Legacy-SETPOSCC zaehlt als Keepalive (Master sendet das oft waehrend
   //   der Fahrt), auch wenn der Befehl selbst ignoriert wird.
-  if (f.slave == ownId) {
+  if (f.slave == ownId || viaAlias) {
     _lastGetPosCmdMs = nowMs;
   }
 
@@ -1199,6 +1257,59 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     return;
   }
 
+  // ------------------------------------------------------------------------
+  // GETSRVJOG / SETSRVJOG (Service-JOG: ohne Ref/Stall, nicht persistent)
+  // ------------------------------------------------------------------------
+  if (cmd == "GETSRVJOG") {
+    const bool on = (_cfg.serviceJog) ? *_cfg.serviceJog : false;
+    if (shouldReply) sendAck(f.master, "GETSRVJOG", on ? "1" : "0");
+    return;
+  }
+
+  if (cmd == "SETSRVJOG") {
+    if (!_cfg.serviceJog) {
+      if (shouldReply) sendNak(f.master, "SETSRVJOG", "NOHW");
+      return;
+    }
+    *_cfg.serviceJog = parseBoolParam(f.params);
+    if (!*_cfg.serviceJog && _motion) {
+      _motion->commandJogStop(nowMs);
+      _jogActive = false;
+      _jogDir = 0;
+    }
+    if (shouldReply) sendAck(f.master, "SETSRVJOG", "1");
+    serialEventState("SETSRVJOG");
+    return;
+  }
+
+  // ------------------------------------------------------------------------
+  // GETSETUP / SETSETUP (Inbetriebnahme: JOG ohne Amin/Amax, auch negativ)
+  // ------------------------------------------------------------------------
+  // Nicht persistent. SETSETUP:1 = Service aktiv, SETSETUP:0 = beendet.
+  // Zusaetzlich: JOG ohne Ref, Stall aus, GETPOSDG zeigt Rohwinkel.
+  if (cmd == "GETSETUP") {
+    const bool on = (_cfg.setupMode) ? *_cfg.setupMode : false;
+    if (shouldReply) sendAck(f.master, "GETSETUP", on ? "1" : "0");
+    return;
+  }
+
+  if (cmd == "SETSETUP") {
+    if (!_cfg.setupMode) {
+      if (shouldReply) sendNak(f.master, "SETSETUP", "NOHW");
+      return;
+    }
+    const bool on = parseBoolParam(f.params);
+    *_cfg.setupMode = on;
+    if (!on && _motion) {
+      _motion->commandJogStop(nowMs);
+      _jogActive = false;
+      _jogDir = 0;
+    }
+    if (shouldReply) sendAck(f.master, "SETSETUP", on ? "1" : "0");
+    serialEventState("SETSETUP");
+    return;
+  }
+
   if (cmd == "SETWLAN") {
     const uint32_t v = parseU32Param(f.params);
     if (!(v == 0 || v == 1)) {
@@ -1410,7 +1521,7 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     }
 
     // Safety-Clamp (nur um offensichtliche Ausreisser zu begrenzen)
-    if (!isfinite(kmh)) kmh = 0.0f;
+    if (!std::isfinite(kmh)) kmh = 0.0f;
     if (kmh < 0.0f) kmh = 0.0f;
     if (kmh > 250.0f) kmh = 250.0f;
 
@@ -1567,7 +1678,7 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   }
   if (cmd == "SETANTOFF1") {
     float v = parseFloatParam(f.params);
-    if (!isfinite(v)) v = 0.0f;
+    if (!std::isfinite(v)) v = 0.0f;
     if (v < 0.0f) v = 0.0f;
     if (v > 360.0f) v = 360.0f;
     v = roundf(v * 10.0f) / 10.0f;
@@ -1584,7 +1695,7 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   }
   if (cmd == "SETANTOFF2") {
     float v = parseFloatParam(f.params);
-    if (!isfinite(v)) v = 0.0f;
+    if (!std::isfinite(v)) v = 0.0f;
     if (v < 0.0f) v = 0.0f;
     if (v > 360.0f) v = 360.0f;
     v = roundf(v * 10.0f) / 10.0f;
@@ -1601,7 +1712,7 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   }
   if (cmd == "SETANTOFF3") {
     float v = parseFloatParam(f.params);
-    if (!isfinite(v)) v = 0.0f;
+    if (!std::isfinite(v)) v = 0.0f;
     if (v < 0.0f) v = 0.0f;
     if (v > 360.0f) v = 360.0f;
     v = roundf(v * 10.0f) / 10.0f;
@@ -1621,7 +1732,7 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   }
   if (cmd == "SETANGLE1") {
     float v = parseFloatParam(f.params);
-    if (!isfinite(v)) v = 0.0f;
+    if (!std::isfinite(v)) v = 0.0f;
     if (v < 0.0f) v = 0.0f;
     if (v > 360.0f) v = 360.0f;
     v = roundf(v * 10.0f) / 10.0f;
@@ -1638,7 +1749,7 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   }
   if (cmd == "SETANGLE2") {
     float v = parseFloatParam(f.params);
-    if (!isfinite(v)) v = 0.0f;
+    if (!std::isfinite(v)) v = 0.0f;
     if (v < 0.0f) v = 0.0f;
     if (v > 360.0f) v = 360.0f;
     v = roundf(v * 10.0f) / 10.0f;
@@ -1655,7 +1766,7 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   }
   if (cmd == "SETANGLE3") {
     float v = parseFloatParam(f.params);
-    if (!isfinite(v)) v = 0.0f;
+    if (!std::isfinite(v)) v = 0.0f;
     if (v < 0.0f) v = 0.0f;
     if (v > 360.0f) v = 360.0f;
     v = roundf(v * 10.0f) / 10.0f;
@@ -1705,6 +1816,35 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     persistPutBool("ad3", _cfg.antDp3, v);
     if (shouldReply) sendAck(f.master, "SETANTDP3", "1");
     serialEventState("SETANTDP3");
+    return;
+  }
+
+  // ------------------------------------------------------------------------
+  // GETMASTHEIGHT / SETMASTHEIGHT — Masthoehe in Metern (0..9999)
+  // Nur Identifikation fuer den Controller; persistent (FRAM Runtime + NVS "mast").
+  // Checksumme: (src+dst)*100 + hoehe*100
+  // Beispiel Master=0 Slave=20 Hoehe=25: #0:20:SETMASTHEIGHT:25:45$
+  // ------------------------------------------------------------------------
+  if (cmd == "GETMASTHEIGHT") {
+    float v = (_cfg.mastHeightM) ? *_cfg.mastHeightM : 0.0f;
+    if (!(v == v) || v < 0.0f) v = 0.0f;
+    if (v > 9999.0f) v = 9999.0f;
+    if (shouldReply) sendAck(f.master, "GETMASTHEIGHT", formatFloatComma(v, 1));
+    return;
+  }
+  if (cmd == "SETMASTHEIGHT") {
+    if (!_cfg.mastHeightM) {
+      if (shouldReply) sendNak(f.master, "SETMASTHEIGHT", "NOHW");
+      return;
+    }
+    float v = parseFloatParam(f.params);
+    if (!(v == v) || v < 0.0f || v > 9999.0f) {
+      if (shouldReply) sendNak(f.master, "SETMASTHEIGHT", "BADVAL");
+      return;
+    }
+    persistPutFloat("mast", _cfg.mastHeightM, v);
+    if (shouldReply) sendAck(f.master, "SETMASTHEIGHT", "1");
+    serialEventState("SETMASTHEIGHT");
     return;
   }
 
@@ -2625,8 +2765,13 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     if (shouldReply) {
       // Wichtig: Master sendet GETERR, wir antworten bewusst mit ACK_ERR
       // (kurz/lesbar und konsistent zu anderen ACKs).
-      const uint8_t own = safeU8(_cfg.ownSlaveId, 0);
-      _rs485->sendFrame(own, f.master, "ACK_ERR", String(err));
+      if (_localCapture) {
+        _localWasNak = false;
+        _localParams = String(err);
+      } else if (_rs485) {
+        const uint8_t own = safeU8(_cfg.ownSlaveId, 0);
+        _rs485->sendFrame(own, f.master, "ACK_ERR", String(err));
+      }
     }
     return;
   }
@@ -2752,9 +2897,11 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
       return;
     }
 
-    // Ohne Endschalter: JOG auch unreferenziert (CPR-Einmessfahrt erlaubt).
+    // Ohne Endschalter / Service-JOG / Setup: JOG auch unreferenziert.
     const bool allowUnrefJog = (safeU8(_cfg.endstopCount, 2) == 0);
-    if (!isRotorReferencedLocal(_cfg, _homing) && !allowUnrefJog) {
+    const bool serviceJog = (_cfg.serviceJog && *_cfg.serviceJog);
+    const bool setupMode = (_cfg.setupMode && *_cfg.setupMode);
+    if (!isRotorReferencedLocal(_cfg, _homing) && !allowUnrefJog && !serviceJog && !setupMode) {
       if (shouldReply) sendNak(f.master, "JOG", "NOREF");
       serialEventState("JOG_NOREF");
       return;
@@ -2937,22 +3084,36 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
 
   if (cmd == "SETID") {
     const uint8_t newId = parseU8Param(f.params);
+    // 0 und 255 sind ungueltig (255 = Broadcast-Adresse).
+    if (newId == 0 || newId == 255) {
+      if (shouldReply) sendNak(f.master, "SETID", "BADVAL");
+      return;
+    }
     const uint8_t oldId = safeU8(_cfg.ownSlaveId, 0);
 
     const bool changed = (_cfg.ownSlaveId && (*_cfg.ownSlaveId != newId));
     if (changed) {
-      // ACK mit alter ID senden
+      // ACK mit der adressierten ID (alte bzw. Alias), bevor wir umschalten
       if (shouldReply && _rs485) {
-        _rs485->sendFrame(oldId, f.master, "ACK_SETID", "1");
+        _rs485->sendFrame(_replySrc ? _replySrc : oldId, f.master, "ACK_SETID", "1");
       }
 
-      // Speichern + uebernehmen
-      // Persistente ID nur schreiben, wenn sie sich wirklich aendert (Flash schonen)
+      armIdAlias(oldId, nowMs);
       persistPutU8("id", _cfg.ownSlaveId, newId);
-
-      // Protokoll muss neue ID sofort kennen
+      // NVS-Spiegel als Boot-Fallback (auch wenn FRAM ok)
+      {
+        Preferences p;
+        if (p.begin("rotor", false)) {
+          p.putUChar("id", newId);
+          p.end();
+        }
+      }
       if (_rs485) _rs485->setOwnSlaveId(newId);
 
+      Serial.print("[ID] SETID ");
+      Serial.print((int)oldId);
+      Serial.print(" -> ");
+      Serial.println((int)newId);
       serialEventState("SETID");
       return;
     }
@@ -3038,7 +3199,10 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
   // SETROTORID (nur Broadcast 255)
   // ------------------------------------------------------------------------
   // Wenn die Slave-ID unbekannt ist: Master sendet an 255, Payload = neue ID.
-  // Gleiche Persistenz/Uebernahme wie SETID, aber ohne ACK (Bus-Kollisionen vermeiden).
+  // ACK von der ALTEN ID (Inbetriebnahme: genau ein Slave am Bus). Danach GETID
+  // an die NEUE Adresse. Alte ID bleibt ~5 s als Alias (SETID an alte Adresse).
+  // Checksumme: (src+255)*100 + newId*100.
+  // Beispiel Master=0, neue ID=21: #0:255:SETROTORID:21:276$
   if (cmd == "SETROTORID") {
     if (f.slave != 255) {
       if (shouldReply) sendNak(f.master, "SETROTORID", "NBCAST");
@@ -3046,14 +3210,52 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     }
 
     const uint8_t newId = parseU8Param(f.params);
-    const bool changed = (_cfg.ownSlaveId && (*_cfg.ownSlaveId != newId));
+    if (newId == 0 || newId == 255) {
+      // Kein NAK bei Broadcast (Kollision) — still verwerfen.
+      serialEventState("SETROTORID_BADVAL");
+      return;
+    }
+    if (!_cfg.ownSlaveId) {
+      serialEventState("SETROTORID_NOHW");
+      return;
+    }
+    const uint8_t oldId = *_cfg.ownSlaveId;
+    const bool changed = (oldId != newId);
     if (changed) {
+      // ACK zuerst von alter ID, dann umschalten (Master sieht Bestaetigung)
+      if (_rs485 && !_localCapture) {
+        _rs485->sendFrame(oldId, f.master, "ACK_SETROTORID", "1");
+      } else if (_localCapture) {
+        _localWasNak = false;
+        _localParams = "1";
+      }
+
+      armIdAlias(oldId, nowMs);
       persistPutU8("id", _cfg.ownSlaveId, newId);
+      {
+        Preferences p;
+        if (p.begin("rotor", false)) {
+          p.putUChar("id", newId);
+          p.end();
+        }
+      }
       if (_rs485) _rs485->setOwnSlaveId(newId);
+
+      Serial.print("[ID] SETROTORID ");
+      Serial.print((int)oldId);
+      Serial.print(" -> ");
+      Serial.println((int)newId);
       serialEventState("SETROTORID");
       return;
     }
 
+    // Bereits diese ID: trotzdem ACK von aktueller ID (Inbetriebnahme-Feedback)
+    if (_rs485 && !_localCapture) {
+      _rs485->sendFrame(oldId, f.master, "ACK_SETROTORID", "1");
+    } else if (_localCapture) {
+      _localWasNak = false;
+      _localParams = "1";
+    }
     serialEventState("SETROTORID");
     return;
   }
@@ -3685,6 +3887,111 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     }
     const long c = _cfg.encoderAxis->getCountsDefault();
     if (shouldReply) sendAck(f.master, "GETENCCOUNT", String((long)c));
+    return;
+  }
+
+  // Persistenz nach Count-/Winkel-Setzen (Typ 1/2 FRAM-POS; SSI Turn)
+  auto persistEncoderPosAfterSet = [&](long actualCounts) {
+    int32_t deg01 = 0;
+    // Ungeklemmt speichern, damit FRAM zum Count passt (auch 0 bei Count 0).
+    if (!_cfg.encoderAxis->getPositionDeg01(deg01, false)) deg01 = 0;
+
+    if (isSsiEncType(_cfg)) {
+      if (_cfg.store) {
+        (void)_cfg.store->saveSsiTurn(_cfg.encoderAxis->getSsiTurn(), deg01);
+      }
+      return deg01;
+    }
+
+    if (_cfg.store) {
+      if (_cfg.store->isPosHomeValid()) {
+        (void)_cfg.store->savePosSnapshot((int32_t)actualCounts, deg01);
+      } else {
+        const uint8_t ect = safeU8(_cfg.encTypeU8, 1);
+        const int32_t cpr = (ect == (uint8_t)ENCTYPE_MOTOR_AXIS)
+            ? safeI32(_cfg.homeExpectedCountsMotor, 0)
+            : safeI32(_cfg.homeExpectedCountsRing, 0);
+        const int32_t bl = safeI32(_cfg.backlashDeg01, 0);
+        (void)_cfg.store->savePosHome(
+            ect, cpr > 0 ? cpr : 0, bl, 0, (int32_t)actualCounts, deg01);
+      }
+    }
+    if (_homing) _homing->setReferenced(true);
+    return deg01;
+  };
+
+  auto applyEncoderCounts = [&](int32_t nv, const char* nakCmd) -> bool {
+    if (isSsiEncType(_cfg)) {
+      const int32_t cpr = _cfg.encoderAxis->getCountsPerRevActual();
+      if (nv < 0 || cpr <= 0 || nv >= (int32_t)(2 * cpr)) {
+        if (shouldReply) sendNak(f.master, nakCmd, "BADVAL");
+        return false;
+      }
+      const uint8_t turn = (nv >= cpr) ? 1 : 0;
+      const long pos = (long)(nv - (int32_t)turn * cpr);
+      _cfg.encoderAxis->loadSsiTurn(turn);
+      _cfg.encoderAxis->setCounts(pos);
+      return true;
+    }
+    _cfg.encoderAxis->setCounts((long)nv);
+    return true;
+  };
+
+  // SETENCCOUNT — Counts live setzen; Winkel folgt aus CPR; beides in FRAM
+  // Checksumme: (src+dst)*100 + count*100
+  // Beispiel Master=0, Slave=20, Counts=12345: #0:20:SETENCCOUNT:12345:12365$
+  if (cmd == "SETENCCOUNT") {
+    if (!_cfg.encoderAxis) {
+      if (shouldReply) sendNak(f.master, "SETENCCOUNT", "NOHW");
+      return;
+    }
+    if (isInclinoEncType(_cfg)) {
+      if (shouldReply) sendNak(f.master, "SETENCCOUNT", "ENCTYPE");
+      return;
+    }
+
+    const int32_t nv = parseI32Param(f.params);
+    if (!applyEncoderCounts(nv, "SETENCCOUNT")) return;
+
+    const long actual = isSsiEncType(_cfg)
+        ? _cfg.encoderAxis->getCountsExtended()
+        : _cfg.encoderAxis->getCountsDefault();
+    (void)persistEncoderPosAfterSet(actual);
+
+    // ACK = gesetzte Counts; Winkel folgt aus CPR → mit GETPOSDG prüfen
+    if (shouldReply) sendAck(f.master, "SETENCCOUNT", String((long)actual));
+    serialEventState("SETENCCOUNT");
+    return;
+  }
+
+  // SETPOSHERE — "Hier ist Winkel X": passende Counts setzen + FRAM
+  // Braucht gültiges CPR (SETENCCRI/SETENCCAX) und SETMAXDG.
+  // Checksumme wie SETPOSDG. Beispiel 0° Master=0 Slave=20: #0:20:SETPOSHERE:0,00:20$
+  if (cmd == "SETPOSHERE") {
+    if (!_cfg.encoderAxis) {
+      if (shouldReply) sendNak(f.master, "SETPOSHERE", "NOHW");
+      return;
+    }
+    if (isInclinoEncType(_cfg)) {
+      if (shouldReply) sendNak(f.master, "SETPOSHERE", "ENCTYPE");
+      return;
+    }
+
+    const int32_t wantDeg01 = parseDeg01FromParam(f.params);
+    int32_t counts = 0;
+    if (!_cfg.encoderAxis->deg01ToCountsExtended(wantDeg01, counts)) {
+      if (shouldReply) sendNak(f.master, "SETPOSHERE", "BADCPR");
+      return;
+    }
+    if (!applyEncoderCounts(counts, "SETPOSHERE")) return;
+
+    const long actual = isSsiEncType(_cfg)
+        ? _cfg.encoderAxis->getCountsExtended()
+        : _cfg.encoderAxis->getCountsDefault();
+    const int32_t deg01 = persistEncoderPosAfterSet(actual);
+
+    if (shouldReply) sendAck(f.master, "SETPOSHERE", formatDeg01ToString(deg01));
+    serialEventState("SETPOSHERE");
     return;
   }
 

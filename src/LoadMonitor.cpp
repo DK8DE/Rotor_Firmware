@@ -1,5 +1,6 @@
 #include "LoadMonitor.h"
 
+#include <cmath>
 #include <math.h>
 
 #include "SafetyMonitor.h"
@@ -143,7 +144,7 @@ float LoadMonitor::stageTargetPwm(uint8_t stage) const {
                   : (stage == 1) ? _cfg.calStagePwm2
                                  : _cfg.calStagePwm3;
 
-  float v = (p && isfinite(*p)) ? *p : CAL_STAGE_PWM[stage];
+  float v = (p && std::isfinite(*p)) ? *p : CAL_STAGE_PWM[stage];
   if (v < 1.0f) v = 1.0f;
   if (v > 100.0f) v = 100.0f;
   return v;

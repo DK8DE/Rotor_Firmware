@@ -17,6 +17,22 @@ const char* webAppFwVersion();
  */
 void webAppFillLiveJson(char* buf, size_t buflen, const char* ssid, const char* ip);
 
+/** Setup-Wizard: kompletter Ist-Zustand als JSON. */
+void webAppFillSetupStateJson(char* buf, size_t buflen);
+
+/**
+ * Setup-Wizard Apply: RS485-Kommando lokal ausfuehren.
+ * bodyJson: {"cmd":"SETMINPWM","params":"40"} (params optional)
+ * outJson: {"ok":true,"v":"..."} oder {"ok":false,"err":"..."}
+ */
+void webAppSetupApplyJson(const char* bodyJson, char* outJson, size_t outLen);
+
+/**
+ * Setup-Wizard JOG: dir 0/1/2 (aktiviert bei Bedarf Service-JOG).
+ * outJson wie Apply.
+ */
+void webAppSetupJog(uint8_t dir, char* outJson, size_t outLen);
+
 /** Neustart anfordern (bestehender g_restartRequested-Pfad). */
 void webAppRequestReboot();
 

@@ -199,7 +199,10 @@ void RotorStore::packConfigFromRefs(RotorPersistConfig& out) const {
 void RotorStore::unpackConfigToRefs(const RotorPersistConfig& in) {
   RotorStoreRefs& r = _refs;
 
-  if (r.slaveId) *r.slaveId = in.slaveId;
+  // 0/255 sind ungueltig (255=Broadcast). Alte/leere FRAM-Werte nicht uebernehmen.
+  if (r.slaveId) {
+    if (in.slaveId != 0 && in.slaveId != 255) *r.slaveId = in.slaveId;
+  }
   if (r.rotorType) *r.rotorType = in.rotorType;
   if (r.antSelect) *r.antSelect = in.antSelect;
   if (r.encType) {
@@ -371,6 +374,30 @@ void RotorStore::applyLoadClamps() {
   if (r.antName1 && r.antName1->length() > 9) *r.antName1 = r.antName1->substring(0, 9);
   if (r.antName2 && r.antName2->length() > 9) *r.antName2 = r.antName2->substring(0, 9);
   if (r.antName3 && r.antName3->length() > 9) *r.antName3 = r.antName3->substring(0, 9);
+
+  if (r.mastHeightM) {
+    float h = *r.mastHeightM;
+    if (!(h == h) || h < 0.0f) h = 0.0f; // NaN-Schutz
+    if (h > 9999.0f) h = 9999.0f;
+    *r.mastHeightM = h;
+  }
+}
+
+void RotorStore::packRuntimeFromRefs() {
+  if (_refs.mastHeightM) {
+    float h = *_refs.mastHeightM;
+    if (!(h == h) || h < 0.0f) h = 0.0f;
+    if (h > 9999.0f) h = 9999.0f;
+    _rtCache.mastHeightM = h;
+  }
+}
+
+void RotorStore::unpackRuntimeToRefs() {
+  if (!_refs.mastHeightM) return;
+  float h = _rtCache.mastHeightM;
+  if (!(h == h) || h < 0.0f) h = 0.0f;
+  if (h > 9999.0f) h = 9999.0f;
+  *_refs.mastHeightM = h;
 }
 
 bool RotorStore::writeDefaultsFromRefs() {
@@ -378,6 +405,7 @@ bool RotorStore::writeDefaultsFromRefs() {
   memset(&_calCache, 0, sizeof(_calCache));
   memset(&_rtCache, 0, sizeof(_rtCache));
   _rtCache.ssiLastDeg01 = -1;
+  packRuntimeFromRefs();
   return writeAllSections();
 }
 
@@ -459,9 +487,11 @@ bool RotorStore::migrateFromPreferences(Preferences& prefs) {
   if (r.antName3) *r.antName3 = prefs.getString("an3", *r.antName3);
   if (r.windEnable) *r.windEnable = prefs.getBool("wen", *r.windEnable);
   if (r.pwmMaxAbsNv) *r.pwmMaxAbsNv = prefs.getFloat("maxp", *r.pwmMaxAbsNv);
+  if (r.mastHeightM) *r.mastHeightM = prefs.getFloat("mast", *r.mastHeightM);
 
   applyLoadClamps();
   packConfigFromRefs(_cfgCache);
+  packRuntimeFromRefs();
 
   // Cal
   memset(&_calCache, 0, sizeof(_calCache));
@@ -523,6 +553,7 @@ bool RotorStore::begin(TwoWire& wire, const RotorStoreRefs& refs) {
   if (valid) {
     _amaxExplicit = (_cfgCache.flags & FRAM_CFG_F_AMAX_EXPLICIT) != 0;
     unpackConfigToRefs(_cfgCache);
+    unpackRuntimeToRefs();
     applyLoadClamps();
     (void)readPosSection(); // optional; ungueltig = noch nie gehomed
     _ok = true;
@@ -543,6 +574,7 @@ bool RotorStore::begin(TwoWire& wire, const RotorStoreRefs& refs) {
     }
     prefs.end();
     unpackConfigToRefs(_cfgCache);
+    unpackRuntimeToRefs();
     applyLoadClamps();
     _ok = true;
     Serial.println("FRAM: migration done");
@@ -564,6 +596,7 @@ bool RotorStore::begin(TwoWire& wire, const RotorStoreRefs& refs) {
 void RotorStore::loadIntoGlobals() {
   if (!_ok) return;
   unpackConfigToRefs(_cfgCache);
+  unpackRuntimeToRefs();
   applyLoadClamps();
 }
 
@@ -571,6 +604,7 @@ bool RotorStore::saveConfig() {
   if (!_ok) return false;
   _amaxExplicit = true; // nach explizitem SET immer gesetzt
   packConfigFromRefs(_cfgCache);
+  packRuntimeFromRefs();
   return writeAllSections();
 }
 

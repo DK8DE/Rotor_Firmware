@@ -102,6 +102,39 @@ static void handleStatus() {
   sendJson(200, buf);
 }
 
+static void handleSetupState() {
+  if (!checkAuth()) return;
+  static char buf[3072];
+  webAppFillSetupStateJson(buf, sizeof(buf));
+  sendJson(200, buf);
+}
+
+static void handleSetupApply() {
+  if (!checkAuth()) return;
+  if (g_server == nullptr) return;
+  const String body = g_server->arg("plain");
+  char out[256];
+  webAppSetupApplyJson(body.c_str(), out, sizeof(out));
+  sendJson(200, out);
+}
+
+static void handleSetupJog() {
+  if (!checkAuth()) return;
+  if (g_server == nullptr) return;
+  const String body = g_server->arg("plain");
+  uint8_t dir = 0;
+  const int idx = body.indexOf("\"dir\"");
+  if (idx >= 0) {
+    const int colon = body.indexOf(':', idx);
+    if (colon >= 0) {
+      dir = (uint8_t)body.substring(colon + 1).toInt();
+    }
+  }
+  char out[128];
+  webAppSetupJog(dir, out, sizeof(out));
+  sendJson(200, out);
+}
+
 static void handleUpdateInfo() {
   if (!checkAuth()) return;
   const esp_partition_t* running = esp_ota_get_running_partition();
@@ -285,6 +318,9 @@ void webUiBegin(const char* ssid, const char* password) {
                  []() { handleUpdateUpload(); });
     g_server->on("/api/reboot", HTTP_POST, handleReboot);
     g_server->on("/api/factory", HTTP_POST, handleFactory);
+    g_server->on("/api/setup/state", HTTP_GET, handleSetupState);
+    g_server->on("/api/setup/apply", HTTP_POST, handleSetupApply);
+    g_server->on("/api/setup/jog", HTTP_POST, handleSetupJog);
 
     g_server->on("/generate_204", HTTP_GET, handleCaptiveOk);
     g_server->on("/gen_204", HTTP_GET, handleCaptiveOk);

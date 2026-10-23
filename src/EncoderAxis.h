@@ -161,7 +161,9 @@ public:
   bool consumeSsiTurnDirty(uint32_t nowMs, bool standstill = true);
   void clearSsiTurnDirty();                // nach erfolgreichem NVS-Write
 
-  bool getPositionDeg01(int32_t& outDeg01) const;
+  // clampToAxis=true: auf [0..amax] begrenzen (Normalbetrieb).
+  // false: Rohwinkel aus Counts (Setup/Einmessen, auch negativ / >amax).
+  bool getPositionDeg01(int32_t& outDeg01, bool clampToAxis = true) const;
   bool deg01ToCounts(int32_t deg01, int32_t& outCounts) const;
   // SSI: Ziel in fortlaufende Counts (inkl. Turn)
   bool deg01ToCountsExtended(int32_t deg01, int32_t& outCounts) const;

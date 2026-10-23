@@ -1,6 +1,7 @@
 #include "HalBoard.h"
 
 #include <Wire.h>
+#include <cmath>
 #include <math.h>
 #include <cstring>
 
@@ -510,7 +511,7 @@ bool HalBoard::inclinoPollOnce(uint32_t nowMs) {
 
   payload.replace(",", ".");
   const float deg = payload.toFloat();
-  if (!isfinite(deg)) return false;
+  if (!std::isfinite(deg)) return false;
 
   const int32_t deg01 = (int32_t)lroundf(deg * 100.0f);
   portENTER_CRITICAL(&_inclinoStateMux);

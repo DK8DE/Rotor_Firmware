@@ -1,12 +1,14 @@
 #include "TempSensors.h"
 
+#include <cmath>
+
 // ----------------------------------------------------------------------------
 // Helper: Float -> 0,01C
 // ----------------------------------------------------------------------------
 static int32_t floatToScaled100(float tC) {
   // Schutz: bei ungueltigen Werten (NaN) liefert Arduino typischerweise NaN.
   // Wir behandeln das hier als 0.
-  if (isnan(tC)) return 0;
+  if (std::isnan(tC)) return 0;
   // Grobe Plausibilitaet: DS18B20 kann -55..125C.
   if (tC < -100.0f || tC > 200.0f) return 0;
   // Rundung auf 0,01C

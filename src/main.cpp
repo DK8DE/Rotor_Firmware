@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <cmath>
 #include <math.h>
 #include <string.h>
 
@@ -93,6 +94,12 @@ static uint32_t g_restartAtMs = 0;
 // SoftAP-Web-UI (SETWLAN); nach Reboot immer aus, nicht in FRAM/NVS.
 static bool g_wlanWanted = false;
 static bool g_wlanActive = false;
+
+// Service-JOG (nicht persistent): JOG ohne Ref/Stall; nach Reboot/SoftAP-Ende aus.
+static bool g_serviceJog = false;
+
+// Setup-Modus (nicht persistent): SETSETUP — JOG ohne Achsgrenzen (auch negativ).
+static bool g_setupMode = false;
 
 // ============================================================================
 // Einheiten-Konventionen (wichtig fuer alle Einstellwerte)
@@ -625,6 +632,9 @@ static bool g_windEnable = true;
 // Der Offset wird in Preferences gespeichert, damit er nach Neustart erhalten bleibt.
 static float g_anemoOffsetKmh = 0.0f;
 
+// Masthoehe in Metern (0..9999), nur Identifikation fuer den Controller — persistent FRAM.
+static float g_mastHeightM = 0.0f;
+
 // Windrichtung-Offset (Grad) fuer den RS485 Wind-/Richtungssensor.
 // Wird bei Montage einmalig per SETWINDDIROF gesetzt und im NVS gespeichert.
 static float g_windDirOffsetDeg = 0.0f;
@@ -887,6 +897,7 @@ static RotorStoreRefs makeStoreRefs() {
   r.calStagePwm2 = &g_calStagePwm2;
   r.calStagePwm3 = &g_calStagePwm3;
   r.anemoOffsetKmh = &g_anemoOffsetKmh;
+  r.mastHeightM = &g_mastHeightM;
   r.windDirOffsetDeg = &g_windDirOffsetDeg;
   r.antOffset1Deg = &g_antOffset1Deg;
   r.antOffset2Deg = &g_antOffset2Deg;
@@ -973,6 +984,217 @@ void webAppFillLiveJson(char* buf, size_t buflen, const char* ssid, const char* 
            ssid ? ssid : "", ip ? ip : "", uid);
 }
 
+static bool webJsonGetStr(const char* json, const char* key, char* out, size_t outLen) {
+  if (!json || !key || !out || outLen < 2) return false;
+  out[0] = 0;
+  char pat[48];
+  snprintf(pat, sizeof(pat), "\"%s\"", key);
+  const char* p = strstr(json, pat);
+  if (!p) return false;
+  p = strchr(p + strlen(pat), ':');
+  if (!p) return false;
+  p++;
+  while (*p == ' ' || *p == '\t') p++;
+  if (*p != '"') return false;
+  p++;
+  size_t i = 0;
+  while (*p && *p != '"' && i + 1 < outLen) {
+    if (*p == '\\' && p[1]) p++;
+    out[i++] = *p++;
+  }
+  out[i] = 0;
+  return true;
+}
+
+static bool webJsonGetNumStr(const char* json, const char* key, char* out, size_t outLen) {
+  if (!json || !key || !out || outLen < 2) return false;
+  out[0] = 0;
+  char pat[48];
+  snprintf(pat, sizeof(pat), "\"%s\"", key);
+  const char* p = strstr(json, pat);
+  if (!p) return false;
+  p = strchr(p + strlen(pat), ':');
+  if (!p) return false;
+  p++;
+  while (*p == ' ' || *p == '\t') p++;
+  if (*p == '"') return webJsonGetStr(json, key, out, outLen);
+  size_t i = 0;
+  while (*p && *p != ',' && *p != '}' && *p != ' ' && i + 1 < outLen) {
+    out[i++] = *p++;
+  }
+  out[i] = 0;
+  return i > 0;
+}
+
+static void webJsonEscape(const String& in, char* out, size_t outLen) {
+  if (!out || outLen < 1) return;
+  size_t o = 0;
+  for (size_t i = 0; i < in.length() && o + 2 < outLen; i++) {
+    const char c = in[i];
+    if (c == '"' || c == '\\') {
+      if (o + 3 >= outLen) break;
+      out[o++] = '\\';
+      out[o++] = c;
+    } else if ((uint8_t)c < 0x20) {
+      continue;
+    } else {
+      out[o++] = c;
+    }
+  }
+  out[o] = 0;
+}
+
+static bool webLocalCmd(const char* cmd, const char* params, String& out) {
+  return rs485Dispatcher.dispatchLocal(cmd, params ? params : "", out, millis());
+}
+
+void webAppFillSetupStateJson(char* buf, size_t buflen) {
+  if (!buf || buflen < 64) return;
+
+  String errS, warnS, verS;
+  (void)webLocalCmd("GETERR", "", errS);
+  (void)webLocalCmd("GETWARN", "", warnS);
+  (void)webLocalCmd("GETVERSION", "", verS);
+
+  float angle = 0.0f;
+  int32_t deg01 = 0;
+  if (motion.getCurrentPositionDeg01(deg01)) {
+    angle = (float)(deg01 + g_dgCalDeg01) / 100.0f;
+  }
+
+  const bool windEn = board.getWindEnable();
+  float windKmh = 0.0f;
+  float windDir = 0.0f;
+  if (windEn) {
+    (void)board.getWindSpeedKmh(windKmh);
+    (void)board.getWindDirDeg(windDir);
+  }
+
+  const int32_t cpr = (g_encType == ENCTYPE_MOTOR_AXIS)
+                          ? g_homeExpectedCountsMotor
+                          : g_homeExpectedCountsRing;
+  const long encCount = encoder.getCountsDefault();
+  const bool moving =
+      motion.isMotionActive() || (homing.isActive());
+
+  char an1[24], an2[24], an3[24];
+  webJsonEscape(g_antName1, an1, sizeof(an1));
+  webJsonEscape(g_antName2, an2, sizeof(an2));
+  webJsonEscape(g_antName3, an3, sizeof(an3));
+
+  char errEsc[48], warnEsc[96], verEsc[24];
+  webJsonEscape(errS, errEsc, sizeof(errEsc));
+  webJsonEscape(warnS, warnEsc, sizeof(warnEsc));
+  webJsonEscape(verS.length() ? verS : String(FW_VERSION_STRING), verEsc, sizeof(verEsc));
+
+  // Typ-4 INC Istwerte (best effort; Timeout -> leer)
+  char incSwap[8] = "";
+  char incCal[24] = "";
+  char incMount[8] = "";
+  char incFilt[16] = "";
+  char incLim[8] = "";
+  char incWlan[8] = "";
+  char incInvRef[8] = "";
+  char incInvSen[8] = "";
+  char incInvRot[8] = "";
+  if (g_encType == ENCTYPE_INCLINOMETER) {
+    String s;
+    if (webLocalCmd("GETINCSWAPXY", "", s)) { strncpy(incSwap, s.c_str(), sizeof(incSwap) - 1); }
+    if (webLocalCmd("GETINCCAL", "", s)) { strncpy(incCal, s.c_str(), sizeof(incCal) - 1); }
+    if (webLocalCmd("GETINCMOUNT", "", s)) { strncpy(incMount, s.c_str(), sizeof(incMount) - 1); }
+    if (webLocalCmd("GETINCFILT", "", s)) { strncpy(incFilt, s.c_str(), sizeof(incFilt) - 1); }
+    if (webLocalCmd("GETINCLIM180", "", s)) { strncpy(incLim, s.c_str(), sizeof(incLim) - 1); }
+    if (webLocalCmd("GETINCWLAN", "", s)) { strncpy(incWlan, s.c_str(), sizeof(incWlan) - 1); }
+    if (webLocalCmd("GETINCINVREF", "", s)) { strncpy(incInvRef, s.c_str(), sizeof(incInvRef) - 1); }
+    if (webLocalCmd("GETINCINVSEN", "", s)) { strncpy(incInvSen, s.c_str(), sizeof(incInvSen) - 1); }
+    if (webLocalCmd("GETINCINVROT", "", s)) { strncpy(incInvRot, s.c_str(), sizeof(incInvRot) - 1); }
+  }
+
+  snprintf(
+      buf, buflen,
+      "{"
+      "\"fw\":\"%s\",\"err\":\"%s\",\"warn\":\"%s\","
+      "\"encType\":%u,\"endstc\":%u,\"rotorType\":%u,"
+      "\"amin\":%.2f,\"amax\":%.2f,\"arrtol\":%.2f,"
+      "\"minPwm\":%.1f,\"iwarn\":%lu,\"imax\":%lu,"
+      "\"homePwm\":%.1f,\"homeSeekPwm\":%.1f,\"ramp\":%.1f,"
+      "\"windEn\":%d,\"windKmh\":%.1f,\"windDir\":%.1f,\"windDirOf\":%.1f,"
+      "\"tempA\":%.1f,\"tempM\":%.1f,\"swapTmp\":%d,"
+      "\"cpr\":%ld,\"encCount\":%ld,\"ref\":%d,\"homing\":%d,\"move\":%d,"
+      "\"srvJog\":%d,\"pos\":%.2f,\"dgcal\":%.2f,"
+      "\"ant1\":\"%s\",\"ant2\":\"%s\",\"ant3\":\"%s\","
+      "\"incSwapXY\":\"%s\",\"incCal\":\"%s\",\"incMount\":\"%s\","
+      "\"incFilt\":\"%s\",\"incLim180\":\"%s\",\"incWlan\":\"%s\","
+      "\"incInvRef\":\"%s\",\"incInvSen\":\"%s\",\"incInvRot\":\"%s\""
+      "}",
+      verEsc, errEsc, warnEsc,
+      (unsigned)g_encType, (unsigned)g_endstopCount, (unsigned)g_rotorType,
+      (double)g_axisMinDeg01 / 100.0, (double)g_axisMaxDeg01 / 100.0,
+      (double)g_arriveTolDeg01 / 100.0,
+      (double)g_minPwm, (unsigned long)g_isSoftWarnMv, (unsigned long)g_isHardStopMv,
+      (double)g_homeFastPwmPercent, (double)g_homeSeekMinPwmPercent, (double)g_rampDistDeg,
+      windEn ? 1 : 0, (double)windKmh, (double)windDir, (double)g_windDirOffsetDeg,
+      (double)temps.getAmbientC(), (double)temps.getMotorC(), g_tempSwapSensors ? 1 : 0,
+      (long)cpr, (long)encCount, isRotorReferenced() ? 1 : 0, homing.isActive() ? 1 : 0,
+      moving ? 1 : 0, g_serviceJog ? 1 : 0, (double)angle, (double)g_dgCalDeg01 / 100.0,
+      an1, an2, an3,
+      incSwap, incCal, incMount, incFilt, incLim, incWlan, incInvRef, incInvSen, incInvRot);
+}
+
+void webAppSetupApplyJson(const char* bodyJson, char* outJson, size_t outLen) {
+  if (!outJson || outLen < 16) return;
+  char cmd[48] = {0};
+  char params[96] = {0};
+  if (!webJsonGetStr(bodyJson, "cmd", cmd, sizeof(cmd)) || !cmd[0]) {
+    snprintf(outJson, outLen, "{\"ok\":false,\"err\":\"PARAM\"}");
+    return;
+  }
+  (void)webJsonGetStr(bodyJson, "params", params, sizeof(params));
+  if (!params[0]) {
+    (void)webJsonGetNumStr(bodyJson, "params", params, sizeof(params));
+  }
+  // Auch "v" als Alias fuer params akzeptieren
+  if (!params[0]) {
+    if (!webJsonGetStr(bodyJson, "v", params, sizeof(params))) {
+      (void)webJsonGetNumStr(bodyJson, "v", params, sizeof(params));
+    }
+  }
+
+  String resp;
+  const bool ok = webLocalCmd(cmd, params, resp);
+  char esc[128];
+  webJsonEscape(resp, esc, sizeof(esc));
+  if (ok) {
+    snprintf(outJson, outLen, "{\"ok\":true,\"v\":\"%s\"}", esc);
+  } else {
+    snprintf(outJson, outLen, "{\"ok\":false,\"err\":\"%s\"}", esc[0] ? esc : "ERR");
+  }
+}
+
+void webAppSetupJog(uint8_t dir, char* outJson, size_t outLen) {
+  if (!outJson || outLen < 16) return;
+  if (dir > 2) {
+    snprintf(outJson, outLen, "{\"ok\":false,\"err\":\"PARAM\"}");
+    return;
+  }
+  if (dir != 0) {
+    g_serviceJog = true;
+    g_setupMode = true; // SoftAP-Inbetriebnahme: JOG auch unter Amin
+  }
+  char p[4];
+  snprintf(p, sizeof(p), "%u", (unsigned)dir);
+  String resp;
+  const bool ok = webLocalCmd("JOG", p, resp);
+  char esc[64];
+  webJsonEscape(resp, esc, sizeof(esc));
+  if (ok) {
+    snprintf(outJson, outLen, "{\"ok\":true,\"v\":\"%s\",\"srvJog\":%d,\"setup\":%d}",
+             esc, g_serviceJog ? 1 : 0, g_setupMode ? 1 : 0);
+  } else {
+    snprintf(outJson, outLen, "{\"ok\":false,\"err\":\"%s\"}", esc[0] ? esc : "ERR");
+  }
+}
+
 void webAppRequestReboot() {
   g_restartRequested = true;
   g_restartAtMs = millis() + 300;
@@ -1003,6 +1225,8 @@ void webAppFactoryReset() {
 void webAppOnSoftApAutoOff() {
   g_wlanWanted = false;
   g_wlanActive = false;
+  g_serviceJog = false;
+  g_setupMode = false;
 }
 
 static void updateSoftApFromWanted() {
@@ -1021,6 +1245,8 @@ static void updateSoftApFromWanted() {
     }
   } else if (!want && on) {
     webUiEnd();
+    g_serviceJog = false;
+    g_setupMode = false;
     if (g_debug) Serial.println("[WLAN] SoftAP aus");
   }
   g_wlanActive = webUiIsActive();
@@ -1042,7 +1268,7 @@ void setup() {
   delay(25); // Pullups kurz stabilisieren lassen
 
   // ------------------------------------------------------------------------
-  // Werksreset per Hardware: Beide Handspeed-Taster beim Boot gedrueckt halten
+  // Werksreset per Hardware: Beide Service-Taster beim Boot gedrueckt halten
   // -> FRAM-Header invalidieren + Rest-NVS leeren -> Neustart (Defaults)
   // ------------------------------------------------------------------------
   if (board.readServiceLeft() && board.readServiceRight()) {
@@ -1065,6 +1291,14 @@ void setup() {
     delay(250);
     ESP.restart();
     return;
+  }
+
+  // SoftAP beim Boot: linken Service-Taster (GPIO47) gedrueckt halten.
+  // (Beide Taster = Werksreset oben; hier nur links.)
+  if (board.readServiceLeft()) {
+    g_wlanWanted = true;
+    board.setLed(true);
+    Serial.println("[WLAN] SoftAP angefordert (GPIO47 beim Boot)");
   }
 
   // FRAM laden / aus NVS migrieren / Defaults schreiben
@@ -1385,6 +1619,8 @@ void setup() {
   mcfg.axisWrapEnabled = &g_axisWrapEnabled;
   mcfg.axisMinDeg01 = &g_axisMinDeg01;
   mcfg.axisMaxDeg01 = &g_axisMaxDeg01;
+  mcfg.serviceJog = &g_serviceJog;
+  mcfg.setupMode = &g_setupMode;
 
   motion.begin(&board, &motor, &encoder, &homing, mcfg);
 
@@ -1526,6 +1762,9 @@ dcfg.pwmMaxAbsStored    = &g_pwmMaxAbsNv;
 // Anemometer-Offset (km/h)
 dcfg.anemoOffsetKmh     = &g_anemoOffsetKmh;
 
+// Masthoehe (m)
+dcfg.mastHeightM        = &g_mastHeightM;
+
 // Windrichtung-Offset (Grad)
 dcfg.windDirOffsetDeg   = &g_windDirOffsetDeg;
 
@@ -1562,12 +1801,11 @@ dcfg.encoderAxis = &encoder;
 dcfg.restartRequested = &g_restartRequested;
 dcfg.restartAtMs      = &g_restartAtMs;
 
-// SoftAP-Web-UI (SETWLAN/GETWLAN)
+// SoftAP-Web-UI (SETWLAN/GETWLAN) + Service-JOG
 dcfg.wlanWanted = &g_wlanWanted;
 dcfg.wlanActive = &g_wlanActive;
-
-
-
+dcfg.serviceJog = &g_serviceJog;
+dcfg.setupMode = &g_setupMode;
 
   // Temperatur / LoadMonitor / Kalibrierung
   dcfg.tempWarnAmbientC = &g_tempWarnAmbientC;
@@ -1673,11 +1911,11 @@ dcfg.wlanActive = &g_wlanActive;
 // Dadurch wirkt eine neue Geschwindigkeit immer weich (auch im Cruise),
 // ohne die Feinphase (Creep) zu beeinflussen.
 static float applySlewPercent(float target, float current, uint32_t dtMs, float slewPerSec) {
-  if (!isfinite(target)) target = current;
-  if (!isfinite(current)) current = target;
+  if (!std::isfinite(target)) target = current;
+  if (!std::isfinite(current)) current = target;
 
   if (dtMs == 0) return current;
-  if (!isfinite(slewPerSec) || slewPerSec <= 0.0f) return current;
+  if (!std::isfinite(slewPerSec) || slewPerSec <= 0.0f) return current;
 
   const float maxStep = slewPerSec * ((float)dtMs / 1000.0f);
   float delta = target - current;
@@ -1694,7 +1932,7 @@ static void updatePwmMaxApplied(uint32_t dtMs) {
   const float slewPerSec = 10.0f;
 
   float target = g_pwmMaxAbsCmd;
-  if (!isfinite(target)) target = g_pwmMaxAbs;
+  if (!std::isfinite(target)) target = g_pwmMaxAbs;
 
   // Grenzen 0..100%
   if (target < 0.0f) target = 0.0f;
@@ -2054,6 +2292,8 @@ void loop() {
   // Stall-Erkennung darf waehrend STOP-/Richtungswechsel-Bremssequenzen nicht ausloesen.
   // Sonst kann es passieren, dass bei auslaufender PWM noch > Stall-Schwelle ist,
   // aber nur wenige Counts kommen (gewollt), und trotzdem SE_STALL gelatcht wird.
+  // Service-JOG / Setup: Stall aus (Einmessen ohne Encoder-Gueltigkeit).
+  safety.setStallMonitorEnabled(g_stallMonitorEnabled && !g_serviceJog && !g_setupMode);
   const float safeDuty = safety.update(nowMs, desiredDutyForSafety, rsMotionActive, lastMotionCmdMs, safetyEncCounts);
 
   // Motoransteuerung (Safety wirkt jetzt auch im Homing!)

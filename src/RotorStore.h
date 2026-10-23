@@ -146,7 +146,9 @@ struct RotorPersistRuntime {
   uint8_t  ssiTurn;
   uint8_t  reserved[3];
   int32_t  ssiLastDeg01;
-  uint8_t  pad[248]; // Rest der Runtime-Page bis POS
+  // CRC deckt nur die ersten 8 Byte ab — Mastheight darf hier wachsen ohne Layout-Bruch.
+  float    mastHeightM;    // Masthoehe in m, 0..9999
+  uint8_t  pad[244];       // Rest der Runtime-Page bis POS
 };
 static_assert(sizeof(RotorPersistRuntime) == (FRAM_OFF_POS - FRAM_OFF_RUNTIME), "runtime size");
 
@@ -232,6 +234,7 @@ struct RotorStoreRefs {
   float*    angle2Deg = nullptr;
   float*    angle3Deg = nullptr;
   float*    pwmMaxAbsNv = nullptr;
+  float*    mastHeightM = nullptr; // Masthoehe m, 0..9999 (FRAM Runtime)
 
   bool*     homeReturnToZero = nullptr;
   bool*     stallMonitorEnabled = nullptr;
@@ -318,6 +321,8 @@ private:
 
   void packConfigFromRefs(RotorPersistConfig& out) const;
   void unpackConfigToRefs(const RotorPersistConfig& in);
+  void packRuntimeFromRefs();
+  void unpackRuntimeToRefs();
   void applyLoadClamps();
 
   bool migrateFromPreferences(Preferences& prefs);

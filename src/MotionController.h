@@ -56,6 +56,13 @@ struct MotionConfigPointers {
   const bool*    axisWrapEnabled = nullptr;            // false = linearer Fehler
   const int32_t* axisMinDeg01    = nullptr;            // z.B. 0
   const int32_t* axisMaxDeg01    = nullptr;            // z.B. 36000
+
+  // Service-JOG: JOG auch ohne Referenz / Encoder-Gueltigkeit
+  const bool*    serviceJog      = nullptr;
+
+  // Setup-Modus (SETSETUP): JOG ohne Amin/Amax-Stopp (auch negativ),
+  // ohne Ref/Stall — fuer Einmessen ohne Endschalter.
+  const bool*    setupMode       = nullptr;
 };
 
 

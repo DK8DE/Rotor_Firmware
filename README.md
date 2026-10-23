@@ -1,6 +1,6 @@
 # Rotor_Firmware
 
-**Version: 1.8.1**
+**Version: 1.9.6**
 
 Firmware für einen motorisierten Antennenrotor auf Basis des ESP32-S3 (PlatformIO/Arduino).
 
@@ -25,14 +25,16 @@ Die Firmware läuft auf der Steuerhardware und bietet unter anderem:
 - **Last-/Baseline-Analyse** (LoadMonitor, Kalibrierfahrt über eine Getriebe-Umdrehung)
 - **Sicherheitsfunktionen**: Stall-Erkennung, Endschalter, Deadman/Keepalive
 - **Persistente Parameter** über NVS/Preferences
-- **SoftAP-Konfigurationsseite** (`SETWLAN`): Status, HTTP-OTA-Update, Reboot/Werksreset (Hotspot `Rotor_<UID>`, nicht persistent)
+- **SoftAP-Konfigurationsseite** (`SETWLAN`): Status, geführte **Inbetriebnahme (Setup)**, HTTP-OTA-Update, Reboot/Werksreset (Hotspot `Rotor_<UID>`, nicht persistent)
+- **Service-JOG** (`SETSRVJOG`): JOG ohne Referenz/Stall für CPR-Einmessen (Deadman bleibt; nicht persistent)
+- **Setup-Modus** (`SETSETUP`): JOG ohne Amin/Amax (auch negativ) für Einmessen ohne Endschalter; Unref + Stall aus; nicht persistent
 
 ## Versionierung
 
 Die Firmware-Versionsnummer (Semantic Versioning: `MAJOR.MINOR.PATCH`) wird an **einer** zentralen Stelle gepflegt: [`src/Version.h`](src/Version.h).
 
-- Wird beim Boot unabhängig von `g_debug` einmal über USB-Serial ausgegeben (`Rotor_Firmware v1.8.1`).
-- Über RS485 per **`GETVERSION`** abfragbar (`ACK_GETVERSION:1.8.1`).
+- Wird beim Boot unabhängig von `g_debug` einmal über USB-Serial ausgegeben (`Rotor_Firmware v1.9.6`).
+- Über RS485 per **`GETVERSION`** abfragbar (`ACK_GETVERSION:1.9.6`).
 - `build.ps1` liest die Version aus `src/Version.h` und übernimmt sie in `IMGs/manifest.json` (Feld `version`).
 
 ### Version setzen (`build.ps1 -Version`)
@@ -40,12 +42,12 @@ Die Firmware-Versionsnummer (Semantic Versioning: `MAJOR.MINOR.PATCH`) wird an *
 Die Version wird **nicht** manuell in `src/Version.h` editiert, sondern über den Build-Skript-Parameter `-Version` gesetzt:
 
 ```powershell
-.\build.ps1 -Version "1.8.1"
+.\build.ps1 -Version "1.9.6"
 ```
 
 Das erledigt automatisch:
 
-1. `src/Version.h` wird auf `1.8.1` aktualisiert (`FW_VERSION_MAJOR/MINOR/PATCH`).
+1. `src/Version.h` wird auf `1.9.6` aktualisiert (`FW_VERSION_MAJOR/MINOR/PATCH`).
 2. **`README.md` wird automatisch mitaktualisiert** — alle Stellen, die die alte Versionsnummer enthalten (Badge oben, Beispiele im Versionierungs-Abschnitt), werden auf die neue Version umgeschrieben.
 3. Firmware wird gebaut, `IMGs/` aktualisiert und (ohne `-SkipUpload`) geflasht.
 
@@ -55,7 +57,7 @@ Auch ohne `-Version`-Parameter gleicht `build.ps1` bei jedem Lauf die `README.md
 
 ```powershell
 git add src/Version.h README.md
-git commit -m "Version 1.8.1"
+git commit -m "Version 1.9.6"
 git push
 ```
 
@@ -115,7 +117,7 @@ Für reproduzierbare Ergebnisse sollten Firmware, Controller und PC-Software zue
 .\build.ps1 -Clean -SkipUpload
 
 # Version setzen (aktualisiert src/Version.h + README.md), dann bauen/flashen
-.\build.ps1 -Version "1.8.1"
+.\build.ps1 -Version "1.9.6"
 ```
 
 Details zur Versionsvergabe und zum automatischen GitHub-Release: siehe [Versionierung](#versionierung).
@@ -205,6 +207,8 @@ Winkelangaben typisch als Grad mit Komma (`12,50` = 12,50°). Intern: Deg01 (= G
 | `GETENCTYPE` / `SETENCTYPE` | 1=Motorachse, 2=Ring/Abtrieb, 3=SSI, 4=Inklinometer (Neustart) |
 | `GETENDSTC` / `SETENDSTC` | Anzahl Endschalter: `0`=keine, `1`=ein Kontakt (L oder R), `2`=zwei Kontakte. Default Typ 1/2 = 2, SSI/Inklinometer = 0. Typ 4 erlaubt nur `0` oder `2` |
 | `GETENCCOUNT` | Aktuelle Encoder-Counts (Rohwert) |
+| `SETENCCOUNT` | Counts live setzen; **Winkel folgt automatisch** aus Counts+CPR (+DGOFFSET). Speichert Counts **und** berechneten Winkel in FRAM-POS. Typ 4: NAK. Checksumme `(src+dst)×100+count×100` — Beispiel `#0:20:SETENCCOUNT:12345:12365$` |
+| `SETPOSHERE` | „Hier ist Winkel X“: setzt die **passenden Counts** zu X und speichert beides in FRAM (braucht CPR + `SETMAXDG`). Checksumme wie `SETPOSDG` — Beispiel 0°: `#0:20:SETPOSHERE:0,00:20$` |
 | `SETENCZERO` | Typ 1/2: Soft-Zero. Typ 3: SSI-Hardware-Null (SET0) + Turn zurücksetzen. Typ 4: NAK (Kalibrierung am Inklinometer) |
 | `GETENCCAX` / `SETENCCAX` | Counts pro 360° für Motorachse (Typ 1) |
 | `GETENCCRI` / `SETENCCRI` | Counts pro 360° für Ring/Abtrieb (Typ 2) |
@@ -215,11 +219,14 @@ Winkelangaben typisch als Grad mit Komma (`12,50` = 12,50°). Intern: Deg01 (= G
 
 | Kommando | Beschreibung |
 |----------|--------------|
-| `GETVERSION` | Firmware-Version (z. B. `1.8.1`), siehe [Versionierung](#versionierung) |
-| `GETWLAN` / `SETWLAN:0` / `SETWLAN:1` | SoftAP-Web-UI: `1` = Hotspot `Rotor_<UID>` an (Passwort `Rotorconfig`, UI `admin`/`Rotorconfig` @ 192.168.4.1), `0` = aus. Nicht persistent — nach Reboot immer aus. HTTP-OTA unter Tab Update. Hinweis: WiFi kann die Strommessung (ADC2) beeinträchtigen. |
-| `GETID` / `SETID` | Slave-ID |
-| `SETROTORID` | ID nur per Broadcast `255` setzen |
+| `GETVERSION` | Firmware-Version (z. B. `1.9.6`), siehe [Versionierung](#versionierung) |
+| `GETWLAN` / `SETWLAN:0` / `SETWLAN:1` | SoftAP-Web-UI: `1` = Hotspot `Rotor_<UID>` an (Passwort `Rotorconfig`, UI `admin`/`Rotorconfig` @ 192.168.4.1), `0` = aus. Nicht persistent — nach Reboot immer aus. Tabs: Status, **Setup (Inbetriebnahme)**, Update, Reset. Hinweis: WiFi kann die Strommessung (ADC2) beeinträchtigen. |
+| `GETSRVJOG` / `SETSRVJOG:0\|1` | Service-JOG: JOG ohne `GETREF`/Encoder-Gültigkeit, Stall aus; Endschalter-GPIO und JOG-Deadman bleiben. Nicht persistent (nach Reboot/SoftAP-Ende aus). |
+| `GETSETUP` / `SETSETUP:0\|1` | Setup-Modus (Inbetriebnahme): `SETSETUP:1` = JOG ohne Amin/Amax-Stopp (auch negativ/über Max), ohne Ref, Stall aus; `GETPOSDG` zeigt Rohwinkel. **`SETSETUP:0`** = Service aus: JOG stoppt, **Achsgrenzen (Amin/Amax) für JOG wieder aktiv**, Stall wieder wie konfiguriert. Nicht persistent (auch Reboot/`SETWLAN:0` beendet Setup). |
+| `GETID` / `SETID` | Slave-ID lesen / setzen (gerichtet an aktuelle ID; ACK; gültig 1…254). Nach ID-Wechsel bleibt die **alte** Adresse ca. 5 s als Alias (nachfolgendes `SETID` an alte ID kommt noch an). |
+| `SETROTORID` | ID per Broadcast setzen: Zieladresse **255**, Params = neue ID (1…254). ACK von der **alten** ID (`ACK_SETROTORID:1`) — nur ein Slave am Bus. Danach `GETID` an die **neue** Adresse. Beispiel Master=0, ID=21: `#0:255:SETROTORID:21:276$` (Checksumme `(0+255)×100+21×100`) |
 | `GETROTORTYPE` / `SETROTORTYPE` | Rotor-Typ: 1=Rotation/Azimut, 2=Elevation 90°, 3=Elevation 180° (nur Identifikation, NVS `rty`, keine Logik in dieser Firmware) |
+| `GETMASTHEIGHT` / `SETMASTHEIGHT` | Masthöhe in Metern (0…9999, 1 Nachkommastelle). Nur Identifikation für den Controller; persistent. Checksumme `(src+dst)×100+höhe×100` — Beispiel 25 m: `#0:20:SETMASTHEIGHT:25:45$` |
 | `GETANTNAME1`/`2`/`3` / `SETANTNAME1`/`2`/`3` | Antennennamen (max. 9 Zeichen, keine `:`/`;`); NVS `an1`/`an2`/`an3`, nur fuer den Controller |
 | `GETASELECT` / `SETASELECT` | Aktuell gewaehlte Antenne (1/2/3, Default 1); nur Identifikation/Zustand, NVS `asel`, keine Logik in dieser Firmware. Nur bei RotorType 1 (AZ) aktiv — bei RotorType 2/3 (EL) `NAK ...:DISABLED` |
 | `GETTEMPA` / `GETTEMPM` | Umgebungs- / Motortemperatur |
@@ -447,11 +454,15 @@ https://dk8de.github.io/Rotor_Firmware/ — Chrome/Edge, USB, schreibt `factory.
 
 Lokal: `webflasher/index.html` + `IMGs/` (nach `.\build.ps1 -SkipUpload`).
 
-### SoftAP-OTA (WLAN-Update über die interne Seite)
+### SoftAP: Inbetriebnahme + OTA
 
-1. RS485: `SETWLAN:1` → Hotspot `Rotor_<UID>` / Passwort `Rotorconfig`
-2. Browser: http://192.168.4.1 (Login `admin` / `Rotorconfig`)
-3. Tab **Update** → nur `firmware.bin` hochladen (nicht `factory.bin`)
+1. SoftAP starten: RS485 `SETWLAN:1` **oder** beim Boot den linken Service-Taster **GPIO47** gedrückt halten (beide Taster = Werksreset)
+2. Hotspot `Rotor_<UID>` / Passwort `Rotorconfig` → Browser http://192.168.4.1 (Login `admin` / `Rotorconfig`)
+3. Tab **Setup** — geführte Inbetriebnahme nur mit Rotorwerten (NVS/FRAM, Typ 4 zusätzlich Inklinometer-NVS):
+   - START → ENCODER → DRIVE → ENDSTOPS → WEATHER (nur Typ 1/2) → TEMP → CAL → ZERO → VERIFY → ANTENNA (Azimut) → DONE
+   - Service-JOG in CAL/ZERO bei Typ 1/2 ohne Endschalter (Taste halten = fahren)
+   - API: `GET /api/setup/state`, `POST /api/setup/apply`, `POST /api/setup/jog`
+4. Tab **Update** → nur `firmware.bin` hochladen (nicht `factory.bin`)
 
 ### GitHub Releases / Actions
 

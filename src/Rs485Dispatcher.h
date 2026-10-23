@@ -146,6 +146,14 @@ struct Rs485DispatcherConfig {
   bool*     wlanWanted = nullptr;
   bool*     wlanActive = nullptr;
 
+  // Service-JOG (nicht persistent): JOG ohne Ref/Encoder-Gueltigkeit, Stall aus.
+  // SETSRVJOG/GETSRVJOG; Web-Setup nutzt denselben Flag.
+  bool*     serviceJog = nullptr;
+
+  // Setup-Modus (nicht persistent): SETSETUP/GETSETUP.
+  // JOG auch unter Amin / ueber Amax; Unref + Stall aus (wie Service-JOG).
+  bool*     setupMode = nullptr;
+
   // PWM-Max: runtime (SETPWM) und persistent (SETMAXPWM)
   float*    pwmMaxAbsRuntime   = nullptr;  // wird von Motion genutzt (Geschwindigkeit)
   float*    pwmMaxAbsStored    = nullptr;  // in Preferences gespeichert (Default nach Neustart)
@@ -155,6 +163,10 @@ struct Rs485DispatcherConfig {
   // ----------------------------------------------------------
   // Offset in km/h (kann negativ/positiv sein), wird in Preferences gespeichert.
   float*    anemoOffsetKmh     = nullptr;
+
+  // Masthoehe in Metern (0..9999), persistent FRAM Runtime + NVS-Migration "mast".
+  // GETMASTHEIGHT / SETMASTHEIGHT
+  float*    mastHeightM        = nullptr;
 
   // ----------------------------------------------------------
   // Windrichtung (RS485 Sensor)
@@ -265,6 +277,10 @@ public:
   // Verarbeitung eines einzelnen Frames (loggen + dispatchen).
   void onFrame(const Rs485Frame& f, uint32_t nowMs);
 
+  // Lokaler Dispatch (SoftAP-Web): kein Bus-TX, Antwort in outParams.
+  // Rueckgabe true = ACK, false = NAK (outParams = Reason bzw. ACK-Payload).
+  bool dispatchLocal(const char* cmd, const char* params, String& outParams, uint32_t nowMs);
+
   // Fehlermeldung als Broadcast senden (z.B. bei Safety-Fault).
   void sendErrBroadcast(uint8_t errCode);
 
@@ -279,9 +295,13 @@ private:
   // Kommandos
   void handleCommand(const Rs485Frame& f, uint32_t nowMs);
 
-  // Senden
+  // Senden (Antwort-SRC: _replySrc, sonst ownSlaveId)
   void sendAck(uint8_t master, const String& cmd, const String& params);
   void sendNak(uint8_t master, const String& cmd, const String& params);
+
+  // Nach ID-Wechsel: alte Adresse kurz weiter akzeptieren (Master-SETID an alte ID).
+  bool isIdAliasActive(uint8_t id, uint32_t nowMs) const;
+  void armIdAlias(uint8_t oldId, uint32_t nowMs);
 
   // Debug / Logging
   void logRs485FrameToSerial(const Rs485Frame& f);
@@ -322,6 +342,11 @@ private:
   uint8_t  _jogDir = 0;           // 1 = Richtung amin, 2 = Richtung amax
   uint32_t _lastJogCmdMs = 0;
 
+  // SoftAP/local dispatch: ACK/NAK abfangen, RS485-TX unterdruecken
+  bool   _localCapture = false;
+  bool   _localWasNak = false;
+  String _localParams;
+
   // ERR-Retry: nach Fault-Eintritt 3x senden (sofort + 2 Retries)
   uint8_t _errRetryCode = 0;
   uint8_t _errRetriesRemaining = 0;
@@ -329,4 +354,10 @@ private:
 
   // Merker fuer Kick-Retry: clearHomeValid() loescht FRAM-deg01, Unwind-Hinweis bleibt.
   int32_t _homingLastKnownDeg01 = -1;
+
+  // ID-Alias nach SETID/SETROTORID (ms absolut, 0 = inaktiv)
+  uint8_t  _idAliasPrev = 0;
+  uint32_t _idAliasUntilMs = 0;
+  // Antwort-SRC fuer gerichtete Frames (inkl. Alias-Adresse)
+  uint8_t  _replySrc = 0;
 };
