@@ -1,5 +1,6 @@
 #include "web_ui.h"
 
+#include <Preferences.h>
 #include <Update.h>
 #include <WebServer.h>
 #include <WiFi.h>
@@ -15,8 +16,14 @@ static bool g_routesReady = false;
 static char g_ssidCache[40] = "";
 static char g_ipCache[20] = "192.168.4.1";
 
-static const char* WEB_USER = "admin";
-static const char* WEB_PASS = "Rotorconfig";
+static constexpr const char* NVS_NS = "webui";
+static constexpr const char* DEF_USER = "admin";
+static constexpr const char* DEF_PASS = "Rotorconfig";
+static constexpr const char* DEF_PSK = "Rotorconfig";
+
+static char g_webUser[32] = "admin";
+static char g_webPass[64] = "Rotorconfig";
+static char g_apPass[64] = "Rotorconfig";
 
 // esp_app_desc_t.magic_word @ Offset 32 im App-Image (nicht in factory.bin).
 static constexpr uint32_t APP_DESC_MAGIC = 0xABCD5432UL;
@@ -28,9 +35,114 @@ static uint8_t g_updHdr[36];
 static size_t g_updHdrLen = 0;
 static const char* g_updErr = nullptr;
 
+static void credsApplyDefaults() {
+  strncpy(g_webUser, DEF_USER, sizeof(g_webUser) - 1);
+  g_webUser[sizeof(g_webUser) - 1] = '\0';
+  strncpy(g_webPass, DEF_PASS, sizeof(g_webPass) - 1);
+  g_webPass[sizeof(g_webPass) - 1] = '\0';
+  strncpy(g_apPass, DEF_PSK, sizeof(g_apPass) - 1);
+  g_apPass[sizeof(g_apPass) - 1] = '\0';
+}
+
+static void credsLoad() {
+  credsApplyDefaults();
+  Preferences p;
+  if (!p.begin(NVS_NS, true)) return;
+  String u = p.getString("user", DEF_USER);
+  String pw = p.getString("pass", DEF_PASS);
+  String pk = p.getString("psk", DEF_PSK);
+  p.end();
+  if (u.length() > 0 && u.length() < sizeof(g_webUser)) {
+    strncpy(g_webUser, u.c_str(), sizeof(g_webUser) - 1);
+    g_webUser[sizeof(g_webUser) - 1] = '\0';
+  }
+  if (pw.length() > 0 && pw.length() < sizeof(g_webPass)) {
+    strncpy(g_webPass, pw.c_str(), sizeof(g_webPass) - 1);
+    g_webPass[sizeof(g_webPass) - 1] = '\0';
+  }
+  if (pk.length() >= 8 && pk.length() < sizeof(g_apPass)) {
+    strncpy(g_apPass, pk.c_str(), sizeof(g_apPass) - 1);
+    g_apPass[sizeof(g_apPass) - 1] = '\0';
+  }
+}
+
+static bool credsSaveUserPass() {
+  Preferences p;
+  if (!p.begin(NVS_NS, false)) return false;
+  bool ok = p.putString("user", g_webUser) > 0;
+  ok = p.putString("pass", g_webPass) > 0 && ok;
+  p.end();
+  return ok;
+}
+
+static bool credsSavePsk() {
+  Preferences p;
+  if (!p.begin(NVS_NS, false)) return false;
+  bool ok = p.putString("psk", g_apPass) > 0;
+  p.end();
+  return ok;
+}
+
+void webUiClearCredentials() {
+  Preferences p;
+  if (p.begin(NVS_NS, false)) {
+    p.clear();
+    p.end();
+  }
+  credsApplyDefaults();
+}
+
+const char* webUiSoftApPass() {
+  return g_apPass;
+}
+
+static bool jsonGetStr(const char* json, const char* key, char* out, size_t outLen) {
+  if (!json || !key || !out || outLen < 2) return false;
+  out[0] = 0;
+  char pat[40];
+  snprintf(pat, sizeof(pat), "\"%s\"", key);
+  const char* p = strstr(json, pat);
+  if (!p) return false;
+  p = strchr(p + strlen(pat), ':');
+  if (!p) return false;
+  p++;
+  while (*p == ' ' || *p == '\t') p++;
+  if (*p != '"') return false;
+  p++;
+  size_t i = 0;
+  while (*p && *p != '"' && i + 1 < outLen) {
+    if (*p == '\\' && p[1]) p++;
+    out[i++] = *p++;
+  }
+  out[i] = 0;
+  return true;
+}
+
+static bool credOkUser(const char* u) {
+  if (!u || !u[0]) return false;
+  size_t n = strlen(u);
+  if (n < 1 || n > 31) return false;
+  for (size_t i = 0; i < n; i++) {
+    unsigned char c = (unsigned char)u[i];
+    if (c < 0x21 || c > 0x7E) return false;  // kein Leerzeichen / nicht-ASCII
+  }
+  return true;
+}
+
+static bool credOkPass(const char* pw, size_t minLen, size_t maxLen) {
+  if (!pw) return false;
+  size_t n = strlen(pw);
+  if (n < minLen || n > maxLen) return false;
+  for (size_t i = 0; i < n; i++) {
+    unsigned char c = (unsigned char)pw[i];
+    if (c < 0x20 || c > 0x7E) return false;
+  }
+  return true;
+}
+
 static bool checkAuth() {
   if (g_server == nullptr) return false;
-  if (g_server->authenticate(WEB_USER, WEB_PASS)) return true;
+  if (g_server->authenticate(g_webUser, g_webPass)) return true;
   g_server->requestAuthentication();
   return false;
 }
@@ -130,9 +242,99 @@ static void handleSetupJog() {
       dir = (uint8_t)body.substring(colon + 1).toInt();
     }
   }
+  // Tab Bewegen: limits:0 → Amin/Amax bleiben aktiv (kein Setup-Modus)
+  bool pastLimits = true;
+  if (body.indexOf("\"limits\":0") >= 0 || body.indexOf("\"limits\":false") >= 0) {
+    pastLimits = false;
+  }
   char out[128];
-  webAppSetupJog(dir, out, sizeof(out));
+  webAppSetupJogEx(dir, pastLimits, out, sizeof(out));
   sendJson(200, out);
+}
+
+static void handleUserGet() {
+  if (!checkAuth()) return;
+  char buf[96];
+  snprintf(buf, sizeof(buf), "{\"user\":\"%s\"}", g_webUser);
+  sendJson(200, buf);
+}
+
+static void handleUserSet() {
+  if (!checkAuth()) return;
+  if (g_server == nullptr) return;
+  const String body = g_server->arg("plain");
+  char user[32] = {0};
+  char pass[64] = {0};
+  char pass2[64] = {0};
+  if (!jsonGetStr(body.c_str(), "user", user, sizeof(user))) {
+    sendJson(400, "{\"ok\":false,\"err\":\"user\"}");
+    return;
+  }
+  if (!jsonGetStr(body.c_str(), "pass", pass, sizeof(pass))) {
+    sendJson(400, "{\"ok\":false,\"err\":\"pass\"}");
+    return;
+  }
+  (void)jsonGetStr(body.c_str(), "pass2", pass2, sizeof(pass2));
+  if (!credOkUser(user)) {
+    sendJson(400, "{\"ok\":false,\"err\":\"user\"}");
+    return;
+  }
+  if (!credOkPass(pass, 4, 63)) {
+    sendJson(400, "{\"ok\":false,\"err\":\"pass\"}");
+    return;
+  }
+  if (strcmp(pass, pass2) != 0) {
+    sendJson(400, "{\"ok\":false,\"err\":\"mismatch\"}");
+    return;
+  }
+  strncpy(g_webUser, user, sizeof(g_webUser) - 1);
+  g_webUser[sizeof(g_webUser) - 1] = '\0';
+  strncpy(g_webPass, pass, sizeof(g_webPass) - 1);
+  g_webPass[sizeof(g_webPass) - 1] = '\0';
+  if (!credsSaveUserPass()) {
+    sendJson(500, "{\"ok\":false,\"err\":\"nvs\"}");
+    return;
+  }
+  sendJson(200, "{\"ok\":true}");
+}
+
+static void handleWifiGet() {
+  if (!checkAuth()) return;
+  char buf[96];
+  snprintf(buf, sizeof(buf), "{\"ssid\":\"%s\"}", g_ssidCache);
+  sendJson(200, buf);
+}
+
+static void handleWifiSet() {
+  if (!checkAuth()) return;
+  if (g_server == nullptr) return;
+  const String body = g_server->arg("plain");
+  char pass[64] = {0};
+  char pass2[64] = {0};
+  if (!jsonGetStr(body.c_str(), "pass", pass, sizeof(pass))) {
+    sendJson(400, "{\"ok\":false,\"err\":\"pass\"}");
+    return;
+  }
+  (void)jsonGetStr(body.c_str(), "pass2", pass2, sizeof(pass2));
+  // ESP SoftAP WPA2: 8..63 Zeichen
+  if (!credOkPass(pass, 8, 63)) {
+    sendJson(400, "{\"ok\":false,\"err\":\"pass\"}");
+    return;
+  }
+  if (strcmp(pass, pass2) != 0) {
+    sendJson(400, "{\"ok\":false,\"err\":\"mismatch\"}");
+    return;
+  }
+  strncpy(g_apPass, pass, sizeof(g_apPass) - 1);
+  g_apPass[sizeof(g_apPass) - 1] = '\0';
+  if (!credsSavePsk()) {
+    sendJson(500, "{\"ok\":false,\"err\":\"nvs\"}");
+    return;
+  }
+  // Antwort zuerst, dann Neustart — SoftAP danach aus bis wieder aktiviert (neuer PSK gilt).
+  sendJson(200, "{\"ok\":true,\"reboot\":1}");
+  delay(400);
+  webAppRequestReboot();
 }
 
 static void handleUpdateInfo() {
@@ -292,18 +494,20 @@ static void handleNotFound() {
   g_server->send(404, "text/plain", "Not Found");
 }
 
-void webUiBegin(const char* ssid, const char* password) {
+void webUiBegin(const char* ssid) {
   if (g_webActive) return;
   if (g_server == nullptr) {
     g_server = new WebServer(80);
   }
+
+  credsLoad();
 
   WiFi.mode(WIFI_AP);
   WiFi.setSleep(false);
   WiFi.setTxPower(WIFI_POWER_8_5dBm);
   WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1),
                     IPAddress(255, 255, 255, 0));
-  WiFi.softAP(ssid, password, 1, 0, 2);
+  WiFi.softAP(ssid, g_apPass, 1, 0, 2);
 
   strncpy(g_ssidCache, ssid, sizeof(g_ssidCache) - 1);
   g_ssidCache[sizeof(g_ssidCache) - 1] = '\0';
@@ -313,6 +517,10 @@ void webUiBegin(const char* ssid, const char* password) {
     g_server->on("/", HTTP_GET, handleRoot);
     g_server->on("/api/status", HTTP_GET, handleStatus);
     g_server->on("/api/live", HTTP_GET, handleLive);
+    g_server->on("/api/user", HTTP_GET, handleUserGet);
+    g_server->on("/api/user", HTTP_POST, handleUserSet);
+    g_server->on("/api/wifi", HTTP_GET, handleWifiGet);
+    g_server->on("/api/wifi", HTTP_POST, handleWifiSet);
     g_server->on("/api/update/info", HTTP_GET, handleUpdateInfo);
     g_server->on("/api/update", HTTP_POST, handleUpdateDone,
                  []() { handleUpdateUpload(); });

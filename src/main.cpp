@@ -972,13 +972,15 @@ void webAppFillLiveJson(char* buf, size_t buflen, const char* ssid, const char* 
   webAppDeviceUid(uid, sizeof(uid));
 
   // pwm = SETPWM-Soll (g_pwmMaxAbsCmd), nicht Motor-Ist-Duty
+  // minPwm/maxPwm: Grenzen fuer SoftAP-Tab Bewegen (SETMINPWM / SETMAXPWM)
   snprintf(buf, buflen,
            "{\"angle\":%.2f,\"tempA\":%.1f,\"tempM\":%.1f,\"fw\":\"%s\","
-           "\"homed\":%d,\"pwm\":%.1f,\"windEn\":%d,\"windKmh\":%.1f,\"windDir\":%.1f,"
+           "\"homed\":%d,\"encType\":%u,\"pwm\":%.1f,\"minPwm\":%.1f,\"maxPwm\":%.1f,"
+           "\"windEn\":%d,\"windKmh\":%.1f,\"windDir\":%.1f,"
            "\"uptime\":%lu,\"heap\":%u,\"ssid\":\"%s\",\"ip\":\"%s\",\"uid\":\"%s\"}",
            (double)angle, (double)temps.getAmbientC(), (double)temps.getMotorC(),
-           FW_VERSION_STRING, isRotorReferenced() ? 1 : 0,
-           (double)g_pwmMaxAbsCmd,
+           FW_VERSION_STRING, isRotorReferenced() ? 1 : 0, (unsigned)g_encType,
+           (double)g_pwmMaxAbsCmd, (double)g_minPwm, (double)g_pwmMaxAbsNv,
            windEn ? 1 : 0, (double)windKmh, (double)windDir,
            (unsigned long)(millis() / 1000UL), (unsigned)ESP.getFreeHeap(),
            ssid ? ssid : "", ip ? ip : "", uid);
@@ -1172,6 +1174,10 @@ void webAppSetupApplyJson(const char* bodyJson, char* outJson, size_t outLen) {
 }
 
 void webAppSetupJog(uint8_t dir, char* outJson, size_t outLen) {
+  webAppSetupJogEx(dir, true, outJson, outLen);
+}
+
+void webAppSetupJogEx(uint8_t dir, bool pastLimits, char* outJson, size_t outLen) {
   if (!outJson || outLen < 16) return;
   if (dir > 2) {
     snprintf(outJson, outLen, "{\"ok\":false,\"err\":\"PARAM\"}");
@@ -1179,7 +1185,9 @@ void webAppSetupJog(uint8_t dir, char* outJson, size_t outLen) {
   }
   if (dir != 0) {
     g_serviceJog = true;
-    g_setupMode = true; // SoftAP-Inbetriebnahme: JOG auch unter Amin
+    if (pastLimits) {
+      g_setupMode = true; // SoftAP-Inbetriebnahme: JOG auch unter Amin
+    }
   }
   char p[4];
   snprintf(p, sizeof(p), "%u", (unsigned)dir);
@@ -1206,6 +1214,7 @@ void webAppFactoryReset() {
     p.clear();
     p.end();
   }
+  webUiClearCredentials();
   if (g_storeOk) {
     (void)g_store.factoryReset();
   } else {
@@ -1237,11 +1246,13 @@ static void updateSoftApFromWanted() {
     webAppDeviceUid(uid, sizeof(uid));
     char ssid[32];
     snprintf(ssid, sizeof(ssid), "Rotor_%s", uid);
-    webUiBegin(ssid, "Rotorconfig");
+    webUiBegin(ssid);
     if (g_debug) {
       Serial.print("[WLAN] SoftAP an: ");
       Serial.print(ssid);
-      Serial.println(" / Rotorconfig @ 192.168.4.1");
+      Serial.print(" / ");
+      Serial.print(webUiSoftApPass());
+      Serial.println(" @ 192.168.4.1");
     }
   } else if (!want && on) {
     webUiEnd();
@@ -1621,6 +1632,7 @@ void setup() {
   mcfg.axisMaxDeg01 = &g_axisMaxDeg01;
   mcfg.serviceJog = &g_serviceJog;
   mcfg.setupMode = &g_setupMode;
+  mcfg.softApActive = &g_wlanActive;
 
   motion.begin(&board, &motor, &encoder, &homing, mcfg);
 
@@ -1940,6 +1952,12 @@ static void updatePwmMaxApplied(uint32_t dtMs) {
 
   // Max darf nicht unter Mindest-PWM fallen, sonst laufen kurze Bewegungen (und Feinphase) nicht sauber.
   if (target < g_minPwm) target = g_minPwm;
+
+  // Nur SoftAP-Web: SETPWM sofort (Slider = JOG-Geschwindigkeit). Bus-Pfad: Slew bleibt.
+  if (webUiIsActive()) {
+    g_pwmMaxAbs = target;
+    return;
+  }
 
   g_pwmMaxAbs = applySlewPercent(target, g_pwmMaxAbs, dtMs, slewPerSec);
 }
@@ -2271,9 +2289,12 @@ void loop() {
   const bool rsMotionActive = (homingActive || motion.isMotionActive());
   uint32_t lastMotionCmdMs = rs485Dispatcher.getLastGetPosCmdMs();
   if (lastMotionCmdMs == 0) lastMotionCmdMs = nowMs;
-  // Waehrend interner Kalibrierfahrt setzen wir das Keepalive auf "jetzt",
-  // damit keine SE_TIMEOUT kommt, obwohl der Master nicht zyklisch sendet.
-  if (calActive) lastMotionCmdMs = nowMs;
+  // Keepalive erzwingen, wenn kein Master-GETPOSDG laeuft:
+  // - interne Kalibrierfahrt
+  // - SoftAP-Web / Service-JOG / Setup (lokale Bedienung ohne Deadman)
+  if (calActive || g_serviceJog || g_setupMode || webUiIsActive()) {
+    lastMotionCmdMs = nowMs;
+  }
 
   // Safety (Strom + Stall + Endstops + Deadman)
   // SSI: fortlaufende Counts (inkl. Turn) — Ring-Delta auf 0..4095 wuerde bei Fahrten

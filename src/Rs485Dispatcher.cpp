@@ -230,6 +230,10 @@ void Rs485Dispatcher::updateJogWatchdog(uint32_t nowMs) {
     return;
   }
 
+  // SoftAP-Web: kein JOG-Watchdog — Stopp nur per JOG:0 (Taste loslassen).
+  // Sonst: HTTP-Latenz > jogTimeoutMs -> harter Stopp/Start = Ruckeln.
+  if (_cfg.wlanActive && *_cfg.wlanActive) return;
+
   // JOG-Bewegung bereits beendet (Limit / Auslaufen fertig) -> Watchdog aus
   if (!_motion->isJogActive()) {
     _jogActive = false;

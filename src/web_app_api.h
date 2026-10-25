@@ -13,7 +13,7 @@ const char* webAppFwVersion();
 
 /**
  * Live-JSON fuer /api/live und /api/status.
- * Felder: angle,tempA,tempM,fw,homed,pwm,uptime,heap,ssid,ip,uid
+ * Felder: angle,tempA,tempM,fw,homed,encType,pwm,minPwm,maxPwm,uptime,heap,ssid,ip,uid
  */
 void webAppFillLiveJson(char* buf, size_t buflen, const char* ssid, const char* ip);
 
@@ -28,9 +28,12 @@ void webAppFillSetupStateJson(char* buf, size_t buflen);
 void webAppSetupApplyJson(const char* bodyJson, char* outJson, size_t outLen);
 
 /**
- * Setup-Wizard JOG: dir 0/1/2 (aktiviert bei Bedarf Service-JOG).
- * outJson wie Apply.
+ * SoftAP-JOG: dir 0/1/2 (aktiviert Service-JOG).
+ * pastLimits=true: Setup-Modus (auch unter Amin/ueber Amax).
  */
+void webAppSetupJogEx(uint8_t dir, bool pastLimits, char* outJson, size_t outLen);
+
+/** Setup-Wizard JOG (pastLimits=true). */
 void webAppSetupJog(uint8_t dir, char* outJson, size_t outLen);
 
 /** Neustart anfordern (bestehender g_restartRequested-Pfad). */

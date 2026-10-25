@@ -1050,7 +1050,13 @@ bool MotionController::commandJog(uint8_t dir, uint32_t nowMs) {
     _jogDecel = false;
     _jogRampStartDeg01 = curJog;
     _posStartMs = nowMs; // Timeout-Schutz analog Positionsfahrt
-    _lastAppliedDuty = 0.0f;
+    // SoftAP-Web: sofort SETPWM (keine Null-Phase vor dem ersten update).
+    // Bus: bei 0 starten, Rampe in updateJog_.
+    if (_cfg.softApActive && *_cfg.softApActive) {
+      _lastAppliedDuty = (float)signedDir * pwmMax;
+    } else {
+      _lastAppliedDuty = 0.0f;
+    }
     // Speed-Messung fuer Abbremsweg neu aufsetzen
     _haveLastCounts = false;
     _speedMeasDegPerSec = 0.0f;
@@ -1068,7 +1074,16 @@ bool MotionController::commandJog(uint8_t dir, uint32_t nowMs) {
     return true;
   }
 
-  // Richtungswechsel: erst proportional abbremsen, dann umkehren
+  // Richtungswechsel: Bus = Abbremsen dann umkehren; SoftAP-Web = sofort umkehren
+  if (_cfg.softApActive && *_cfg.softApActive) {
+    _jogDir = signedDir;
+    _jogPendingDir = 0;
+    _jogDecel = false;
+    _jogRampStartDeg01 = curJog;
+    _lastAppliedDuty = 0.0f;
+    _posStartMs = nowMs;
+    return true;
+  }
   _jogPendingDir = signedDir;
   if (!_jogDecel) {
     startJogDecel_(nowMs, curJog, dutyAbs, pwmMax, rampDistDeg);
@@ -1079,6 +1094,13 @@ bool MotionController::commandJog(uint8_t dir, uint32_t nowMs) {
 
 void MotionController::commandJogStop(uint32_t nowMs) {
   if (!_jogActive) {
+    return;
+  }
+
+  // SoftAP-Web: keine Abbremsrampe — sofort Stopp (Bus-JOG unveraendert).
+  if (_cfg.softApActive && *_cfg.softApActive) {
+    clearJogState_();
+    _lastAppliedDuty = 0.0f;
     return;
   }
 
@@ -1121,16 +1143,18 @@ float MotionController::updateJog_(uint32_t nowMs, uint32_t dtMs) {
   float rampDistDeg = (_cfg.rampDistDeg) ? (*_cfg.rampDistDeg) : 30.0f;
   if (!std::isfinite(rampDistDeg) || rampDistDeg < 0.5f) rampDistDeg = 0.5f;
 
-  // Timeout analog Positionsfahrt
+  // Timeout analog Positionsfahrt — nicht bei Service-/Setup-JOG (SoftAP-Web
+  // sendet kein zyklisches GETPOSDG; sonst SE_POS_TIMEOUT).
+  const bool serviceJogTo = (_cfg.serviceJog && *_cfg.serviceJog);
+  const bool setupMode = (_cfg.setupMode && *_cfg.setupMode);
   const uint32_t posTimeout = (_cfg.posTimeoutMs) ? (*_cfg.posTimeoutMs) : 60000;
-  if ((nowMs - _posStartMs) > posTimeout) {
+  if (!serviceJogTo && !setupMode && (nowMs - _posStartMs) > posTimeout) {
     clearJogState_();
     _posTimeoutEvent = true;
     _lastAppliedDuty = 0.0f;
     return 0.0f;
   }
 
-  const bool setupMode = (_cfg.setupMode && *_cfg.setupMode);
   // Setup: ungeklemmter Winkel (auch negativ / >amax). Geklemmt wäre unter Amin
   // immer 0 → traveled=0 → nur minPWM, und JOG-Stopp bremst erst bei 0 ab.
   int32_t curEnc = 0;
@@ -1199,8 +1223,31 @@ float MotionController::updateJog_(uint32_t nowMs, uint32_t dtMs) {
     }
   }
 
+  const bool softApJog = (_cfg.softApActive && *_cfg.softApActive);
+
+  // SoftAP-Web: keine Hoch-/Abbremsrampe — sofort SETPWM bzw. sofort Stopp.
+  // Bus-JOG bleibt bei der weichen Rampe (unten).
+  if (softApJog) {
+    if (_jogDecel) {
+      clearJogState_();
+      _lastAppliedDuty = 0.0f;
+      return 0.0f;
+    }
+    const float dutyAbs = pwmMax;
+    if (!setupMode) {
+      // Harter Stopp an der Achsgrenze (ohne Bremsrampe)
+      if ((_jogDir > 0 && curOut >= amax) || (_jogDir < 0 && curOut <= amin)) {
+        clearJogState_();
+        _lastAppliedDuty = 0.0f;
+        return 0.0f;
+      }
+    }
+    _lastAppliedDuty = (float)_jogDir * dutyAbs;
+    return _lastAppliedDuty;
+  }
+
   if (!_jogDecel) {
-    // Hochrampe mit Soft-Start:
+    // Hochrampe mit Soft-Start (nur Bus-JOG):
     // Nicht sofort minPwm (~35%) — sonst ist ein Tip schon mehrere Grad weg.
     // Erste ~1,5°: sanft von niedriger Creep-PWM auf pwmMin, danach pwmMin->pwmMax.
     int32_t traveled01 = (_jogDir > 0) ? (curJog - _jogRampStartDeg01)
@@ -1956,8 +2003,15 @@ float MotionController::update(uint32_t nowMs, uint32_t dtMs) {
 
   // HW Service-Taster (open-loop)
   const float handSpeed = (_cfg.handSpeedPercent) ? (*_cfg.handSpeedPercent) : 25.0f;
-  const bool srvLeft  = _board->readServiceLeft();
-  const bool srvRight = _board->readServiceRight();
+  bool srvLeft  = _board->readServiceLeft();
+  bool srvRight = _board->readServiceRight();
+  // SSI-Layout: physische Taster vertauscht gegenueber Typ 1/2 — nur hier umkehren
+  // (Boot-Werksreset/SoftAP nutzen weiterhin die echten GPIO-Zuordnungen).
+  if (_encoder->getEncoderType() == ENCTYPE_ABSOLUTE_SSI) {
+    const bool tmp = srvLeft;
+    srvLeft = srvRight;
+    srvRight = tmp;
+  }
 
   if (srvLeft && !srvRight) {
     resetControllerState(nowMs);

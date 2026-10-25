@@ -1,13 +1,13 @@
 #pragma once
 
-// SoftAP SPA – Tabs: Status / Setup / Update / Reset
+// SoftAP SPA – Tabs: Status / Bewegen / Setup / Benutzer / WLAN / Update / Reset
 static const char WEB_PAGE[] PROGMEM = R"HTML(
 <!DOCTYPE html>
 <html lang="de">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Rotor DK8DE</title>
+<title>Rotorsteuerung DK8DE</title>
 <meta http-equiv="Cache-Control" content="no-store">
 <style>
 :root{
@@ -89,21 +89,51 @@ nav button.active{
 .card{
   background:var(--panel);
   border:1px solid var(--line);border-radius:1rem;padding:1.1rem 1.2rem;margin-bottom:1rem;
-  box-shadow:var(--shadow)
+  box-shadow:var(--shadow);overflow:hidden
 }
-.card h2{margin:0 0 .85rem;font-size:1rem;color:var(--cyan);font-weight:600}
+.card h2{
+  margin:-1.1rem -1.2rem .85rem;padding:.9rem 1.2rem;
+  font-size:1.28rem;font-weight:600;color:var(--white);
+  background:rgb(21,43,62);width:auto;box-sizing:border-box
+}
+.card-head{
+  margin:-1.1rem -1.2rem 0;padding:.9rem 1.2rem;
+  background:rgb(21,43,62)
+}
+.card-head h2{
+  margin:0;padding:0;background:transparent;font-size:1.28rem
+}
+.move-angle-wrap{
+  float:right;margin:10px;padding:0
+}
+.move-angle-wrap .kv{
+  margin:0;min-width:6.5rem;padding:.4rem .65rem
+}
+.move-angle-wrap .kv .k{font-size:.68rem}
+.move-angle-wrap .kv .v{margin-top:.15rem;font-size:1.35em;line-height:1.1}
+#tab-move .move-intro{margin:10px 10px 10px 0}
+#tab-move .move-clear{clear:both}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:.75rem}
 .kv{background:var(--blue-light);border:1px solid var(--line);border-radius:.75rem;padding:.7rem .8rem}
 .kv .k{color:var(--muted);font-size:.75rem;text-transform:uppercase;letter-spacing:.04em}
 .kv .v{margin-top:.35rem;color:var(--white);word-break:break-all;font-size:2em;font-weight:700;line-height:1.15}
 #vAp{font-size:1.5em;line-height:1.2}
+#updPart{font-size:1.15em;line-height:1.35;font-weight:700}
+#wifiSsid{font-size:1.35rem;font-weight:700;color:var(--white);margin:.35rem 0 .85rem;line-height:1.3}
 .field{margin-bottom:.75rem}
 label{display:block;color:var(--muted);font-size:.8rem;margin:0 0 .35rem}
 input,select,button{font:inherit}
-input[type=text],input[type=number],select{
+input[type=text],input[type=password],input[type=number],select{
   width:100%;padding:.65rem .75rem;border-radius:.65rem;border:1px solid var(--line);
   background:#0c1a22;color:var(--text);outline:none
 }
+input[type=range]{
+  width:100%;accent-color:var(--blue);height:1.4rem;cursor:pointer;margin:.35rem 0
+}
+.jog-row{display:flex;gap:.75rem;flex-wrap:wrap;margin:.5rem 0 1rem}
+.jog-row .btn{flex:1;min-width:8rem;min-height:3.2rem;font-size:1.05rem;user-select:none;touch-action:none}
+.pwm-meta{display:flex;justify-content:space-between;gap:1rem;color:var(--muted);font-size:.82rem;margin-top:.25rem}
+.pwm-val{font-size:1.35rem;font-weight:700;color:var(--white);margin:.2rem 0 .4rem}
 input[type=file]{
   width:100%;padding:.65rem .75rem;border-radius:.65rem;border:1px solid var(--line);
   background:#0c1a22;color:var(--text);outline:none;margin-bottom:.35rem
@@ -149,8 +179,8 @@ input[type=file]{
 <body>
 <header>
   <div class="brand">
-    <b>Rotor DK8DE</b>
-    <span data-i18n="subtitle">SoftAP · Status · Setup · OTA</span>
+    <b data-i18n="brand_title">Rotorsteuerung DK8DE</b>
+    <span id="brandSub" data-i18n="brand_sub">Konfiguration FW: —</span>
   </div>
   <div class="hdr-right">
     <div class="lang" id="langSwitch">
@@ -167,7 +197,10 @@ input[type=file]{
     </button>
     <nav id="mainNav">
       <button class="active" data-tab="status" data-i18n="tab_status">Status</button>
+      <button data-tab="move" data-i18n="tab_move">Bewegen</button>
       <button data-tab="setup" data-i18n="tab_setup">Setup</button>
+      <button data-tab="user" data-i18n="tab_user">Benutzer</button>
+      <button data-tab="wifi" data-i18n="tab_wifi">WLAN</button>
       <button data-tab="update" data-i18n="tab_update">Update</button>
       <button data-tab="reset" data-i18n="tab_reset">Reset</button>
     </nav>
@@ -178,8 +211,8 @@ input[type=file]{
       <h2 data-i18n="h_rotor">Rotordaten</h2>
       <div class="grid">
         <div class="kv"><div class="k" data-i18n="k_angle">Winkel (°)</div><div class="v mono" id="vAngle">—</div></div>
-        <div class="kv"><div class="k" data-i18n="k_tempA">Temp Umgebung (°C)</div><div class="v mono" id="vTempA">—</div></div>
-        <div class="kv"><div class="k" data-i18n="k_tempM">Temp Motor (°C)</div><div class="v mono" id="vTempM">—</div></div>
+        <div class="kv"><div class="k" data-i18n="k_tempA">Außentemperatur (°C)</div><div class="v mono" id="vTempA">—</div></div>
+        <div class="kv"><div class="k" data-i18n="k_tempM">Motortemperatur (°C)</div><div class="v mono" id="vTempM">—</div></div>
         <div class="kv"><div class="k" data-i18n="k_fw">Firmware</div><div class="v mono" id="vFw">—</div></div>
         <div class="kv"><div class="k" data-i18n="k_homed">Gehomt</div><div class="v mono" id="vHomed">—</div></div>
         <div class="kv"><div class="k" data-i18n="k_pwm">SETPWM (%)</div><div class="v mono" id="vPwm">—</div></div>
@@ -187,6 +220,43 @@ input[type=file]{
         <div class="kv" id="kvWindDir" hidden><div class="k" data-i18n="k_windDir">Windrichtung (°)</div><div class="v mono" id="vWindDir">—</div></div>
         <div class="kv"><div class="k">SoftAP</div><div class="v mono" id="vAp">—</div></div>
         <div class="kv"><div class="k">UID</div><div class="v mono" id="vUid">—</div></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-move" hidden>
+    <div class="card">
+      <div class="card-head">
+        <h2 data-i18n="h_move">Bewegen</h2>
+      </div>
+      <div class="move-angle-wrap">
+        <div class="kv">
+          <div class="k" data-i18n="k_angle">Winkel (°)</div>
+          <div class="v mono" id="movePos">—</div>
+        </div>
+      </div>
+      <p class="errbox move-intro" data-i18n="warn_move_speed">Geschwindigkeit niedrig einstellen — Web-JOG fährt ohne Rampen (sofort Start/Stopp).</p>
+      <p class="muted move-intro" data-i18n="p_move">Taste halten = fahren. Achsgrenzen (Amin/Amax) bleiben aktiv. Deadman/Positions-Timeout sind während SoftAP-JOG aus.</p>
+      <div class="move-clear"></div>
+      <div class="jog-row">
+        <button type="button" class="btn" id="moveJogLeft" data-i18n="btn_jog_left">Jog Links</button>
+        <button type="button" class="btn" id="moveJogRight" data-i18n="btn_jog_right">Jog Rechts</button>
+      </div>
+      <div class="field">
+        <label for="movePwm" data-i18n="lbl_pwm">Geschwindigkeit (SETPWM)</label>
+        <div class="pwm-val mono"><span id="movePwmVal">—</span> %</div>
+        <input type="range" id="movePwm" min="0" max="100" step="0.5" value="50">
+        <div class="pwm-meta">
+          <span>Min <span class="mono" id="movePwmMin">—</span> %</span>
+          <span>Max <span class="mono" id="movePwmMax">—</span> %</span>
+        </div>
+      </div>
+      <p class="hint" data-i18n="hint_move">Regler = JOG-Geschwindigkeit, von Min-PWM bis Max-PWM. Nur Laufzeit, nicht gespeichert. Keine Rampen.</p>
+      <div id="moveSsiZeroBox" hidden>
+        <p class="hint" data-i18n="hint_ssi_zero">SSI: Rotor auf 0° ausrichten, dann Null setzen.</p>
+        <div class="actions">
+          <button type="button" class="btn sec" id="btnMoveEncZero" data-i18n="btn_enc_zero">Encoder auf 0 (SETENCZERO)</button>
+        </div>
       </div>
     </div>
   </section>
@@ -210,6 +280,49 @@ input[type=file]{
     </div>
   </section>
 
+  <section id="tab-user" hidden>
+    <div class="card">
+      <h2 data-i18n="h_user">Benutzer</h2>
+      <p class="muted" data-i18n="p_user">Login für die Konfigurationsseite (HTTP Basic Auth). Wird im NVS gespeichert.</p>
+      <div class="field">
+        <label for="userName" data-i18n="lbl_user">Benutzername</label>
+        <input type="text" id="userName" autocomplete="username" maxlength="31">
+      </div>
+      <div class="field">
+        <label for="userPass" data-i18n="lbl_pass">Neues Passwort</label>
+        <input type="password" id="userPass" autocomplete="new-password" maxlength="63">
+      </div>
+      <div class="field">
+        <label for="userPass2" data-i18n="lbl_pass2">Passwort wiederholen</label>
+        <input type="password" id="userPass2" autocomplete="new-password" maxlength="63">
+      </div>
+      <p class="hint" data-i18n="hint_user">Mindestens 4 Zeichen. Nach dem Speichern ggf. erneut anmelden.</p>
+      <div class="actions">
+        <button class="btn" id="btnUserSave" data-i18n="btn_save">Speichern</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-wifi" hidden>
+    <div class="card">
+      <h2 data-i18n="h_wifi">WLAN (SoftAP)</h2>
+      <p class="muted" data-i18n="p_wifi">Passwort des Hotspots. SSID bleibt Rotor_&lt;UID&gt;.</p>
+      <div class="mono" id="wifiSsid">SSID: —</div>
+      <div class="field">
+        <label for="wifiPass" data-i18n="lbl_wifipass">Neuer WLAN-Schlüssel</label>
+        <input type="password" id="wifiPass" autocomplete="new-password" maxlength="63">
+      </div>
+      <div class="field">
+        <label for="wifiPass2" data-i18n="lbl_wifipass2">Neuer WLAN-Schlüssel wiederholen</label>
+        <input type="password" id="wifiPass2" autocomplete="new-password" maxlength="63">
+      </div>
+      <p class="hint" data-i18n="hint_wifi">8–63 Zeichen (WPA2). Beim Speichern startet ein Neustart — die Verbindung bricht ab. Danach in RotorTcpBridge unter Einstellungen → Update das WLAN wieder aktivieren und mit dem neuen Schlüssel verbinden. Unter Windows ggf. das bekannte alte WLAN „vergessen“, damit der neue Schlüssel abgefragt wird.</p>
+      <div class="actions">
+        <button class="btn" id="btnWifiSave" data-i18n="btn_save">Speichern</button>
+      </div>
+    </div>
+  </section>
+
   <section id="tab-update" hidden>
     <div class="card">
       <h2 data-i18n="h_update">Firmware-Update (OTA)</h2>
@@ -225,7 +338,7 @@ input[type=file]{
       <div class="actions">
         <button class="btn" id="btnUpload" data-i18n="btn_upload">Hochladen &amp; flashen</button>
       </div>
-      <div class="muted" style="margin-top:.65rem" id="updMsg" data-i18n="hint_ota">Nur App-Firmware (Dual-OTA). Nach Erfolg Neustart.</div>
+      <div class="muted" style="margin-top:.65rem" id="updMsg" data-i18n="hint_ota">Nur firmware.bin (App-OTA). Nicht factory.bin. Nach erfolgreichem Update wird der Rotor neugestartet und WLAN ist wieder aus. Einschalten wieder über RotorTcpBridge unter Einstellungen → Update.</div>
     </div>
   </section>
 
@@ -248,16 +361,33 @@ const $=id=>document.getElementById(id);
 let lang='de';
 const I18N={
 de:{
-  subtitle:'SoftAP · Status · Setup · OTA',
+  brand_title:'Rotorsteuerung DK8DE',
+  brand_sub:'Konfiguration FW: —',
   badge_loading:'laden…',badge_ok:'OK',badge_offline:'offline',
-  tab_status:'Status',tab_setup:'Setup',tab_update:'Update',tab_reset:'Reset',
-  h_rotor:'Rotordaten',h_setup:'Inbetriebnahme',
+  tab_status:'Status',tab_move:'Bewegen',tab_setup:'Setup',tab_user:'Benutzer',tab_wifi:'WLAN',tab_update:'Update',tab_reset:'Reset',
+  h_rotor:'Rotordaten',h_move:'Bewegen',h_setup:'Inbetriebnahme',
+  warn_move_speed:'Geschwindigkeit niedrig einstellen — Web-JOG fährt ohne Rampen (sofort Start/Stopp).',
+  p_move:'Taste halten = fahren. Achsgrenzen (Amin/Amax) bleiben aktiv. Deadman/Positions-Timeout sind während SoftAP-JOG aus.',
+  btn_jog_left:'Jog Links',btn_jog_right:'Jog Rechts',
+  lbl_pwm:'Geschwindigkeit (SETPWM)',
+  hint_move:'Regler = JOG-Geschwindigkeit, von Min-PWM bis Max-PWM. Nur Laufzeit, nicht gespeichert. Keine Rampen.',
+  hint_ssi_zero:'SSI: Rotor auf 0° ausrichten, dann Null setzen.',
+  btn_enc_zero:'Encoder auf 0 (SETENCZERO)',
+  toast_enc_zero_ok:'Encoder-Null gesetzt',
   p_setup:'Nur Rotorwerte (NVS/FRAM). Nach jedem Speichern wird der Wert zurückgelesen.',
-  k_angle:'Winkel (°)',k_tempA:'Temp Umgebung (°C)',k_tempM:'Temp Motor (°C)',
+  k_angle:'Winkel (°)',k_tempA:'Außentemperatur (°C)',k_tempM:'Motortemperatur (°C)',
   k_fw:'Firmware',k_homed:'Gehomt',k_pwm:'SETPWM (%)',
   k_wind:'Wind (km/h)',k_windDir:'Windrichtung (°)',
+  h_user:'Benutzer',p_user:'Login für die Konfigurationsseite (HTTP Basic Auth). Wird im NVS gespeichert.',
+  lbl_user:'Benutzername',lbl_pass:'Neues Passwort',lbl_pass2:'Passwort wiederholen',
+  hint_user:'Mindestens 4 Zeichen. Nach dem Speichern ggf. erneut anmelden.',
+  h_wifi:'WLAN (SoftAP)',p_wifi:'Passwort des Hotspots. SSID bleibt Rotor_<UID>.',
+  lbl_ssid:'SSID',lbl_wifipass:'Neuer WLAN-Schlüssel',lbl_wifipass2:'Neuer WLAN-Schlüssel wiederholen',
+  hint_wifi:'8–63 Zeichen (WPA2). Beim Speichern startet ein Neustart — die Verbindung bricht ab. Danach in RotorTcpBridge unter Einstellungen → Update das WLAN wieder aktivieren und mit dem neuen Schlüssel verbinden. Unter Windows ggf. das bekannte alte WLAN „vergessen“, damit der neue Schlüssel abgefragt wird.',
+  toast_user_ok:'Benutzer gespeichert',toast_wifi_ok:'WLAN-Schlüssel gespeichert — Neustart…',
+  err_mismatch:'Passwörter stimmen nicht',err_pass:'Passwort ungültig',err_user:'Benutzername ungültig',
   h_update:'Firmware-Update (OTA)',k_cur:'Aktuell',k_part:'Partition',
-  btn_upload:'Hochladen & flashen',hint_ota:'Nur firmware.bin (App-OTA). Nicht factory.bin. Nach Erfolg Neustart.',
+  btn_upload:'Hochladen & flashen',hint_ota:'Nur firmware.bin (App-OTA). Nicht factory.bin. Nach erfolgreichem Update wird der Rotor neugestartet und WLAN ist wieder aus. Einschalten wieder über RotorTcpBridge unter Einstellungen → Update.',
   upd_choose:'Datei wählen',upd_uploading:'Upload…',upd_ok:'OK – Neustart…',upd_fail:'Update fehlgeschlagen',
   h_reset:'Neustart / Werkseinstellung',
   p_reset:'Neustart: SoftAP bleibt aus bis SETWLAN:1. Werkseinstellung: FRAM + NVS löschen und Neustart.',
@@ -269,21 +399,40 @@ de:{
   btn_jog_cw:'JOG CW',btn_jog_ccw:'JOG CCW',btn_jog_stop:'Stop',
   s0:'START',s1:'ENCODER',s2:'DRIVE',s3:'ENDSTOPS',s4:'WEATHER',s5:'TEMP',
   s6:'CAL',s7:'ZERO',s8:'VERIFY',s9:'ANTENNA',s10:'DONE',
-  reboot_hint:'Encoder-Typ geändert – bitte Neustart abwarten, dann Setup fortsetzen.',
-  temp_hint:'Einen Sensor (Motor oder H-Brücke) kurz erwärmen. Steigt TEMPA statt TEMPM → tauschen.',
+  reboot_hint:'Encoder-Typ ändern löst einen Neustart aus — WLAN geht aus. Danach in RotorTcpBridge unter Einstellungen → Update das WLAN wieder aktivieren, neu verbinden und Setup fortsetzen.',
+  cpr_reboot_hint:'CPR ändern (mit Endschaltern) löst einen Neustart aus — WLAN geht aus. Danach in RotorTcpBridge unter Einstellungen → Update das WLAN wieder aktivieren, neu verbinden und Setup fortsetzen. Ohne Endschalter: kein Neustart.',
+  temp_hint:'Außenfühler kurz mit der Hand anfassen. Steigt die Motortemperatur statt der Außentemperatur → Zuordnung ist verdreht, dann tauschen.',
+  temp_swap:'Temperaturen tauschen',temp_swapped:'Zuordnung getauscht',
   srvjog_hint:'Service-JOG: ohne Referenz/Stall (Deadman bleibt). Taste halten = fahren.'
 },
 en:{
-  subtitle:'SoftAP · Status · Setup · OTA',
+  brand_title:'Rotator Control DK8DE',
+  brand_sub:'Configuration FW: —',
   badge_loading:'loading…',badge_ok:'OK',badge_offline:'offline',
-  tab_status:'Status',tab_setup:'Setup',tab_update:'Update',tab_reset:'Reset',
-  h_rotor:'Rotor data',h_setup:'Commissioning',
-  p_setup:'Rotor values only (NVS/FRAM). Each save is verified with a read-back.',
-  k_angle:'Angle (°)',k_tempA:'Ambient temp (°C)',k_tempM:'Motor temp (°C)',
+  tab_status:'Status',tab_move:'Move',tab_setup:'Setup',tab_user:'User',tab_wifi:'Wi‑Fi',tab_update:'Update',tab_reset:'Reset',
+  h_rotor:'Rotator data',h_move:'Move',h_setup:'Commissioning',
+  warn_move_speed:'Set a low speed — Web JOG has no ramps (immediate start/stop).',
+  p_move:'Hold button to drive. Axis limits (Amin/Amax) stay active. Deadman/position timeout are off during SoftAP JOG.',
+  btn_jog_left:'Jog Left',btn_jog_right:'Jog Right',
+  lbl_pwm:'Speed (SETPWM)',
+  hint_move:'Slider = JOG speed, from Min-PWM to Max-PWM. Runtime only, not stored. No ramps.',
+  hint_ssi_zero:'SSI: align rotator to 0°, then set zero.',
+  btn_enc_zero:'Encoder to 0 (SETENCZERO)',
+  toast_enc_zero_ok:'Encoder zero set',
+  p_setup:'Rotator values only (NVS/FRAM). Each save is verified with a read-back.',
+  k_angle:'Angle (°)',k_tempA:'Outdoor temp (°C)',k_tempM:'Motor temp (°C)',
   k_fw:'Firmware',k_homed:'Homed',k_pwm:'SETPWM (%)',
   k_wind:'Wind (km/h)',k_windDir:'Wind direction (°)',
+  h_user:'User',p_user:'Login for the config page (HTTP Basic Auth). Stored in NVS.',
+  lbl_user:'Username',lbl_pass:'New password',lbl_pass2:'Repeat password',
+  hint_user:'At least 4 characters. You may need to log in again after saving.',
+  h_wifi:'Wi‑Fi (SoftAP)',p_wifi:'Hotspot password. SSID stays Rotor_<UID>.',
+  lbl_ssid:'SSID',lbl_wifipass:'New Wi‑Fi key',lbl_wifipass2:'Repeat new Wi‑Fi key',
+  hint_wifi:'8–63 characters (WPA2). Saving triggers a reboot — the connection drops. Then in RotorTcpBridge under Settings → Update re-enable Wi‑Fi and connect with the new key. On Windows you may need to “forget” the old network so Windows prompts for the new key.',
+  toast_user_ok:'User saved',toast_wifi_ok:'Wi‑Fi key saved — rebooting…',
+  err_mismatch:'Passwords do not match',err_pass:'Invalid password',err_user:'Invalid username',
   h_update:'Firmware update (OTA)',k_cur:'Current',k_part:'Partition',
-  btn_upload:'Upload & flash',hint_ota:'firmware.bin only (app OTA). Not factory.bin. Reboot after success.',
+  btn_upload:'Upload & flash',hint_ota:'firmware.bin only (app OTA). Not factory.bin. After a successful update the rotator reboots and Wi‑Fi is off again. Re-enable it in RotorTcpBridge under Settings → Update.',
   upd_choose:'Choose file',upd_uploading:'Upload…',upd_ok:'OK – rebooting…',upd_fail:'Update failed',
   h_reset:'Reboot / factory reset',
   p_reset:'Reboot: SoftAP stays off until SETWLAN:1. Factory: clear FRAM + NVS and reboot.',
@@ -295,14 +444,29 @@ en:{
   btn_jog_cw:'JOG CW',btn_jog_ccw:'JOG CCW',btn_jog_stop:'Stop',
   s0:'START',s1:'ENCODER',s2:'DRIVE',s3:'ENDSTOPS',s4:'WEATHER',s5:'TEMP',
   s6:'CAL',s7:'ZERO',s8:'VERIFY',s9:'ANTENNA',s10:'DONE',
-  reboot_hint:'Encoder type changed – wait for reboot, then continue setup.',
-  temp_hint:'Briefly warm motor or H-bridge sensor. If TEMPA rises instead of TEMPM → swap.',
+  reboot_hint:'Changing the encoder type reboots the device — Wi‑Fi turns off. Then in RotorTcpBridge under Settings → Update re-enable Wi‑Fi, reconnect, and continue setup.',
+  cpr_reboot_hint:'Changing CPR (with endstops) reboots the device — Wi‑Fi turns off. Then in RotorTcpBridge under Settings → Update re-enable Wi‑Fi, reconnect, and continue setup. Without endstops: no reboot.',
+  temp_hint:'Briefly warm the outdoor sensor with your hand. If motor temperature rises instead of outdoor → mapping is swapped, then swap.',
+  temp_swap:'Swap temperatures',temp_swapped:'Mapping swapped',
   srvjog_hint:'Service JOG: no ref/stall (deadman stays). Hold button to move.'
 }
 };
 function t(k){return (I18N[lang]&&I18N[lang][k])||(I18N.de[k])||k;}
+var liveFw='—';
+function brandSubText(){
+  var base=t('brand_sub');
+  var fw=liveFw||'—';
+  if(base.indexOf('FW:')>=0)return base.replace(/FW:.*/,'FW: '+fw);
+  return base+' FW: '+fw;
+}
 function applyI18n(){
-  document.querySelectorAll('[data-i18n]').forEach(el=>{const k=el.getAttribute('data-i18n');if(k)el.textContent=t(k);});
+  document.querySelectorAll('[data-i18n]').forEach(function(el){
+    var k=el.getAttribute('data-i18n');
+    if(!k)return;
+    if(k==='brand_sub'){el.textContent=brandSubText();return;}
+    el.textContent=t(k);
+  });
+  document.title=t('brand_title');
   document.querySelectorAll('.lang-btn').forEach(b=>b.classList.toggle('active',b.dataset.lang===lang));
   if(document.getElementById('tab-setup')&&!document.getElementById('tab-setup').hidden) renderSetup();
 }
@@ -320,7 +484,8 @@ function api(path,opts){
   });
 }
 function showTab(name){
-  var tabs=['status','setup','update','reset'];
+  if(name!=='move')stopMoveJog();
+  var tabs=['status','move','setup','user','wifi','update','reset'];
   for(var i=0;i<tabs.length;i++){
     var sec=document.getElementById('tab-'+tabs[i]);
     if(!sec)continue;
@@ -334,6 +499,29 @@ function showTab(name){
   var burger=$('navBurger');if(burger)burger.setAttribute('aria-expanded','false');
   if(name==='update')loadUpdInfo();
   if(name==='setup'){setupStep=0;loadSetupState().then(renderSetup);}
+  if(name==='user')loadUser();
+  if(name==='wifi')loadWifi();
+  if(name==='move')syncMoveFromLive();
+}
+function credErr(code){
+  if(code==='mismatch')return t('err_mismatch');
+  if(code==='user')return t('err_user');
+  if(code==='pass')return t('err_pass');
+  return code||'err';
+}
+function loadUser(){
+  api('/api/user').then(function(r){return r.json();}).then(function(j){
+    var el=$('userName');if(el)el.value=j.user||'';
+    var p1=$('userPass');if(p1)p1.value='';
+    var p2=$('userPass2');if(p2)p2.value='';
+  }).catch(function(){});
+}
+function loadWifi(){
+  api('/api/wifi').then(function(r){return r.json();}).then(function(j){
+    setTxt('wifiSsid','SSID: '+(j.ssid||'-'));
+    var p1=$('wifiPass');if(p1)p1.value='';
+    var p2=$('wifiPass2');if(p2)p2.value='';
+  }).catch(function(){});
 }
 function setConn(ok){
   var d=$('connDot');if(d)d.className='dot '+(ok?'on':'off');
@@ -347,19 +535,120 @@ function showEl(id,on){
   if(on){el.removeAttribute('hidden');el.style.display='';}
   else{el.setAttribute('hidden','');el.style.display='none';}
 }
+var movePwmBusy=false;
+var moveJogTimer=null;
+var lastLive=null;
+function syncMoveFromLive(j){
+  j=j||lastLive;if(!j)return;
+  var mn=Number(j.minPwm);if(!isFinite(mn))mn=0;
+  var mx=Number(j.maxPwm);if(!isFinite(mx))mx=100;
+  if(mx<mn){var tmp=mn;mn=mx;mx=tmp;}
+  if(mx<=mn)mx=mn+1;
+  var sl=$('movePwm');
+  if(sl){
+    sl.min=String(mn);sl.max=String(mx);
+    if(!movePwmBusy){
+      var cur=Number(j.pwm);if(!isFinite(cur))cur=mn;
+      if(cur<mn)cur=mn;if(cur>mx)cur=mx;
+      sl.value=String(cur);
+      setTxt('movePwmVal',fmt(cur,1));
+    }
+  }
+  setTxt('movePwmMin',fmt(mn,1));
+  setTxt('movePwmMax',fmt(mx,1));
+  setTxt('movePos',fmt(j.angle,1));
+  showEl('moveSsiZeroBox',Number(j.encType)===3);
+}
+var moveJogDir=0;
+var moveJogPtrId=null;
+function stopMoveJog(){
+  if(moveJogTimer){clearInterval(moveJogTimer);moveJogTimer=null;}
+  var was=moveJogDir;
+  moveJogDir=0;
+  moveJogPtrId=null;
+  if(was!==0){
+    api('/api/setup/jog',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({dir:0,limits:0})}).catch(function(){});
+  }
+}
+function startMoveJog(dir){
+  if(dir!==1&&dir!==2)return;
+  // Gleiche Richtung: kein Stopp/Neustart (sonst Ruckeln ohne Rampen)
+  if(moveJogDir===dir&&moveJogTimer)return;
+  if(moveJogTimer){clearInterval(moveJogTimer);moveJogTimer=null;}
+  moveJogDir=dir;
+  function tick(){
+    if(moveJogDir!==dir)return;
+    api('/api/setup/jog',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({dir:dir,limits:0})}).catch(function(){});
+  }
+  tick();
+  moveJogTimer=setInterval(tick,100);
+}
+function bindMoveControls(){
+  function hold(btn,dir){
+    if(!btn)return;
+    btn.addEventListener('pointerdown',function(e){
+      if(e.button!=null&&e.button!==0)return;
+      e.preventDefault();
+      try{btn.setPointerCapture(e.pointerId);}catch(err){}
+      moveJogPtrId=e.pointerId;
+      startMoveJog(dir);
+    });
+    function endPtr(e){
+      if(moveJogPtrId!=null&&e.pointerId!==moveJogPtrId)return;
+      try{btn.releasePointerCapture(e.pointerId);}catch(err){}
+      stopMoveJog();
+    }
+    btn.addEventListener('pointerup',endPtr);
+    btn.addEventListener('pointercancel',endPtr);
+    // mouseleave absichtlich NICHT — Capture haelt bis pointerup
+  }
+  hold($('moveJogLeft'),1);
+  hold($('moveJogRight'),2);
+  window.addEventListener('blur',stopMoveJog);
+  var bz=$('btnMoveEncZero');
+  if(bz)bz.onclick=function(){
+    stopMoveJog();
+    applyCmd('SETENCZERO','').then(function(){
+      toast(t('toast_enc_zero_ok'),true);
+      return pollLive();
+    }).catch(function(err){toast(String(err&&err.message||err||'ERR'),false);});
+  };
+  var sl=$('movePwm');
+  if(!sl)return;
+  var pwmTimer=null;
+  function sendPwm(){
+    var v=Number(sl.value);
+    if(!isFinite(v))return;
+    setTxt('movePwmVal',fmt(v,1));
+    applyCmd('SETPWM',fmt(v,1)).catch(function(){});
+  }
+  sl.addEventListener('input',function(){
+    movePwmBusy=true;
+    setTxt('movePwmVal',fmt(Number(sl.value),1));
+    if(pwmTimer)clearTimeout(pwmTimer);
+    pwmTimer=setTimeout(function(){sendPwm();movePwmBusy=false;},120);
+  });
+  sl.addEventListener('change',function(){sendPwm();movePwmBusy=false;});
+}
 function pollLive(){
   api('/api/live').then(r=>r.json()).then(function(j){
-    setTxt('vAngle',fmt(j.angle,2));
+    lastLive=j;
+    setTxt('vAngle',fmt(j.angle,1));
     setTxt('vTempA',fmt(j.tempA,1));
     setTxt('vTempM',fmt(j.tempM,1));
     setTxt('vFw',j.fw||'-');
     setTxt('vHomed',(j.homed!=null)?String(j.homed):'-');
     setTxt('vPwm',fmt(j.pwm,1));
+    if(j.fw){liveFw=String(j.fw);var bs=$('brandSub');if(bs)bs.textContent=brandSubText();}
     var windOn=!!j.windEn;
     showEl('kvWindKmh',windOn);showEl('kvWindDir',windOn);
     if(windOn){setTxt('vWindKmh',fmt(j.windKmh,1));setTxt('vWindDir',fmt(j.windDir,1));}
     setHtml('vAp',(j.ssid||'-')+'<br>'+(j.ip||'-'));
     setTxt('vUid',j.uid||'-');
+    var moveSec=$('tab-move');
+    if(moveSec&&!moveSec.hidden)syncMoveFromLive(j);
     setConn(true);
   }).catch(function(){setConn(false);});
 }
@@ -496,16 +785,16 @@ function renderSetup(){
       '<p class="hint">Anemo '+fmt(s.windKmh,1)+' km/h · Dir '+fmt(s.windDir,1)+'°</p>'+
       '<div class="actions"><button class="btn" id="btnSaveWind">'+t('btn_save')+'</button></div>';
   } else if(setupStep===5){
-    html+='<div class="grid"><div class="kv"><div class="k">TEMPA</div><div class="v mono" style="font-size:1.4em" id="liveTA">'+fmt(s.tempA,1)+'</div></div>'+
-      '<div class="kv"><div class="k">TEMPM</div><div class="v mono" style="font-size:1.4em" id="liveTM">'+fmt(s.tempM,1)+'</div></div>'+
-      '<div class="kv"><div class="k">SWAP</div><div class="v mono" style="font-size:1.4em">'+(s.swapTmp?1:0)+'</div></div></div>'+
+    html+='<div class="grid"><div class="kv"><div class="k">'+t('k_tempA')+'</div><div class="v mono" style="font-size:1.4em" id="liveTA">'+fmt(s.tempA,1)+'</div></div>'+
+      '<div class="kv"><div class="k">'+t('k_tempM')+'</div><div class="v mono" style="font-size:1.4em" id="liveTM">'+fmt(s.tempM,1)+'</div></div>'+
+      '<div class="kv"><div class="k">'+t('temp_swapped')+'</div><div class="v mono" style="font-size:1.4em">'+(s.swapTmp?(lang==='en'?'yes':'ja'):(lang==='en'?'no':'nein'))+'</div></div></div>'+
       '<p class="hint">'+t('temp_hint')+'</p>'+
-      '<div class="actions"><button class="btn" id="btnSwap">SETSWAPTEMP '+(s.swapTmp?0:1)+'</button></div>';
+      '<div class="actions"><button class="btn" id="btnSwap">'+t('temp_swap')+'</button></div>';
   } else if(setupStep===6){
     if(e===1||e===2){
       html+=field('fCpr',e===1?'SETENCCAX':'SETENCCRI',s.cpr)+
         '<p class="hint">Counts '+s.encCount+' · CPR einmessen: Marke → JOG bekannten Winkel → Counts → berechnen.</p>'+
-        (endstc()===0?jogBarHtml():'<p class="hint">Mit Endschaltern: Homing im nächsten Schritt.</p>')+
+        (endstc()===0?jogBarHtml():'<p class="hint">Mit Endschaltern: Homing im nächsten Schritt.</p><p class="hint">'+t('cpr_reboot_hint')+'</p>')+
         '<div class="actions"><button class="btn" id="btnSaveCpr">'+t('btn_save')+'</button></div>';
     } else if(e===3){
       html+='<p class="hint">SSI: kein CPR. Null im nächsten Schritt mit SETENCZERO.</p>'+
@@ -610,8 +899,11 @@ function bindSetupButtons(){
   var sc=$('btnSaveCpr');
   if(sc)sc.onclick=function(){
     var cmd=encType()===1?'SETENCCAX':'SETENCCRI';
-    applyCmd(cmd,$('fCpr').value).then(function(){toast('OK',true);return loadSetupState().then(renderSetup);})
-      .catch(function(err){setSetupErr(String(err.message||err));});
+    var willReboot=endstc()>0;
+    applyCmd(cmd,$('fCpr').value).then(function(){
+      toast(willReboot?t('cpr_reboot_hint'):'OK',true);
+      return loadSetupState().then(renderSetup);
+    }).catch(function(err){setSetupErr(String(err.message||err));});
   };
   var sdg=$('btnSaveDgcal');
   if(sdg)sdg.onclick=function(){
@@ -690,8 +982,8 @@ function loadUpdInfo(){
   api('/api/update/info').then(r=>r.json()).then(function(j){
     setTxt('updCur',j.fw||'-');
     var run=(j.partition||'-')+(j.size?(' · '+j.size):'');
-    var ota=j.ota?(' → OTA '+j.ota+(j.otaSize?(' · '+j.otaSize):'')):'';
-    setTxt('updPart',run+ota);
+    var ota=j.ota?(j.ota+(j.otaSize?(' · '+j.otaSize):'')):'';
+    setHtml('updPart',ota? (run+'<br>'+ota) : run);
   }).catch(function(){});
 }
 var btnUpload=$('btnUpload');
@@ -711,6 +1003,32 @@ if(btnUpload)btnUpload.onclick=function(){
   xhr.onerror=function(){setTxt('updMsg',t('upd_fail'));toast(t('toast_update_fail'),false);};
   var fd=new FormData();fd.append('update',f);xhr.send(fd);
 };
+$('btnUserSave').onclick=function(){
+  var u=($('userName')&&$('userName').value||'').trim();
+  var p=$('userPass')&&$('userPass').value||'';
+  var p2=$('userPass2')&&$('userPass2').value||'';
+  if(p!==p2){toast(t('err_mismatch'),false);return;}
+  if(u.length<1||u.length>31){toast(t('err_user'),false);return;}
+  if(p.length<4||p.length>63){toast(t('err_pass'),false);return;}
+  api('/api/user',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({user:u,pass:p,pass2:p2})}).then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j};});})
+    .then(function(x){
+      if(x.ok&&x.j&&x.j.ok){toast(t('toast_user_ok'),true);if($('userPass'))$('userPass').value='';if($('userPass2'))$('userPass2').value='';}
+      else toast(credErr(x.j&&x.j.err),false);
+    }).catch(function(){toast(t('err_pass'),false);});
+};
+$('btnWifiSave').onclick=function(){
+  var p=$('wifiPass')&&$('wifiPass').value||'';
+  var p2=$('wifiPass2')&&$('wifiPass2').value||'';
+  if(p!==p2){toast(t('err_mismatch'),false);return;}
+  if(p.length<8||p.length>63){toast(t('err_pass'),false);return;}
+  api('/api/wifi',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({pass:p,pass2:p2})}).then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j};});})
+    .then(function(x){
+      if(x.ok&&x.j&&x.j.ok){toast(t('toast_wifi_ok'),true);if($('wifiPass'))$('wifiPass').value='';if($('wifiPass2'))$('wifiPass2').value='';}
+      else toast(credErr(x.j&&x.j.err),false);
+    }).catch(function(){toast(t('err_pass'),false);});
+};
 $('btnReboot').onclick=function(){toast(t('toast_reboot'),true);api('/api/reboot',{method:'POST'}).catch(function(){});};
 $('btnFactory').onclick=function(){
   if(!confirm(t('confirm_factory')))return;
@@ -728,6 +1046,7 @@ $('navBurger').onclick=function(){
 document.querySelectorAll('.lang-btn').forEach(function(btn){
   btn.onclick=function(){lang=btn.getAttribute('data-lang');applyI18n();};
 });
+bindMoveControls();
 applyI18n();
 showTab('status');
 pollLive();

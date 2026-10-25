@@ -1,4 +1,4 @@
-Rotor DK8DE Firmware 1.9.6
+Rotor DK8DE Firmware 1.9.7
 
 factory.bin  - Komplettflash ab Adresse 0 (USB-Webflasher / esptool)
 firmware.bin - nur App fuer SoftAP-OTA (Web-Tab Update)

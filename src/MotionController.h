@@ -63,6 +63,10 @@ struct MotionConfigPointers {
   // Setup-Modus (SETSETUP): JOG ohne Amin/Amax-Stopp (auch negativ),
   // ohne Ref/Stall — fuer Einmessen ohne Endschalter.
   const bool*    setupMode       = nullptr;
+
+  // SoftAP-Web aktiv (SETWLAN): nur dann abweichendes JOG-Verhalten (schneller auf SETPWM).
+  // Bus-JOG (auch mit Service/Setup) bleibt unveraendert.
+  const bool*    softApActive    = nullptr;
 };
 
 
