@@ -464,7 +464,8 @@ static uint32_t g_arriveHoldMs = 200;
 // Beispiel: 20..40 ms ist meist gut.
 
 // ============================================================================
-// LED
+// LED (GPIO14, aktiv LOW) — Fehler dauerhaft an; SoftAP: Doppelblitz 200/200/200/600;
+// Idle 500/500; Bewegung schneller (siehe Perioden unten).
 // ============================================================================
 // LED Blinken im Idle (ms pro Periode).
 static uint32_t g_ledIdlePeriodMs = 1000;
@@ -727,6 +728,22 @@ static void updateLbLed(uint32_t nowMs, bool moving, bool fault) {
   if (fault) {
     board.setLed(true);
     g_ledState = true;
+    return;
+  }
+
+  // SoftAP aktiv (SETWLAN / Boot-Taster): Doppelblitz wie Inklinometer
+  // 200 ms an → 200 ms aus → 200 ms an → 600 ms Pause
+  if (g_wlanActive) {
+    constexpr uint32_t BLINK_ON = 200;
+    constexpr uint32_t BLINK_GAP = 200;
+    constexpr uint32_t PAUSE_MS = 600;
+    constexpr uint32_t CYCLE = BLINK_ON + BLINK_GAP + BLINK_ON + PAUSE_MS;  // 1200
+    const uint32_t t = nowMs % CYCLE;
+    const bool on =
+        (t < BLINK_ON) ||
+        (t >= (BLINK_ON + BLINK_GAP) && t < (BLINK_ON + BLINK_GAP + BLINK_ON));
+    g_ledState = on;
+    board.setLed(on);
     return;
   }
 

@@ -786,6 +786,9 @@ struct IncCmdEntry {
 
 // Rotor-Suffix → Sensor-Name (GETINCxxx / SETINCxxx)
 static const IncCmdEntry kIncCmds[] = {
+  { "VER",    "VERSION",  INC_PK_NONE,         true },  // nur GET
+  { "UID",    "UID",      INC_PK_NONE,         true },  // nur GET
+  { "DG",     "DG",       INC_PK_NONE,         true },  // nur GET (Sensor-Rohwinkel)
   { "SWAPXY", "SWAPXY",   INC_PK_BOOL01,       true },
   { "INVREF", "INVREF",   INC_PK_BOOL01,       true },
   { "INVSEN", "INVSENS",  INC_PK_BOOL01,       true },
@@ -816,10 +819,25 @@ static const IncCmdEntry* findIncCmd(const char* suffix) {
 }
 
 static String formatInclinoGetValue(const String& raw) {
-  // Sensor liefert oft Punkt; Rotor-Protokoll nutzt Komma.
+  // Sensor liefert Floats oft mit Punkt; Rotor-Protokoll nutzt Komma.
+  // SemVer (z. B. 1.3.5) und Text (UID) nicht umschreiben: >1 Punkt bzw. Nicht-Zahl.
   String s = raw;
   s.trim();
-  s.replace(".", ",");
+  int dots = 0;
+  bool numeric = (s.length() > 0);
+  for (unsigned i = 0; i < s.length(); ++i) {
+    const char c = s[i];
+    if (c == '.') {
+      ++dots;
+      continue;
+    }
+    if (!((c >= '0' && c <= '9') || c == ',' || c == '-' || c == '+' || c == 'e' ||
+          c == 'E')) {
+      numeric = false;
+      break;
+    }
+  }
+  if (numeric && dots <= 1) s.replace(".", ",");
   return s;
 }
 

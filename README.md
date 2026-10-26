@@ -220,7 +220,7 @@ Winkelangaben typisch als Grad mit Komma (`12,50` = 12,50Â°). Intern: Deg01 (=
 | Kommando | Beschreibung |
 |----------|--------------|
 | `GETVERSION` | Firmware-Version (z. B. `1.10.0`), siehe [Versionierung](#versionierung) |
-| `GETWLAN` / `SETWLAN:0` / `SETWLAN:1` | SoftAP-Web-UI: `1` = Hotspot `Rotor_<UID>` an (Default-Passwort `Rotorconfig`, UI Default `admin`/`Rotorconfig` @ 192.168.4.1; beides im Tab **Benutzer** / **WLAN** änderbar und NVS-persistent), `0` = aus. SoftAP-Zustand nicht persistent — nach Reboot immer aus. Tabs: Status, Setup, Benutzer, WLAN, Update, Reset. Hinweis: WiFi kann die Strommessung (ADC2) beeinträchtigen. |
+| `GETWLAN` / `SETWLAN:0` / `SETWLAN:1` | SoftAP-Web-UI: `1` = Hotspot `Rotor_<UID>` an (Default-Passwort `Rotorconfig`, UI Default `admin`/`Rotorconfig` @ 192.168.4.1; beides im Tab **Benutzer** / **WLAN** änderbar und NVS-persistent), `0` = aus. SoftAP-Zustand nicht persistent — nach Reboot immer aus. LB-LED bei SoftAP: **200 ms an / 200 ms aus / 200 ms an / 600 ms Pause** (wie Inklinometer). Tabs: Status, Setup, Benutzer, WLAN, Update, Reset. Hinweis: WiFi kann die Strommessung (ADC2) beeinträchtigen. |
 | `GETSRVJOG` / `SETSRVJOG:0\|1` | Service-JOG: JOG ohne `GETREF`/Encoder-GÃ¼ltigkeit, Stall aus; Endschalter-GPIO und JOG-Deadman bleiben. Nicht persistent (nach Reboot/SoftAP-Ende aus). |
 | `GETSETUP` / `SETSETUP:0\|1` | Setup-Modus (Inbetriebnahme): `SETSETUP:1` = JOG ohne Amin/Amax-Stopp (auch negativ/Ã¼ber Max), ohne Ref, Stall aus; `GETPOSDG` zeigt Rohwinkel. **`SETSETUP:0`** = Service aus: JOG stoppt, **Achsgrenzen (Amin/Amax) fÃ¼r JOG wieder aktiv**, Stall wieder wie konfiguriert. Nicht persistent (auch Reboot/`SETWLAN:0` beendet Setup). |
 | `GETID` / `SETID` | Slave-ID lesen / setzen (gerichtet an aktuelle ID; ACK; gÃ¼ltig 1â€¦254). Nach ID-Wechsel bleibt die **alte** Adresse ca. 5 s als Alias (nachfolgendes `SETID` an alte ID kommt noch an). |
@@ -416,6 +416,29 @@ GETINCSTL
 ```
 GETINCSHK
 â†’ ACK_GETINCSHK:0
+```
+
+#### Identitaet / Messung am Sensor
+
+**`GETINCVER`** â€” Firmware-Version des Inklinometers (SemVer, z. B. `1.3.5`). Nur GET. Entspricht Sensor-`#GETVERSION$`. Benoetigt Inklinometer-Firmware ab **1.3.5**.
+
+```
+GETINCVER
+â†’ ACK_GETINCVER:1.3.5
+```
+
+**`GETINCUID`** â€” Geraete-UID (6 Hex-Zeichen, SoftAP-Suffix `INKLINO-<UID>`). Nur GET. Entspricht Sensor-`#GETUID$`. Ab Sensor-FW **1.3.5**.
+
+```
+GETINCUID
+â†’ ACK_GETINCUID:C3A1B2
+```
+
+**`GETINCDG`** â€” gefilterter Elevationswinkel direkt vom Sensor (Grad). Nur GET. Fuer den Master-Betrieb weiter `GETPOSDG` nutzen; `GETINCDG` dient der Diagnose (Sensor vs. Rotor).
+
+```
+GETINCDG
+â†’ ACK_GETINCDG:45,12
 ```
 
 #### Diagnose / SoftAP am Inklinometer
