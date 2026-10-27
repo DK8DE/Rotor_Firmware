@@ -144,7 +144,7 @@ jobs:
           ls -la IMGs site/IMGs
 
       - name: Upload flash binaries (artifact)
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: Rotor-${{ steps.meta.outputs.version }}
           path: |
@@ -191,7 +191,7 @@ jobs:
 
       - name: Upload Pages artifact
         if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v5
         with:
           path: site
 
