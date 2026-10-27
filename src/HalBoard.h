@@ -118,7 +118,7 @@ public:
   // LED aktiv LOW
   void setLed(bool on);
 
-  // Endschalter aktiv LOW (gedrueckt = LOW) — logisch (nach optionalem Swap)
+  // Endschalter — logisch (nach optionalem Swap/ActiveHigh)
   bool readEndLeft() const;
   bool readEndRight() const;
 
@@ -126,7 +126,7 @@ public:
   void setEndstopSwap(bool swap);
   bool getEndstopSwap() const { return _endstopSwap; }
 
-  // Pegel: false = aktiv LOW (Default, gedrueckt=LOW), true = aktiv HIGH (gedrueckt=HIGH)
+  // Pegel: false = aktiv LOW (Default), true = aktiv HIGH
   void setEndstopActiveHigh(bool activeHigh);
   bool getEndstopActiveHigh() const { return _endstopActiveHigh; }
 
@@ -210,5 +210,5 @@ private:
   // 0=keine, 1=ein Kontakt (L||R), 2=zwei Kontakte (Default)
   uint8_t  _endstopCount = 2;
   bool     _endstopSwap = false; // true: physische L/R-Pins vertauschen
-  bool     _endstopActiveHigh = false; // true: gedrueckt = HIGH (sonst LOW)
+  bool     _endstopActiveHigh = false; // Default aktiv LOW; true: gedrueckt = HIGH
 };

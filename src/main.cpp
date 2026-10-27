@@ -585,7 +585,7 @@ static bool g_tempSwapSensors = true;
 static bool g_encInvert = false; // Typ 1/2/3; Typ 4 → SETINCINVROT
 static bool g_motInvert = false; // PWM-Polaritaet
 static bool g_endSwap   = false; // Endschalter L/R logisch tauschen
-static bool g_endInv    = false; // false=aktiv LOW, true=aktiv HIGH (SETENDINV)
+static bool g_endInv    = false; // Default aktiv LOW; true=aktiv HIGH (SETENDINV)
 
 // Warnschwellen (GradC). <=0 deaktiviert die jeweilige Warnung.
 static float g_tempWarnAmbientC = 0.0f;

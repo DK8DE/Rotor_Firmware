@@ -135,7 +135,7 @@ struct Rs485DispatcherConfig {
   bool*     encInvert = nullptr;  // Typ 1/2/3; Typ 4 → NAK ENCTYPE
   bool*     motInvert = nullptr;  // PWM-Polaritaet (alle Typen)
   bool*     endSwap   = nullptr;  // Endschalter L/R logisch tauschen
-  bool*     endInv    = nullptr;  // Endschalter aktiv HIGH (1) / aktiv LOW (0)
+  bool*     endInv    = nullptr;  // Endschalter aktiv HIGH (1) / aktiv LOW (0, Default)
 
   // Getriebespiel (Deg01), fuer manuelle Referenz ohne Homing.
   int32_t*  backlashDeg01 = nullptr;

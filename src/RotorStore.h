@@ -42,7 +42,7 @@ static constexpr uint8_t FRAM_CFG_F_ENDSTOP_COUNT   = 0x02; // endstopCount expl
 static constexpr uint8_t FRAM_CFG_F_ENC_INVERT      = 0x04; // Encoder-Richtung invertieren (Typ 1/2/3)
 static constexpr uint8_t FRAM_CFG_F_MOT_INVERT      = 0x08; // Motor-PWM-Polaritaet invertieren
 static constexpr uint8_t FRAM_CFG_F_END_SWAP        = 0x10; // Endschalter L/R logisch tauschen
-static constexpr uint8_t FRAM_CFG_F_END_INV         = 0x20; // Endschalter aktiv HIGH (sonst aktiv LOW)
+static constexpr uint8_t FRAM_CFG_F_END_INV         = 0x20; // Endschalter aktiv HIGH (sonst Default aktiv LOW)
 
 #pragma pack(push, 1)
 struct RotorStoreHeader {
@@ -252,7 +252,7 @@ struct RotorStoreRefs {
   bool*     encInvert = nullptr;   // Encoder-Richtung (Typ 1/2/3)
   bool*     motInvert = nullptr;   // Motor-PWM-Polaritaet
   bool*     endSwap = nullptr;     // Endschalter L/R tauschen
-  bool*     endInv  = nullptr;     // Endschalter aktiv HIGH (1) statt aktiv LOW (0)
+  bool*     endInv  = nullptr;     // Endschalter aktiv HIGH (1) / aktiv LOW (0, Default)
   uint8_t*  endstopCount = nullptr; // 0/1/2
 
   String*   antName1 = nullptr;
