@@ -34,6 +34,10 @@ public:
   void brake(bool on);
   bool isBraking() const { return _brakeActive; }
 
+  // Logisches Duty speichern; physische H-Bruecke ggf. spiegeln (MotInvert).
+  void setPolarityInvert(bool invert);
+  bool getPolarityInvert() const { return _polarityInvert; }
+
   void setDutySigned(float dutyPercentSigned);
   float getLastDutySigned() const { return _dutySigned; }
 
@@ -61,7 +65,8 @@ private:
 
   bool  _ready = false;
   bool  _enabled = false;
-  float _dutySigned = 0.0f;
+  float _dutySigned = 0.0f;       // logisches Duty (vor Polaritaets-Invert)
+  bool  _polarityInvert = false;  // true => H-Bruecke mit -duty
   bool  _brakeActive = false; // true => beide Ausgaenge HIGH (aktive Bremse)
 
   // ------------------------------------------------------------

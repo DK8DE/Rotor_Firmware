@@ -139,6 +139,11 @@ public:
   void setEncoderType(EncoderType t);
   EncoderType getEncoderType() const { return _cfg.encType; }
 
+  // Encoder-Richtung invertieren (Typ 1/2: Vorzeichen Counts/Deg01;
+  // Typ 3: ssiInvertDirection; Typ 4: ignoriert — SETINCINVROT am Sensor).
+  void setInvertDirection(bool invert);
+  bool getInvertDirection() const { return _invertDirection; }
+
   long getCountsRaw() const;
   long getCountsCorrected() const;
   long getCountsDefault() const;
@@ -183,6 +188,7 @@ private:
   EncoderAxisConfig _cfg;
   UltraEncoderPCNT* _enc = nullptr;
   class TWK_KBE58_SSI* _ssi = nullptr;
+  bool _invertDirection = false; // Typ 1/2 Getter-Negation; Typ 3 via ssiInvertDirection
   bool _ssiValid = false;
   uint32_t _ssiPosition = 0;
   uint32_t _ssiLastReadCounter = 0;

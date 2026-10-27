@@ -17,6 +17,7 @@ Sensor-Befehle sind aus dem Quellcode (`handleFrame()` in der Inklinometer-Firmw
 | Master-Position | **`GETPOSDG`** (Rotor pollt intern `#GETDG$`) |
 | Sensor-Konfig | **`GETINC*` / `SETINC*`** — Werte im **NVS des Inklinometers**, nicht im Rotor-FRAM |
 | Achse Default | oft 0…90° (`amax`), Endschalter `SETENDSTC:0` oder `:2` |
+| Rotor-Invert | Winkel am Sensor weiter über `SETINCINV*`; am Rotor zusätzlich `SETMOTINV` (Motor), `SETENDSWAP` / `GETENDSTAT` (Endschalter). `SETENCINV` bei Typ 4 → `NAK …:ENCTYPE` |
 
 Proxy gilt **nur bei** `ENCTYPE=4`. Sonst: `NAK_…:ENCTYPE`. Keine Hardware: `NAK_…:NOHW`. Unbekanntes Suffix: `NAK_…:NOSUP`. Sensor-Timeout/NACK: `NAK_…:TIMEOUT` / `NAK_…:ERR`.
 

@@ -295,15 +295,22 @@ void EncoderAxis::setEncoderType(EncoderType t) {
   _cfg.encType = t;
 }
 
+void EncoderAxis::setInvertDirection(bool invert) {
+  _invertDirection = invert;
+  // Typ 3: vorhandenes SSI-Mapping speisen (wird in update() angewendet).
+  _cfg.ssiInvertDirection = invert;
+}
+
 long EncoderAxis::getCountsRaw() const {
   if (_cfg.encType == ENCTYPE_INCLINOMETER) {
     int32_t deg01 = 0;
     if (!getPositionDeg01(deg01)) return 0;
     return (long)deg01;
   }
-  if (_ssi) return (long)_ssiPosition;
+  if (_ssi) return (long)_ssiPosition; // bereits via ssiInvertDirection gemappt
   if (!_enc) return 0;
-  return _enc->getPositionStepsRaw();
+  const long c = _enc->getPositionStepsRaw();
+  return _invertDirection ? -c : c;
 }
 
 long EncoderAxis::getCountsCorrected() const {
@@ -312,7 +319,8 @@ long EncoderAxis::getCountsCorrected() const {
   }
   if (_ssi) return (long)_ssiPosition;
   if (!_enc) return 0;
-  return _enc->getPositionStepsCorrected();
+  const long c = _enc->getPositionStepsCorrected();
+  return _invertDirection ? -c : c;
 }
 
 long EncoderAxis::getCountsDefault() const {
@@ -321,7 +329,8 @@ long EncoderAxis::getCountsDefault() const {
   }
   if (_ssi) return (long)_ssiPosition;
   if (!_enc) return 0;
-  return _enc->getPositionSteps();
+  const long c = _enc->getPositionSteps();
+  return _invertDirection ? -c : c;
 }
 
 long EncoderAxis::getCountsExtended() const {
@@ -390,6 +399,7 @@ void EncoderAxis::setCounts(long newCounts) {
     return;
   }
   if (_ssi) {
+    // _ssiPosition ist logisch (nach Invert-Mapping) — keine zweite Negation.
     if (newCounts < 0) newCounts = 0;
     const int32_t cpr = _cfg.countsPerRevActual;
     if (cpr > 0 && newCounts >= cpr) newCounts = cpr - 1;
@@ -398,6 +408,8 @@ void EncoderAxis::setCounts(long newCounts) {
     return;
   }
   if (!_enc) return;
+  // Getter negieren bei Invert → Schreiben ebenfalls spiegeln.
+  if (_invertDirection) newCounts = -newCounts;
   _enc->setPositionSteps(newCounts);
   _enc->resetZHistory();
 }

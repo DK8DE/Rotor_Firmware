@@ -673,13 +673,25 @@ void HalBoard::setLed(bool on) {
 }
 
 bool HalBoard::readEndLeft() const {
-  // aktiv LOW (gedrueckt = LOW)
-  return (digitalRead(PIN_END_LEFT) == LOW);
+  // Bei Swap physischen rechten Pin als "links"; Pegel via ActiveHigh.
+  const int pin = _endstopSwap ? PIN_END_RIGHT : PIN_END_LEFT;
+  const bool levelHigh = (digitalRead(pin) == HIGH);
+  return _endstopActiveHigh ? levelHigh : !levelHigh;
 }
 
 bool HalBoard::readEndRight() const {
-  // aktiv LOW (gedrueckt = LOW)
-  return (digitalRead(PIN_END_RIGHT) == LOW);
+  // Bei Swap physischen linken Pin als "rechts"; Pegel via ActiveHigh.
+  const int pin = _endstopSwap ? PIN_END_LEFT : PIN_END_RIGHT;
+  const bool levelHigh = (digitalRead(pin) == HIGH);
+  return _endstopActiveHigh ? levelHigh : !levelHigh;
+}
+
+void HalBoard::setEndstopSwap(bool swap) {
+  _endstopSwap = swap;
+}
+
+void HalBoard::setEndstopActiveHigh(bool activeHigh) {
+  _endstopActiveHigh = activeHigh;
 }
 
 void HalBoard::setEndstopCount(uint8_t count) {

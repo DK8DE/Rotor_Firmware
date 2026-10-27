@@ -190,6 +190,10 @@ void RotorStore::packConfigFromRefs(RotorPersistConfig& out) const {
   }
 
   out.flags = (_amaxExplicit ? FRAM_CFG_F_AMAX_EXPLICIT : 0x00) | FRAM_CFG_F_ENDSTOP_COUNT;
+  if (r.encInvert && *r.encInvert) out.flags = (uint8_t)(out.flags | FRAM_CFG_F_ENC_INVERT);
+  if (r.motInvert && *r.motInvert) out.flags = (uint8_t)(out.flags | FRAM_CFG_F_MOT_INVERT);
+  if (r.endSwap && *r.endSwap) out.flags = (uint8_t)(out.flags | FRAM_CFG_F_END_SWAP);
+  if (r.endInv && *r.endInv) out.flags = (uint8_t)(out.flags | FRAM_CFG_F_END_INV);
 
   if (r.antName1) copyStr(out.antName1, *r.antName1);
   if (r.antName2) copyStr(out.antName2, *r.antName2);
@@ -278,6 +282,10 @@ void RotorStore::unpackConfigToRefs(const RotorPersistConfig& in) {
   if (r.antDp3) *r.antDp3 = (in.antDp3 != 0);
 
   _amaxExplicit = (in.flags & FRAM_CFG_F_AMAX_EXPLICIT) != 0;
+  if (r.encInvert) *r.encInvert = (in.flags & FRAM_CFG_F_ENC_INVERT) != 0;
+  if (r.motInvert) *r.motInvert = (in.flags & FRAM_CFG_F_MOT_INVERT) != 0;
+  if (r.endSwap) *r.endSwap = (in.flags & FRAM_CFG_F_END_SWAP) != 0;
+  if (r.endInv) *r.endInv = (in.flags & FRAM_CFG_F_END_INV) != 0;
 
   if (r.endstopCount) {
     const bool isAbs =

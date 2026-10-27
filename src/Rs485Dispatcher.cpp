@@ -18,6 +18,7 @@ static bool parseBoolParam(const String& p);
 #include "SafetyMonitor.h"
 #include "HomingController.h"
 #include "MotionController.h"
+#include "MotorMcpwm.h"
 #include "LoadMonitor.h"
 #include "TempSensors.h"
 
@@ -3490,6 +3491,100 @@ void Rs485Dispatcher::handleCommand(const Rs485Frame& f, uint32_t nowMs) {
     }
     if (shouldReply) sendAck(f.master, "SETENDSTC", "1");
     serialEventState("SETENDSTC");
+    return;
+  }
+
+  // GETENDSTAT — Live Endschalter L;R (0/1, nach ENDSWAP logisch)
+  if (cmd == "GETENDSTAT") {
+    if (!_board) {
+      if (shouldReply) sendNak(f.master, "GETENDSTAT", "NOHW");
+      return;
+    }
+    const int l = _board->readEndLeft() ? 1 : 0;
+    const int r = _board->readEndRight() ? 1 : 0;
+    if (shouldReply) {
+      sendAck(f.master, "GETENDSTAT", String(l) + ";" + String(r));
+    }
+    return;
+  }
+
+  // GETENDSWAP / SETENDSWAP — Endschalter L/R logisch tauschen
+  if (cmd == "GETENDSWAP") {
+    const bool v = (_cfg.endSwap) ? *_cfg.endSwap : false;
+    if (shouldReply) sendAck(f.master, "GETENDSWAP", v ? "1" : "0");
+    return;
+  }
+
+  if (cmd == "SETENDSWAP") {
+    const bool v = parseBoolParam(f.params);
+    persistPutBool("esw", _cfg.endSwap, v);
+    if (_board) {
+      _board->setEndstopSwap(v);
+    }
+    if (shouldReply) sendAck(f.master, "SETENDSWAP", "1");
+    serialEventState("SETENDSWAP");
+    return;
+  }
+
+  // GETENDINV / SETENDINV — Pegel: 0=aktiv LOW (Default), 1=aktiv HIGH
+  if (cmd == "GETENDINV") {
+    const bool v = (_cfg.endInv) ? *_cfg.endInv : false;
+    if (shouldReply) sendAck(f.master, "GETENDINV", v ? "1" : "0");
+    return;
+  }
+
+  if (cmd == "SETENDINV") {
+    const bool v = parseBoolParam(f.params);
+    persistPutBool("eivl", _cfg.endInv, v);
+    if (_board) {
+      _board->setEndstopActiveHigh(v);
+    }
+    if (shouldReply) sendAck(f.master, "SETENDINV", "1");
+    serialEventState("SETENDINV");
+    return;
+  }
+
+  // GETENCINV / SETENCINV — Encoder-Richtung (nur Typ 1/2/3)
+  if (cmd == "GETENCINV") {
+    if (isInclinoEncType(_cfg)) {
+      if (shouldReply) sendNak(f.master, "GETENCINV", "ENCTYPE");
+      return;
+    }
+    const bool v = (_cfg.encInvert) ? *_cfg.encInvert : false;
+    if (shouldReply) sendAck(f.master, "GETENCINV", v ? "1" : "0");
+    return;
+  }
+
+  if (cmd == "SETENCINV") {
+    if (isInclinoEncType(_cfg)) {
+      if (shouldReply) sendNak(f.master, "SETENCINV", "ENCTYPE");
+      return;
+    }
+    const bool v = parseBoolParam(f.params);
+    persistPutBool("eiv", _cfg.encInvert, v);
+    if (_cfg.encoderAxis) {
+      _cfg.encoderAxis->setInvertDirection(v);
+    }
+    if (shouldReply) sendAck(f.master, "SETENCINV", "1");
+    serialEventState("SETENCINV");
+    return;
+  }
+
+  // GETMOTINV / SETMOTINV — Motor-PWM-Polaritaet
+  if (cmd == "GETMOTINV") {
+    const bool v = (_cfg.motInvert) ? *_cfg.motInvert : false;
+    if (shouldReply) sendAck(f.master, "GETMOTINV", v ? "1" : "0");
+    return;
+  }
+
+  if (cmd == "SETMOTINV") {
+    const bool v = parseBoolParam(f.params);
+    persistPutBool("miv", _cfg.motInvert, v);
+    if (_cfg.motor) {
+      _cfg.motor->setPolarityInvert(v);
+    }
+    if (shouldReply) sendAck(f.master, "SETMOTINV", "1");
+    serialEventState("SETMOTINV");
     return;
   }
 

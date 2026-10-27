@@ -10,6 +10,7 @@ class HalBoard;
 class SafetyMonitor;
 class HomingController;
 class MotionController;
+class MotorMcpwm;
 class RotorStore;
 class LoadMonitor;
 class TempSensors;
@@ -130,11 +131,20 @@ struct Rs485DispatcherConfig {
   // Anzahl Endschalter: 0=keine, 1=ein Kontakt (L||R), 2=zwei Kontakte.
   uint8_t*  endstopCount = nullptr;
 
+  // Encoder-/Motor-/Endschalter-Invert (FRAM flags bit2..4)
+  bool*     encInvert = nullptr;  // Typ 1/2/3; Typ 4 → NAK ENCTYPE
+  bool*     motInvert = nullptr;  // PWM-Polaritaet (alle Typen)
+  bool*     endSwap   = nullptr;  // Endschalter L/R logisch tauschen
+  bool*     endInv    = nullptr;  // Endschalter aktiv HIGH (1) / aktiv LOW (0)
+
   // Getriebespiel (Deg01), fuer manuelle Referenz ohne Homing.
   int32_t*  backlashDeg01 = nullptr;
 
   // EncoderAxis (fuer SSI-Referenzpruefung bei ENCTYPE=3)
   EncoderAxis* encoderAxis = nullptr;
+
+  // Motor (SETMOTINV → setPolarityInvert)
+  MotorMcpwm* motor = nullptr;
 
   // Neustart-Anforderung (z.B. nach Aenderung EncoderType/EncoderCounts).
   // Wird von Rs485Dispatcher gesetzt, der eigentliche ESP.restart() erfolgt in loop().

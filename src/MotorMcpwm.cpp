@@ -434,6 +434,16 @@ void MotorMcpwm::setChannelPwmActive(bool chanAActive, float dutyAbsPercent) {
 }
 
 
+void MotorMcpwm::setPolarityInvert(bool invert) {
+  if (_polarityInvert == invert) return;
+  _polarityInvert = invert;
+  // Sofort neu anwenden, falls PWM laeuft (logisches Duty bleibt).
+  if (_ready && fabsf(_dutySigned) >= 0.001f) {
+    const float logical = _dutySigned;
+    setDutySigned(logical);
+  }
+}
+
 void MotorMcpwm::setDutySigned(float dutyPercentSigned) {
   if (!_ready) return;
 
@@ -446,15 +456,19 @@ void MotorMcpwm::setDutySigned(float dutyPercentSigned) {
   if (dutyPercentSigned > 100.0f) dutyPercentSigned = 100.0f;
   if (dutyPercentSigned < -100.0f) dutyPercentSigned = -100.0f;
 
+  // Logisches Duty fuer Safety/Homing (getLastDutySigned).
   _dutySigned = dutyPercentSigned;
 
-  float absDuty = fabsf(dutyPercentSigned);
+  // Physische H-Bruecke ggf. spiegeln (MotInvert).
+  const float physical = _polarityInvert ? -dutyPercentSigned : dutyPercentSigned;
+
+  float absDuty = fabsf(physical);
   if (absDuty < 0.001f) {
     stopPwm();
     return;
   }
 
-  if (dutyPercentSigned > 0.0f) {
+  if (physical > 0.0f) {
     setChannelPwmActive(true, absDuty);
   } else {
     setChannelPwmActive(false, absDuty);

@@ -581,6 +581,12 @@ static bool g_motorTempSensorEnabled = true;
 // Wird in Preferences gespeichert (Key: "tsw") und kann per RS485 gesetzt werden.
 static bool g_tempSwapSensors = true;
 
+// Encoder-/Motor-/Endschalter-Invert (FRAM Config.flags bit2..5; RS485 SETENCINV/SETMOTINV/SETENDSWAP/SETENDINV)
+static bool g_encInvert = false; // Typ 1/2/3; Typ 4 → SETINCINVROT
+static bool g_motInvert = false; // PWM-Polaritaet
+static bool g_endSwap   = false; // Endschalter L/R logisch tauschen
+static bool g_endInv    = false; // false=aktiv LOW, true=aktiv HIGH (SETENDINV)
+
 // Warnschwellen (GradC). <=0 deaktiviert die jeweilige Warnung.
 static float g_tempWarnAmbientC = 0.0f;
 static float g_tempWarnMotorC   = 0.0f;
@@ -932,6 +938,10 @@ static RotorStoreRefs makeStoreRefs() {
   r.antDp1 = &g_antDp1;
   r.antDp2 = &g_antDp2;
   r.antDp3 = &g_antDp3;
+  r.encInvert = &g_encInvert;
+  r.motInvert = &g_motInvert;
+  r.endSwap = &g_endSwap;
+  r.endInv = &g_endInv;
   r.endstopCount = &g_endstopCount;
   r.antName1 = &g_antName1;
   r.antName2 = &g_antName2;
@@ -1346,6 +1356,8 @@ void setup() {
   // Endschalter-Anzahl aus FRAM (0/1/2); Absolut-Default 0 kommt aus unpack ohne Flag.
   if (g_endstopCount > 2) g_endstopCount = 2;
   board.setEndstopCount(g_endstopCount);
+  board.setEndstopSwap(g_endSwap);
+  board.setEndstopActiveHigh(g_endInv);
 
   // Persistente Wind-Offsets in den Wind-Sensor uebernehmen
   // (Speed-Offset bleibt kompatibel zum alten Analogsensor: km/h)
@@ -1364,6 +1376,7 @@ void setup() {
   }
 
   motor.begin(PWM_GPIO_IN1, PWM_GPIO_IN2, ENABLE_GPIO, PWM_FREQUENCY_HZ, 10UL * 1000UL * 1000UL);
+  motor.setPolarityInvert(g_motInvert);
 
   // Fuer die IS-Auto-Kalibrierung messen wir bei PWM=0.
   // Wichtig: Wir lassen den Treiber ENABLED, weil manche Hardware den IS-Pegel
@@ -1469,6 +1482,8 @@ void setup() {
   ecfg.glitchNs = 200;
 
   ecfg.encType = g_encType;
+  // Typ 3: SSI-Mapping; Typ 1/2: setInvertDirection nach begin() fuer Getter-Negation
+  ecfg.ssiInvertDirection = g_encInvert;
 
   if (g_encType == ENCTYPE_ABSOLUTE_SSI) {
     ecfg.ssiClockPin = ENC_SSI_CLOCK_PIN;
@@ -1508,6 +1523,10 @@ void setup() {
 
   if (!encoder.begin(ecfg)) {
     if (g_debug) Serial.println("FEHLER: Encoder begin() fehlgeschlagen!");
+  }
+  // Encoder-Richtung (Typ 1/2 Counts; Typ 3 ssiInvertDirection; Typ 4 ignoriert)
+  if (g_encType != ENCTYPE_INCLINOMETER) {
+    encoder.setInvertDirection(g_encInvert);
   }
 
   // SSI-Turn aus FRAM laden (nach begin, weil begin den Turn auf 0 setzt).
@@ -1823,8 +1842,13 @@ dcfg.homeExpectedCountsRing = &g_homeExpectedCountsRing;
 dcfg.homeExpectedCountsMotor = &g_homeExpectedCountsMotor;
 dcfg.encTypeU8 = (uint8_t*)&g_encType; // Enum basiert auf uint8_t
 dcfg.endstopCount = &g_endstopCount;
+dcfg.encInvert = &g_encInvert;
+dcfg.motInvert = &g_motInvert;
+dcfg.endSwap = &g_endSwap;
+dcfg.endInv = &g_endInv;
 dcfg.backlashDeg01 = &g_backlashDeg01;
 dcfg.encoderAxis = &encoder;
+dcfg.motor = &motor;
 
 // Neustart-Flags (werden von Rs485Dispatcher gesetzt)
 dcfg.restartRequested = &g_restartRequested;
